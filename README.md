@@ -2,7 +2,7 @@
 
 An AI-controlled companion that appears and behaves as a complete second player inside a host's [Big Walk](https://store.steampowered.com/app/1478500/) session — walking beside you, talking with you, and helping solve the game's co-op puzzles.
 
-**Status: platform feasibility is runtime-proven.** A host mod can spawn a fully registered, connectionless second player. Current work is the control and cognition stack on top of that body.
+**Status: body creation and basic locomotion are runtime-proven.** A host mod can spawn a fully registered, connectionless second player and drive it through Big Walk's stock remote-player motor without taking locality from the human. Current work is navigation and the rest of the control/cognition stack.
 
 ## Hard constraints
 
@@ -12,19 +12,20 @@ An AI-controlled companion that appears and behaves as a complete second player 
 
 ## What is proven (runtime-confirmed)
 
-On Big Walk `1.4.8 2608070648` (Steam build `24611934`, Unity `6000.3.17f1`, IL2CPP) with BepInEx IL2CPP `6.0.0-be.755`, probe `0.2.0` demonstrated:
+On Big Walk `1.4.8 2608070648` (Steam build `24611934`, Unity `6000.3.17f1`, IL2CPP) with BepInEx IL2CPP `6.0.0-be.755`, probes `0.2.0` and `0.3.2` demonstrated:
 
 - The host can clone the real player prefab and spawn it via `NetworkServer.Spawn` with **no client connection** (`connectionToClient=null`, valid `netId`).
 - The synthetic player registers in `PlayerCharacter.allPlayerCharacters` (count = 2) and follows the normal **remote-player** code path (`isLocalPlayer=false`); the host camera and input stay on the human.
 - Server transform ownership works (`serverOwnsTransform=true`) via a bot-only Harmony postfix on `HouseNetworkTransform.isOwned`.
 - Connection-dependent init (`PlayerNetworking.Start`) is cleanly bypassed for the bot with a bot-only Harmony prefix.
 - A separate **Dissonance voice identity** (`NitrogenHostBot`) can be assigned and is tracked.
+- The host can drive the connectionless bot through the stock remote-player physics motor. In the bounded `0.3.2` test, the bot autonomously reached a point `1.5 m` from its start in `2.33 s`, stopped within the `0.65 m` tolerance, needed no recovery, remained non-local, and left the human as the local player.
 
 Raw logs, probe hashes, and the full evidence-boundary table are archived in [docs/archive/HOST_MOD_FEASIBILITY.md](docs/archive/HOST_MOD_FEASIBILITY.md). The experiment log continues in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md).
 
 ## What is not yet proven
 
-- Autonomous walking/looking under server control (next milestone).
+- General point selection, obstacle avoidance, and looking under server control. A short unobstructed autonomous walk is proven; world navigation is not.
 - Object and puzzle interactions at runtime (static paths identified).
 - Audible synthetic speech (local 3D audio designed, not implemented).
 - Bot speech heard by unmodified remote guests (Dissonance packet injection — deferred, hardest, optional).
@@ -33,7 +34,7 @@ Raw logs, probe hashes, and the full evidence-boundary table are archived in [do
 
 These shape the whole design (recovered C# lives in `.analysis/cpp2il-cs/`):
 
-- **Movement input is just a vector.** Movement flows through `PlayerNetworking.controlsVelocity` (`Vector3` SyncVar, `CmdSetControlsVelocity`), and `PlayerMover` has `applyVelocityForRemotePlayers` — remote bodies already animate from a supplied velocity. The bot's motor interface is "write a Vector3 each tick."
+- **Movement input is a vector, with one connectionless-player gate.** Runtime confirms that writing `PlayerNetworking.controlsVelocity` and enabling `PlayerMover.applyVelocityForRemotePlayers` drives the bot after a bot-only override of `HouseNetworkTransform.IsRestingForPlayerMovement`. The override is needed because a connectionless body has no client interpolation goal and would otherwise be treated as permanently resting.
 - **Interactions are a discrete verb list.** `PlayerActions` exposes `ActionPickUpProp`, `ActionUseWorldSwitch`, `ActionEnterPose`, `ActionPlaceInHome`, gestures, etc. The bot must use server-side action paths, not the client `Cmd*` wrappers (those assume client authority/transport).
 - **No navmesh exists.** Nothing in `Assembly-CSharp` references `NavMesh`/pathfinding. Navigation must come from the mod (see Layer 1 below).
 - **World layout comes from the save's player count** (`PlayerCountSwapper.playerCount`), not live connection count — a two-player world with one human + one bot is a supported world state.
@@ -92,7 +93,7 @@ The observation feed stays compact structured JSON (< ~1k tokens: positions, wha
 
 Bounded, runtime-verifiable experiments, each logged in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md):
 
-1. **Walk-to-point** — bot walks to a host-selected point via `controlsVelocity` under server control; stops within tolerance; recovers from a blocked route without teleporting; host camera/input untouched. *(next up; success criteria in the archived doc)*
+1. **Walk-to-point** — motor slice complete: the bot autonomously completed a bounded `1.5 m` traverse via `controlsVelocity`, stopped within tolerance, and left host locality untouched. Next, select reachable points and verify blocked-route recovery without teleporting.
 2. **Breadcrumb follow** — bot follows the human's recorded trail across varied terrain; stuck detection and recovery.
 3. **First interaction** — walk to a `PeckSwitch` and use it via the server-side action path.
 4. **Cognition loop** — GPT Realtime 2.1 session with three tools (`say`, `goto_player`, `use_switch`) driven by game events; text observations only.
@@ -109,9 +110,9 @@ docs/
   archive/
     HOST_MOD_FEASIBILITY.md← original feasibility record: raw probe logs, hashes, evidence tables
 probe/
-  BigWalkBotProbe.cs       ← active probe source (v0.3.1 autonomous walking, runtime pending)
+  BigWalkBotProbe.cs       ← active probe source (v0.3.2 bounded autonomous walking)
   build/compile.rsp        ← Roslyn response file to rebuild the probe DLL
-  build/BigWalkBotProbe.dll ← active v0.3.1 build; verified v0.2.0 is preserved by Git tag
+  build/BigWalkBotProbe.dll ← active v0.3.2 build; older runtime probes are preserved locally as disabled copies
 .analysis/                 ← Cpp2IL output: recovered C# (cpp2il-cs/DiffableCs), dummy DLLs, ISIL, IL
 analysis_scripts/
   dump_recovered_il.py     ← IL dump helper

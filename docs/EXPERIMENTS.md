@@ -52,3 +52,24 @@ Make the bot walk to a host-selected point while remaining a remote player. Succ
 - **Cause isolated:** recovered `PlayerMover.FixedUpdate` zeros remote movement when `HouseNetworkTransform.IsRestingForPlayerMovement` is true. That getter reports true when the transform has no valid client interpolation goal, which is the connectionless bot's state.
 - **Follow-up build:** probe `0.3.1` adds a bot-only Harmony postfix that reports `IsRestingForPlayerMovement=False`; stock behavior remains unchanged for the human and real remote players. Runtime result pending.
 - **Follow-up artifact:** compilation succeeded. DLL SHA-256: `0ED8469C758E14FDD4340AEB6D68CF1CEF3E6894B5AC45F7A8A5972271561273`. It is not yet deployed because `0.3.0` remains loaded in the open test process.
+
+---
+
+## 2026-08-16: autonomous walk-to-point probe 0.3.1 — motor unlocked, long goal not reached
+
+- **Hypothesis:** overriding `HouseNetworkTransform.IsRestingForPlayerMovement` only for the connectionless bot will allow the existing remote-player motor to consume the replicated movement intent.
+- **Setup:** Big Walk `1.4.8 2608070648`; BepInEx IL2CPP build 755; two-player `BotProbe` host save; probe `0.3.1`; one Big Walk process; automatic goal `6.32 m` from the bot in the enclosed staging room.
+- **Observed:** verification reported `movementResting=False`, `remoteMotorEnabled=True`, `isLocalPlayer=False`, and registry count `2`. The bot moved from `(-240.98, 37.01, -483.17)` to approximately `(-243.11, 37.01, -482.41)` with nonzero rigidbody velocity while requested and replicated movement intents matched. The human remained local. Progress stopped with `4.07 m` remaining; four bounded detours did not clear the stall, and the probe failed closed.
+- **Result:** the motor hypothesis was confirmed: the connectionless remote body moved through stock player physics. The six-metre arrival hypothesis was not confirmed. The stall in the staging room is consistent with nearby collision geometry, but this run did not instrument contacts and therefore does not prove that cause.
+- **Cleanup:** Big Walk was closed. The `0.3.1` DLL/PDB were preserved as versioned `.disabled` archives before the next build was deployed. No stock game files were rewritten.
+
+---
+
+## 2026-08-16: autonomous walk-to-point probe 0.3.2 — bounded local traverse passed
+
+- **Hypothesis:** now that the motor is live, a deliberately local unobstructed target can prove autonomous start, steering, slowdown, arrival, and stop separately from navigation.
+- **Setup:** same game, BepInEx, two-player save, and single-process host configuration; probe `0.3.2`; target defined as `botStart + hostForward * 1.5 m`; arrival tolerance `0.65 m`.
+- **Observed:** the bot spawned as `netId=580`, `connectionToClient=null`, `isLocalPlayer=False`, `serverOwnsTransform=True`, `movementResting=False`, and registry count `2`. It began at `(-240.98, 37.01, -483.17)`, produced matched requested/network movement intents and nonzero rigidbody velocity, slowed as distance fell, and emitted `ARRIVED` at `(-241.62, 37.01, -482.61)`. Final target distance was `0.64 m`; elapsed time was `2.33 s`; recoveries were `0`; `botIsLocalPlayer=False`; `hostStillLocal=True`.
+- **Result:** hypothesis confirmed for a bounded local autonomous traverse through the stock remote-player motor. This does not establish general path planning, obstacle avoidance, terrain traversal, or animation coherence for remote guests.
+- **Build:** compilation succeeded. DLL SHA-256: `B47D70879EDBF07629522FBF9DBA6CA4BA804819B19C5A1E53E70C7D9609D866`.
+- **Cleanup/deployment:** Big Walk was closed and the active `0.3.2` DLL/PDB were renamed to `BigWalkBotProbe.dll.disabled` / `BigWalkBotProbe.pdb.disabled`. Versioned disabled archives of `0.2.0`, `0.3.0`, and `0.3.1` remain beside them. No probe is loadable and no stock game files were rewritten.

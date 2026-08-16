@@ -16,7 +16,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string Guid = "local.bigwalk.botprobe";
     public const string Name = "Big Walk Bot Feasibility Probe";
-    public const string Version = "0.3.1";
+    public const string Version = "0.3.2";
 
     internal static ManualLogSource Logger = null;
 
@@ -102,7 +102,10 @@ internal static class HouseNetworkTransformIsRestingPatch
 
 internal sealed class ProbeRunner : MonoBehaviour
 {
-    private const float AutomaticGoalDistance = 6f;
+    // This first locomotion experiment is deliberately a short local traverse,
+    // not a navigation claim. The staging room only has about two metres of
+    // clearance along the host's initial facing direction.
+    private const float AutomaticGoalDistance = 1.5f;
     private const float WalkStartDelay = 4f;
     private const float ArrivalTolerance = 0.65f;
     private const float SlowdownDistance = 1.75f;
@@ -360,10 +363,10 @@ internal sealed class ProbeRunner : MonoBehaviour
         else
             forward.Normalize();
 
-        _walkGoal = human.transform.position + forward * AutomaticGoalDistance;
-        _walkGoal.y = _bot.transform.position.y;
-
         var start = _bot.transform.position;
+        _walkGoal = start + forward * AutomaticGoalDistance;
+        _walkGoal.y = start.y;
+
         var startDelta = _walkGoal - start;
         startDelta.y = 0f;
 
@@ -376,7 +379,7 @@ internal sealed class ProbeRunner : MonoBehaviour
         Plugin.Logger.LogInfo(
             "[BOT-WALK] START " +
             $"start={start}, goal={_walkGoal}, distance={_bestDistance:F2}, " +
-            $"goalRule=hostForward*{AutomaticGoalDistance:F1}m, " +
+            $"goalRule=botStart+hostForward*{AutomaticGoalDistance:F1}m, " +
             $"applyVelocityForRemotePlayers={_botCharacter.mover.applyVelocityForRemotePlayers}, " +
             $"isServer={_botNetworking.isServer}, isLocalPlayer={_botNetworking.isLocalPlayer}.");
     }
