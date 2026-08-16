@@ -21,4 +21,5 @@
 /reference:"C:\Program Files (x86)\Steam\steamapps\common\Big Walk\BepInEx\interop\DissonanceVoip.dll"
 /reference:"C:\Program Files (x86)\Steam\steamapps\common\Big Walk\BepInEx\interop\Il2Cppmscorlib.dll"
 /reference:"C:\Program Files (x86)\Steam\steamapps\common\Big Walk\BepInEx\interop\UnityEngine.CoreModule.dll"
+/reference:"C:\Program Files (x86)\Steam\steamapps\common\Big Walk\BepInEx\interop\UnityEngine.PhysicsModule.dll"
 "C:\Users\benja\Documents\ChatGPT\Big Walk\probe\BigWalkBotProbe.cs"

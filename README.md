@@ -109,16 +109,16 @@ docs/
   archive/
     HOST_MOD_FEASIBILITY.md← original feasibility record: raw probe logs, hashes, evidence tables
 probe/
-  BigWalkBotProbe.cs       ← spawn probe source (v0.2.0, runtime-verified)
+  BigWalkBotProbe.cs       ← active probe source (v0.3.0 autonomous walking, runtime pending)
   build/compile.rsp        ← Roslyn response file to rebuild the probe DLL
-  build/BigWalkBotProbe.dll
+  build/BigWalkBotProbe.dll ← active v0.3.0 build; verified v0.2.0 is preserved by Git tag
 .analysis/                 ← Cpp2IL output: recovered C# (cpp2il-cs/DiffableCs), dummy DLLs, ISIL, IL
 analysis_scripts/
   dump_recovered_il.py     ← IL dump helper
 .tools/                    ← Cpp2IL, BepInEx 6.0.755 package, Roslyn 4.14.0, python packages
 ```
 
-Deployment state: BepInEx lives in the Big Walk install directory; the deployed probe is renamed `*.disabled` so it does not auto-load. Re-enable by restoring the `.dll` extension.
+Deployment state: BepInEx lives in the Big Walk install directory; deployed probes are renamed `*.disabled` when not under an explicit runtime test so they do not auto-load. Re-enable the active probe by restoring its `.dll` extension.
 
 ## Working conventions
 
