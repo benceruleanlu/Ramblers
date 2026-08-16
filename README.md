@@ -2,7 +2,7 @@
 
 An AI-controlled companion that appears and behaves as a complete second player inside a host's [Big Walk](https://store.steampowered.com/app/1478500/) session — walking beside you, talking with you, and helping solve the game's co-op puzzles.
 
-**Status: body creation and basic locomotion are runtime-proven.** A host mod can spawn a fully registered, connectionless second player and drive it through Big Walk's stock remote-player motor without taking locality from the human. Current work is navigation and the rest of the control/cognition stack.
+**Status: body creation, locomotion, and a bounded local-navigation slice are runtime-proven.** A host mod can spawn a fully registered, connectionless second player, follow a short human breadcrumb trail, and steer around one local obstacle through Big Walk's stock remote-player motor without taking locality from the human. General navigation and the rest of the control/cognition stack remain in progress.
 
 ## Hard constraints
 
@@ -12,7 +12,7 @@ An AI-controlled companion that appears and behaves as a complete second player 
 
 ## What is proven (runtime-confirmed)
 
-On Big Walk `1.4.8 2608070648` (Steam build `24611934`, Unity `6000.3.17f1`, IL2CPP) with BepInEx IL2CPP `6.0.0-be.755`, probes `0.2.0` and `0.3.2` demonstrated:
+On Big Walk `1.4.8 2608070648` (Steam build `24611934`, Unity `6000.3.17f1`, IL2CPP) with BepInEx IL2CPP `6.0.0-be.755`, probes `0.2.0`, `0.3.2`, and `0.4.0` demonstrated:
 
 - The host can clone the real player prefab and spawn it via `NetworkServer.Spawn` with **no client connection** (`connectionToClient=null`, valid `netId`).
 - The synthetic player registers in `PlayerCharacter.allPlayerCharacters` (count = 2) and follows the normal **remote-player** code path (`isLocalPlayer=false`); the host camera and input stay on the human.
@@ -20,12 +20,14 @@ On Big Walk `1.4.8 2608070648` (Steam build `24611934`, Unity `6000.3.17f1`, IL2
 - Connection-dependent init (`PlayerNetworking.Start`) is cleanly bypassed for the bot with a bot-only Harmony prefix.
 - A separate **Dissonance voice identity** (`NitrogenHostBot`) can be assigned and is tracked.
 - The host can drive the connectionless bot through the stock remote-player physics motor. In the bounded `0.3.2` test, the bot autonomously reached a point `1.5 m` from its start in `2.33 s`, stopped within the `0.65 m` tolerance, needed no recovery, remained non-local, and left the human as the local player.
+- The bot can record a short human breadcrumb trail at 10 Hz, follow it while maintaining a `2.25 m` separation, detect an obstacle with the real player rigidbody sweep, select a clear alternate heading, and stop at the follow distance. In the bounded `0.4.0` diagnostic it chose a `50°` bypass and reached the hold state while the obstacle was still present.
 
 Raw logs, probe hashes, and the full evidence-boundary table are archived in [docs/archive/HOST_MOD_FEASIBILITY.md](docs/archive/HOST_MOD_FEASIBILITY.md). The experiment log continues in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md).
 
 ## What is not yet proven
 
-- General point selection, obstacle avoidance, and looking under server control. A short unobstructed autonomous walk is proven; world navigation is not.
+- General point selection, varied-terrain traversal, dynamic-obstacle behavior, and looking under server control. One artificial local obstacle bypass is proven; general world navigation is not.
+- Stuck recovery. The probe can identify commanded movement with negligible displacement and log `POSSIBLY_STUCK`, but deliberately does not recover, jump, or teleport yet.
 - Object and puzzle interactions at runtime (static paths identified).
 - Audible synthetic speech (local 3D audio designed, not implemented).
 - Bot speech heard by unmodified remote guests (Dissonance packet injection — deferred, hardest, optional).
@@ -93,8 +95,8 @@ The observation feed stays compact structured JSON (< ~1k tokens: positions, wha
 
 Bounded, runtime-verifiable experiments, each logged in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md):
 
-1. **Walk-to-point** — motor slice complete: the bot autonomously completed a bounded `1.5 m` traverse via `controlsVelocity`, stopped within tolerance, and left host locality untouched. Next, select reachable points and verify blocked-route recovery without teleporting.
-2. **Breadcrumb follow** — bot follows the human's recorded trail across varied terrain; stuck detection and recovery.
+1. **Walk-to-point** — motor slice complete: the bot autonomously completed a bounded `1.5 m` traverse via `controlsVelocity`, stopped within tolerance, and left host locality untouched. Reachable-point selection remains.
+2. **Breadcrumb follow** — bounded slice complete: the bot recorded and followed a short trail, used local rigidbody sweeps to steer around one obstacle, and maintained follow distance. Varied terrain, dynamic obstacles, and stuck recovery remain.
 3. **First interaction** — walk to a `PeckSwitch` and use it via the server-side action path.
 4. **Cognition loop** — GPT Realtime 2.1 session with three tools (`say`, `goto_player`, `use_switch`) driven by game events; text observations only.
 5. **Voice round-trip** — host mic → model → bot 3D audio + `PlayerLips` sync (host-only audible speech).
@@ -110,9 +112,9 @@ docs/
   archive/
     HOST_MOD_FEASIBILITY.md← original feasibility record: raw probe logs, hashes, evidence tables
 probe/
-  BigWalkBotProbe.cs       ← active probe source (v0.3.2 bounded autonomous walking)
+  BigWalkBotProbe.cs       ← active probe source (v0.4.0 breadcrumb follow and local obstacle avoidance)
   build/compile.rsp        ← Roslyn response file to rebuild the probe DLL
-  build/BigWalkBotProbe.dll ← active v0.3.2 build; older runtime probes are preserved locally as disabled copies
+  build/BigWalkBotProbe.dll ← runtime-verified v0.4.0 build; deployed probes are preserved locally as disabled copies
 .analysis/                 ← Cpp2IL output: recovered C# (cpp2il-cs/DiffableCs), dummy DLLs, ISIL, IL
 analysis_scripts/
   dump_recovered_il.py     ← IL dump helper
