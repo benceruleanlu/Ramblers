@@ -109,9 +109,9 @@ docs/
   archive/
     HOST_MOD_FEASIBILITY.md← original feasibility record: raw probe logs, hashes, evidence tables
 probe/
-  BigWalkBotProbe.cs       ← active probe source (v0.3.0 autonomous walking, runtime pending)
+  BigWalkBotProbe.cs       ← active probe source (v0.3.1 autonomous walking, runtime pending)
   build/compile.rsp        ← Roslyn response file to rebuild the probe DLL
-  build/BigWalkBotProbe.dll ← active v0.3.0 build; verified v0.2.0 is preserved by Git tag
+  build/BigWalkBotProbe.dll ← active v0.3.1 build; verified v0.2.0 is preserved by Git tag
 .analysis/                 ← Cpp2IL output: recovered C# (cpp2il-cs/DiffableCs), dummy DLLs, ISIL, IL
 analysis_scripts/
   dump_recovered_il.py     ← IL dump helper

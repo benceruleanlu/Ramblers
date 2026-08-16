@@ -16,7 +16,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string Guid = "local.bigwalk.botprobe";
     public const string Name = "Big Walk Bot Feasibility Probe";
-    public const string Version = "0.3.0";
+    public const string Version = "0.3.1";
 
     internal static ManualLogSource Logger = null;
 
@@ -28,6 +28,7 @@ public sealed class Plugin : BasePlugin
         var harmony = new Harmony(Guid);
         harmony.PatchAll(typeof(PlayerNetworkingStartPatch));
         harmony.PatchAll(typeof(HouseNetworkTransformIsOwnedPatch));
+        harmony.PatchAll(typeof(HouseNetworkTransformIsRestingPatch));
 
         AddComponent<ProbeRunner>();
         Logger.LogInfo(
@@ -77,6 +78,25 @@ internal static class HouseNetworkTransformIsOwnedPatch
         var networking = __instance.GetComponent<PlayerNetworking>();
         if (ProbeIdentity.IsBot(networking))
             __result = true;
+    }
+}
+
+[HarmonyPatch(typeof(HouseNetworkTransform), "get_IsRestingForPlayerMovement")]
+internal static class HouseNetworkTransformIsRestingPatch
+{
+    private static void Postfix(HouseNetworkTransform __instance, ref bool __result)
+    {
+        if (!__result || __instance == null)
+            return;
+
+        // A connectionless player never receives the normal client interpolation
+        // goal, so the stock getter reports it as permanently resting and
+        // PlayerMover zeros the otherwise valid controlsVelocity. The bot is
+        // server-owned and driven directly by the host, so that remote-only gate
+        // does not apply.
+        var networking = __instance.GetComponent<PlayerNetworking>();
+        if (ProbeIdentity.IsBot(networking))
+            __result = false;
     }
 }
 
@@ -521,6 +541,7 @@ internal sealed class ProbeRunner : MonoBehaviour
             $"voicePlayerId={voiceIdentity?.PlayerId ?? "<none>"}, " +
             $"voiceTracking={voiceIdentity?.IsTracking}, " +
             $"remoteMotorEnabled={playerCharacter?.mover?.applyVelocityForRemotePlayers}, " +
+            $"movementResting={networkTransform?.IsRestingForPlayerMovement}, " +
             $"playerCharacterPresent={playerCharacter != null}.");
     }
 }
