@@ -1,0 +1,22 @@
+# Generated reverse-engineering output (large and reproducible from the game build)
+/.analysis/
+
+# Downloaded compilers, packages, and analysis tools
+/.tools/
+
+# Machine-local editor settings
+/.vscode/
+
+# Local runtime and diagnostic output
+*.log
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Temporary and operating-system files
+*.tmp
+*.bak
+Thumbs.db
+Desktop.ini
+.DS_Store

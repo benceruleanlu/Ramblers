@@ -1,0 +1,127 @@
+# Big Walk AI Teammate
+
+An AI-controlled companion that appears and behaves as a complete second player inside a host's [Big Walk](https://store.steampowered.com/app/1478500/) session — walking beside you, talking with you, and helping solve the game's co-op puzzles.
+
+**Status: platform feasibility is runtime-proven.** A host mod can spawn a fully registered, connectionless second player. Current work is the control and cognition stack on top of that body.
+
+## Hard constraints
+
+1. **Host mod only.** No secondary Big Walk client or process, ever.
+2. **No persistent modification of the game.** BepInEx loads beside the game; all behavior changes are mod-owned, in-memory Harmony hooks. Removing the mod restores stock behavior on next launch. The executable, IL2CPP binary, metadata, assets, and save format are never rewritten.
+3. **Evidence discipline.** Runtime-confirmed facts, static-analysis findings, and untested design are never conflated. See [Working conventions](#working-conventions).
+
+## What is proven (runtime-confirmed)
+
+On Big Walk `1.4.8 2608070648` (Steam build `24611934`, Unity `6000.3.17f1`, IL2CPP) with BepInEx IL2CPP `6.0.0-be.755`, probe `0.2.0` demonstrated:
+
+- The host can clone the real player prefab and spawn it via `NetworkServer.Spawn` with **no client connection** (`connectionToClient=null`, valid `netId`).
+- The synthetic player registers in `PlayerCharacter.allPlayerCharacters` (count = 2) and follows the normal **remote-player** code path (`isLocalPlayer=false`); the host camera and input stay on the human.
+- Server transform ownership works (`serverOwnsTransform=true`) via a bot-only Harmony postfix on `HouseNetworkTransform.isOwned`.
+- Connection-dependent init (`PlayerNetworking.Start`) is cleanly bypassed for the bot with a bot-only Harmony prefix.
+- A separate **Dissonance voice identity** (`NitrogenHostBot`) can be assigned and is tracked.
+
+Raw logs, probe hashes, and the full evidence-boundary table are archived in [docs/archive/HOST_MOD_FEASIBILITY.md](docs/archive/HOST_MOD_FEASIBILITY.md). The experiment log continues in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md).
+
+## What is not yet proven
+
+- Autonomous walking/looking under server control (next milestone).
+- Object and puzzle interactions at runtime (static paths identified).
+- Audible synthetic speech (local 3D audio designed, not implemented).
+- Bot speech heard by unmodified remote guests (Dissonance packet injection — deferred, hardest, optional).
+
+## Key findings from the decompiled game
+
+These shape the whole design (recovered C# lives in `.analysis/cpp2il-cs/`):
+
+- **Movement input is just a vector.** Movement flows through `PlayerNetworking.controlsVelocity` (`Vector3` SyncVar, `CmdSetControlsVelocity`), and `PlayerMover` has `applyVelocityForRemotePlayers` — remote bodies already animate from a supplied velocity. The bot's motor interface is "write a Vector3 each tick."
+- **Interactions are a discrete verb list.** `PlayerActions` exposes `ActionPickUpProp`, `ActionUseWorldSwitch`, `ActionEnterPose`, `ActionPlaceInHome`, gestures, etc. The bot must use server-side action paths, not the client `Cmd*` wrappers (those assume client authority/transport).
+- **No navmesh exists.** Nothing in `Assembly-CSharp` references `NavMesh`/pathfinding. Navigation must come from the mod (see Layer 1 below).
+- **World layout comes from the save's player count** (`PlayerCountSwapper.playerCount`), not live connection count — a two-player world with one human + one bot is a supported world state.
+- Gameplay systems (train, teleporter, text input, menus…) enumerate `PlayerCharacter.allPlayerCharacters`, so the bot is visible to them. Individual puzzles still need integration tests.
+
+## Architecture
+
+The central insight: **no model needs to be trained, and no model needs "motor skills."** Because the mod runs inside the process with server authority, perception is reading the scene graph (not vision) and motor control is writing a velocity vector (not learned control). The only hard 3D problem left — navigation — is classical algorithms. The AI model only does what models are already good at: conversation, social behavior, and choosing which verb to invoke.
+
+```
+Layer 4  VOICE            GPT Realtime 2.1: native audio in/out, lip sync via PlayerLips
+Layer 3  COGNITION        same model, event-driven: goals, dialogue, tool calls
+                          in: mic audio + compact JSON observations + screenshots
+                          out: speech + tool calls from the verb vocabulary
+              │
+Layer 2  SKILLS           deterministic FSM/behavior tree (~10 Hz)
+                          goto(x) · follow(player) · pickup(prop) · use_switch(s)
+                          · pose · point_at · say(text) · stop
+                          each reports success/failure upward
+              │
+Layer 1  NAVIGATION       classical (~10 Hz): path planning, local steering, stuck recovery
+                          a) breadcrumb-follow the human's trail (MVP — humans prove traversability)
+                          b) persistent "experience graph" of walked terrain + A* for independent goals
+                          c) probe Unity NavMesh runtime API (likely IL2CPP-stripped; raycast grid fallback)
+              │
+Layer 0  MOTOR            50 Hz FixedUpdate: write controlsVelocity, look-at, jump, animation state
+```
+
+Frame-level control never touches the model. The model is invoked event-driven (player spoke, skill finished/failed, salient object in range, periodic heartbeat), acting through tools.
+
+### Model layer: GPT Realtime 2.1
+
+[gpt-realtime-2.1](https://developers.openai.com/api/docs/models/gpt-realtime-2.1) is the working choice for Layers 3–4 — a single speech-to-speech model that collapses STT → LLM → TTS into one low-latency loop, which is exactly the companion use case.
+
+Why it fits:
+
+- **Native audio in/out** — conversational latency without a pipeline; interruption handling and turn detection built in.
+- **Function calling, including mid-conversation and async** — our skill verbs become its tools; it can keep talking while a `goto` executes, and the API provides placeholder language while a tool is pending.
+- **Native image input** — we can feed screenshots (e.g., the bot's POV) for scenery commentary and visual puzzle context, on demand rather than continuously.
+- **Configurable reasoning effort** — dial up for puzzle moments, down for banter.
+- **128k context, sessions up to 60 min**, automatic context truncation with a tunable retention ratio (set ~0.8 to preserve prompt-cache efficiency).
+
+Known constraints and how we absorb them:
+
+| Constraint | Mitigation |
+| --- | --- |
+| 60-minute session cap | Session hand-off: summarize state/memory, re-open session with the summary in instructions |
+| Audio pricing ($32/1M in, $64/1M out; cached input ~$0.4/1M) — real conversation costs tens of cents per active minute | Aggressive prompt caching; mute/idle detection so silence isn't streamed; [gpt-realtime-2.1-mini](https://developers.openai.com/api/docs/models/gpt-realtime-2.1-mini) as the default tier if quality allows |
+| Optimized for speech, not deep reasoning | Give it an `ask_brain` tool that consults a stronger text model for hard puzzles and returns advice into the conversation |
+| Instructions + tools token budget is capped; temperature control removed | Keep the system prompt and tool schemas compact; steer style via prompting |
+| `v1/realtime` endpoint only (WebRTC/WebSocket/SIP) | The mod owns a persistent WebSocket client; nothing else needed |
+
+The observation feed stays compact structured JSON (< ~1k tokens: positions, what the human holds/points at, nearby named interactables, active goal, recent events) injected as conversation items — screenshots are a supplement, not the primary sense.
+
+## Roadmap
+
+Bounded, runtime-verifiable experiments, each logged in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md):
+
+1. **Walk-to-point** — bot walks to a host-selected point via `controlsVelocity` under server control; stops within tolerance; recovers from a blocked route without teleporting; host camera/input untouched. *(next up; success criteria in the archived doc)*
+2. **Breadcrumb follow** — bot follows the human's recorded trail across varied terrain; stuck detection and recovery.
+3. **First interaction** — walk to a `PeckSwitch` and use it via the server-side action path.
+4. **Cognition loop** — GPT Realtime 2.1 session with three tools (`say`, `goto_player`, `use_switch`) driven by game events; text observations only.
+5. **Voice round-trip** — host mic → model → bot 3D audio + `PlayerLips` sync (host-only audible speech).
+6. **Screenshots + puzzle assist** — image input from bot POV; `ask_brain` escalation.
+7. **(Optional, hard)** Distinct bot voice for unmodified remote guests via Dissonance packet injection.
+
+## Repository map
+
+```
+README.md                  ← this hub
+docs/
+  EXPERIMENTS.md           ← running experiment log (append-only)
+  archive/
+    HOST_MOD_FEASIBILITY.md← original feasibility record: raw probe logs, hashes, evidence tables
+probe/
+  BigWalkBotProbe.cs       ← spawn probe source (v0.2.0, runtime-verified)
+  build/compile.rsp        ← Roslyn response file to rebuild the probe DLL
+  build/BigWalkBotProbe.dll
+.analysis/                 ← Cpp2IL output: recovered C# (cpp2il-cs/DiffableCs), dummy DLLs, ISIL, IL
+analysis_scripts/
+  dump_recovered_il.py     ← IL dump helper
+.tools/                    ← Cpp2IL, BepInEx 6.0.755 package, Roslyn 4.14.0, python packages
+```
+
+Deployment state: BepInEx lives in the Big Walk install directory; the deployed probe is renamed `*.disabled` so it does not auto-load. Re-enable by restoring the `.dll` extension.
+
+## Working conventions
+
+- **Never silently promote** static-analysis conclusions or design intentions into runtime-confirmed facts. The three tiers (runtime-confirmed / static finding / untested design) are labeled everywhere.
+- **Every experiment gets a log entry** in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md): date + versions, hypothesis, exact setup, observed result, confirm/falsify/unresolved, artifacts and their deployment state.
+- **Everything reversible.** Deployed artifacts are disabled (renamed), not deleted; stock game files are never rewritten.
