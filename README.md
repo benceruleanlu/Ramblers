@@ -11,8 +11,9 @@ Runtime tests have confirmed that the mod can:
 - Drive the bot through Big Walk's stock remote-player motor.
 - Follow a short human breadcrumb trail and steer around one bounded obstacle.
 - Send game-microphone audio to OpenAI Realtime and execute allowlisted `follow` and `stay` tool calls on Unity's main thread.
+- Use Big Walk's toggle-to-talk state near the bot to split consecutive utterances into bounded agent turns without a separate mod keybind.
 
-This is still a bounded prototype. General navigation, stuck recovery, puzzle interactions, synthetic voice output, and voice heard by remote guests are not implemented. The native Big Walk voice-control and proximity adapter is still undergoing runtime validation.
+This is still a bounded prototype. General navigation, stuck recovery, puzzle interactions, synthetic voice output, and voice heard by remote guests are not implemented. Toggle-off suppression, out-of-range rejection, noise robustness, and radio routing remain runtime-unverified.
 
 ## Constraints
 
@@ -43,6 +44,7 @@ The Realtime integration reads `OPENAI_API_KEY` from the process or current Wind
 - [`probe/BigWalkBotProbe.cs`](probe/BigWalkBotProbe.cs) — spawn, authority, motor control, and breadcrumb following.
 - [`probe/OpenAIRealtimeBridge.cs`](probe/OpenAIRealtimeBridge.cs) — microphone, Realtime session, voice gating, and tool-call boundary.
 - [`probe/build/compile.rsp`](probe/build/compile.rsp) — compiler inputs and game references.
+- [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md) — active runtime evidence after the archived probe history.
 - [`docs/archive/PROBE_HISTORY_0.2.0-0.5.2.md`](docs/archive/PROBE_HISTORY_0.2.0-0.5.2.md) — detailed experiment history.
 - [`docs/archive/HOST_MOD_FEASIBILITY.md`](docs/archive/HOST_MOD_FEASIBILITY.md) — original feasibility evidence and recovered-game findings.
 
@@ -54,4 +56,4 @@ The Realtime integration reads `OPENAI_API_KEY` from the process or current Wind
 
 ## Next milestone
 
-Runtime-verify the native Big Walk voice turn boundary and direct-proximity gate. Work beyond that is intentionally not committed as a roadmap.
+Runtime-verify toggle-off suppression and out-of-range rejection before adding radio or synthetic speech output. Work beyond that is intentionally not committed as a roadmap.

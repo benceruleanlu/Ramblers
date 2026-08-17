@@ -17,10 +17,13 @@ public sealed class Plugin : BasePlugin
 {
     public const string Guid = "local.bigwalk.botprobe";
     public const string Name = "Big Walk Bot Feasibility Probe";
-    public const string Version = "0.4.0";
+    public const string Version = "0.5.4";
 
     internal static ManualLogSource Logger = null;
     internal static ConfigEntry<bool> AutomatedLeaderWalk = null;
+    internal static ConfigEntry<bool> StartFollowingAutomatically = null;
+    internal static ConfigEntry<bool> EnableRealtimeAgent = null;
+    internal static ConfigEntry<string> OpenAIRealtimeModel = null;
 
     public override void Load()
     {
@@ -31,7 +34,25 @@ public sealed class Plugin : BasePlugin
             false,
             "Move the host through one short physics-driven test path and place a temporary obstacle. " +
             "Diagnostic only; keep false for normal play.");
+        StartFollowingAutomatically = Config.Bind(
+            "Testing",
+            "StartFollowingAutomatically",
+            false,
+            "Start breadcrumb following after spawn without an agent tool call. " +
+            "Diagnostic only; keep false when testing OpenAI tool selection.");
+        EnableRealtimeAgent = Config.Bind(
+            "OpenAI",
+            "Enabled",
+            true,
+            "Connect to the OpenAI Realtime API when OPENAI_API_KEY is present. " +
+            "Listening follows Big Walk's voice controls and direct-voice audibility.");
+        OpenAIRealtimeModel = Config.Bind(
+            "OpenAI",
+            "Model",
+            "gpt-realtime-2.1",
+            "Realtime model ID. Keep the documented default unless deliberately testing another model.");
         ClassInjector.RegisterTypeInIl2Cpp<ProbeRunner>();
+        ClassInjector.RegisterTypeInIl2Cpp<RealtimeAgentBridge>();
 
         var harmony = new Harmony(Guid);
         harmony.PatchAll(typeof(PlayerNetworkingStartPatch));
@@ -40,6 +61,7 @@ public sealed class Plugin : BasePlugin
         harmony.PatchAll(typeof(PlayerMoverFixedUpdateTestPatch));
 
         AddComponent<ProbeRunner>();
+        AddComponent<RealtimeAgentBridge>();
         Logger.LogInfo(
             $"[BOT-PROBE] Loaded version {Version}. Waiting for a host session and local player.");
     }
@@ -156,6 +178,7 @@ internal sealed class ProbeRunner : MonoBehaviour
 
     private enum FollowState
     {
+        Idle,
         Waiting,
         Following,
         Holding,
@@ -174,8 +197,9 @@ internal sealed class ProbeRunner : MonoBehaviour
     private float _nextTrailSample;
     private bool _verificationLogged;
     private bool _hasSpawnedBot;
+    private bool _followRequested;
 
-    private FollowState _followState = FollowState.Waiting;
+    private FollowState _followState = FollowState.Idle;
     private readonly Vector3[] _breadcrumbs = new Vector3[MaximumBreadcrumbs];
     private int _breadcrumbHead;
     private int _breadcrumbCount;
@@ -200,9 +224,37 @@ internal sealed class ProbeRunner : MonoBehaviour
     private GameObject _testObstacle;
 
     private static ProbeRunner _activeTestRunner;
+    private static ProbeRunner _activeRunner;
 
     public ProbeRunner(IntPtr pointer) : base(pointer)
     {
+    }
+
+    private void Awake()
+    {
+        _activeRunner = this;
+    }
+
+    internal static string ExecuteAgentTool(string toolName, string mode)
+    {
+        var runner = _activeRunner;
+        if (runner == null)
+            return "{\"ok\":false,\"error\":\"bot_controller_unavailable\"}";
+
+        if (!string.Equals(toolName, "set_follow_mode", StringComparison.Ordinal))
+            return "{\"ok\":false,\"error\":\"unknown_tool\"}";
+
+        return runner.SetFollowMode(mode);
+    }
+
+    internal static bool TryGetVoiceParticipants(
+        out PlayerCharacter human,
+        out PlayerCharacter bot)
+    {
+        var runner = _activeRunner;
+        human = WorldManager.localPlayerCharacter;
+        bot = runner == null ? null : runner._botCharacter;
+        return human != null && bot != null && runner._bot != null;
     }
 
     private void Update()
@@ -291,7 +343,8 @@ internal sealed class ProbeRunner : MonoBehaviour
             _botNetworking = playerNetworking;
             _humanAtSpawn = localPlayer;
             _hasSpawnedBot = true;
-            _followState = FollowState.Waiting;
+            _followRequested = Plugin.StartFollowingAutomatically.Value;
+            _followState = _followRequested ? FollowState.Waiting : FollowState.Idle;
             _lastMovementIntent = Vector3.zero;
             _avoidanceSign = 0;
             _lastSteeringAngle = 0f;
@@ -302,7 +355,9 @@ internal sealed class ProbeRunner : MonoBehaviour
             AddBreadcrumb(localPlayer.transform.position);
 
             _verifyAt = Time.realtimeSinceStartup + 2f;
-            _followAt = Time.realtimeSinceStartup + FollowStartDelay;
+            _followAt = _followRequested
+                ? Time.realtimeSinceStartup + FollowStartDelay
+                : float.PositiveInfinity;
             _nextNavigationTick = _followAt;
             _nextTrailSample = Time.realtimeSinceStartup + TrailSampleInterval;
             Plugin.Logger.LogInfo(
@@ -321,6 +376,13 @@ internal sealed class ProbeRunner : MonoBehaviour
 
     private void TickFollowPlayer()
     {
+        if (!_followRequested)
+        {
+            if (_followState != FollowState.Idle || _lastMovementIntent.sqrMagnitude > 0f)
+                StopForState(FollowState.Idle, Time.realtimeSinceStartup);
+            return;
+        }
+
         if (_followState == FollowState.Failed)
             return;
 
@@ -374,6 +436,41 @@ internal sealed class ProbeRunner : MonoBehaviour
 
         if (Plugin.AutomatedLeaderWalk.Value)
             BeginAutomatedLeaderTest(now, human);
+    }
+
+    private string SetFollowMode(string mode)
+    {
+        if (_bot == null || _botNetworking == null || !_hasSpawnedBot)
+            return "{\"ok\":false,\"error\":\"bot_not_spawned\"}";
+
+        var now = Time.realtimeSinceStartup;
+        if (string.Equals(mode, "follow", StringComparison.OrdinalIgnoreCase))
+        {
+            var human = GetHumanPlayer();
+            if (human == null)
+                return "{\"ok\":false,\"error\":\"human_player_unavailable\"}";
+
+            _followRequested = true;
+            _followState = FollowState.Waiting;
+            _followAt = now;
+            _nextNavigationTick = now;
+            ClearBreadcrumbs();
+            AddBreadcrumb(human.transform.position);
+            ResetProgressObservation(now);
+            Plugin.Logger.LogInfo("[BOT-AGENT] TOOL set_follow_mode mode=follow accepted.");
+            return "{\"ok\":true,\"mode\":\"follow\",\"status\":\"started\"}";
+        }
+
+        if (string.Equals(mode, "stay", StringComparison.OrdinalIgnoreCase))
+        {
+            _followRequested = false;
+            _followAt = float.PositiveInfinity;
+            StopForState(FollowState.Idle, now);
+            Plugin.Logger.LogInfo("[BOT-AGENT] TOOL set_follow_mode mode=stay accepted.");
+            return "{\"ok\":true,\"mode\":\"stay\",\"status\":\"stopped\"}";
+        }
+
+        return "{\"ok\":false,\"error\":\"invalid_mode\"}";
     }
 
     private void NavigateTowardHuman(float now)
@@ -904,7 +1001,8 @@ internal sealed class ProbeRunner : MonoBehaviour
         _humanAtSpawn = null;
         _hasSpawnedBot = false;
         _verificationLogged = false;
-        _followState = FollowState.Waiting;
+        _followRequested = false;
+        _followState = FollowState.Idle;
         _lastMovementIntent = Vector3.zero;
         _avoidanceSign = 0;
         _testLeaderActive = false;
@@ -919,6 +1017,9 @@ internal sealed class ProbeRunner : MonoBehaviour
 
     private void OnDestroy()
     {
+        if (_activeRunner == this)
+            _activeRunner = null;
+
         if (_activeTestRunner == this)
             _activeTestRunner = null;
 
