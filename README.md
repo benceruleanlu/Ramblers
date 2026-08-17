@@ -24,7 +24,7 @@ The primary bounded experiments ran on Big Walk `1.4.8 2608070648` (Steam build 
 
 A compatibility rerun on Big Walk `1.4.9 2608141617` used the same probe `0.4.0` binary (SHA-256 `464413222CFA1EAFFF8469EBC4938FA684B8EDBC0C042392FD42960D93B8094B`) after BepInEx regenerated the game's interop bindings. The probe loaded without a mod or Harmony startup failure, spawned and registered the connectionless bot, followed a manually driven 39-breadcrumb route, returned to `Holding`, and kept the human as the local player. This confirms the spawn and follow path on that build; it is not a full `1.4.9` regression suite, and the artificial obstacle-bypass diagnostic was not rerun.
 
-Raw logs, probe hashes, and the full evidence-boundary table are archived in [docs/archive/HOST_MOD_FEASIBILITY.md](docs/archive/HOST_MOD_FEASIBILITY.md). The experiment log continues in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md).
+Raw spawn logs, probe hashes, and the original evidence-boundary table are archived in [docs/archive/HOST_MOD_FEASIBILITY.md](docs/archive/HOST_MOD_FEASIBILITY.md). The detailed probe history through `0.5.2` is archived in [docs/archive/PROBE_HISTORY_0.2.0-0.5.2.md](docs/archive/PROBE_HISTORY_0.2.0-0.5.2.md).
 
 ## What is not yet proven
 
@@ -95,7 +95,7 @@ The observation feed stays compact structured JSON (< ~1k tokens: positions, wha
 
 ## Roadmap
 
-Bounded, runtime-verifiable experiments, each logged in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md):
+Current milestone status:
 
 1. **Walk-to-point** — motor slice complete: the bot autonomously completed a bounded `1.5 m` traverse via `controlsVelocity`, stopped within tolerance, and left host locality untouched. Reachable-point selection remains.
 2. **Breadcrumb follow** — bounded slice complete: the bot recorded and followed a short trail, used local rigidbody sweeps to steer around one obstacle, and maintained follow distance. Varied terrain, dynamic obstacles, and stuck recovery remain.
@@ -110,9 +110,9 @@ Bounded, runtime-verifiable experiments, each logged in [docs/EXPERIMENTS.md](do
 ```
 README.md                  ← this hub
 docs/
-  EXPERIMENTS.md           ← running experiment log (append-only)
   archive/
     HOST_MOD_FEASIBILITY.md← original feasibility record: raw probe logs, hashes, evidence tables
+    PROBE_HISTORY_0.2.0-0.5.2.md ← archived experiment history through probe 0.5.2
 probe/
   BigWalkBotProbe.cs       ← active probe source (v0.4.0 breadcrumb follow and local obstacle avoidance)
   build/compile.rsp        ← Roslyn response file to rebuild the probe DLL
@@ -128,5 +128,5 @@ Deployment state: BepInEx lives in the Big Walk install directory; deployed prob
 ## Working conventions
 
 - **Never silently promote** static-analysis conclusions or design intentions into runtime-confirmed facts. The three tiers (runtime-confirmed / static finding / untested design) are labeled everywhere.
-- **Every experiment gets a log entry** in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md): date + versions, hypothesis, exact setup, observed result, confirm/falsify/unresolved, artifacts and their deployment state.
+- **Update this README at meaningful milestones:** record what became runtime-confirmed, what was falsified, and what remains untested without maintaining a per-run deployment diary.
 - **Everything reversible.** Deployed artifacts are disabled (renamed), not deleted; stock game files are never rewritten.
