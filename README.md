@@ -31,17 +31,27 @@ Ramblers `0.6.1` is tested with Big Walk `1.4.9` (build `2608141617`) and BepInE
 
 ## Build and run
 
-The current response file expects:
+Requirements:
 
-- Big Walk in the default Steam installation path.
 - BepInEx IL2CPP `6.0.0-be.755`, initialized once so its interop assemblies exist.
-- Roslyn `4.14.0` under `.tools/roslyn-4.14.0/expanded/`.
+- Windows PowerShell 5.1 or newer.
 
-If the game or repository is elsewhere, update the absolute paths in `probe/build/compile.rsp`. From the repository root, build with PowerShell:
+From the repository root, build with PowerShell:
 
 ```powershell
-& ".\.tools\roslyn-4.14.0\expanded\tasks\net472\csc.exe" "@probe\build\compile.rsp"
+.\build.ps1
 ```
+
+The build discovers Big Walk across registered Steam libraries. On first use it downloads the pinned official `Microsoft.Net.Compilers.Toolset 4.14.0` NuGet package into the ignored `.tools/` directory and verifies its SHA-256 before extraction. It does not install software or change `PATH`, the registry, or system files.
+
+For a non-Steam or otherwise custom setup, pass paths explicitly:
+
+```powershell
+.\build.ps1 -GamePath "D:\Games\Big Walk"
+.\build.ps1 -CompilerPath "D:\Tools\Roslyn\csc.exe"
+```
+
+`RAMBLERS_GAME_PATH` and `RAMBLERS_CSC_PATH` provide equivalent environment-variable overrides. Use `-NoRestore` when the build must stay offline and fail if the compiler is not already available.
 
 With Big Walk closed, copy `probe/build/BigWalkBotProbe.dll` into the game's `BepInEx/plugins/BigWalkBotProbe` directory. Rename the deployed DLL to `BigWalkBotProbe.dll.disabled` to prevent it from loading.
 
@@ -57,7 +67,7 @@ The model chooses from a small tool allowlist; it never writes movement input or
 - [`probe/OpenAIRealtimeBridge.cs`](probe/OpenAIRealtimeBridge.cs) — thin Unity-main-thread lifecycle coordinator.
 - [`probe/AgentToolRouter.cs`](probe/AgentToolRouter.cs) — exact tool allowlist, argument validation, and dispatch to the controller.
 - [`probe/OpenAIRealtimeClient.cs`](probe/OpenAIRealtimeClient.cs) — managed WebSocket/JSON/PCM transport with no Unity access.
-- [`probe/build/compile.rsp`](probe/build/compile.rsp) — compiler inputs and game references.
+- [`build.ps1`](build.ps1) — portable compiler provisioning, Steam discovery, dependency validation, and compilation.
 
 The data path is: Big Walk voice state and microphone → bounded audio turn → OpenAI Realtime → either a validated tool call or model audio → deterministic bot controller or the separate game-voice output adapter. The first voice-output route is local-only and does not send synthetic speech to remote guests.
 
