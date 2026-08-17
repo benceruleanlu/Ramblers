@@ -1,5 +1,8 @@
 # Ramblers
 
+> [!WARNING]
+> **Under construction:** Ramblers is not ready for use. All `0.x.x` versions are development builds; please wait for the `1.0.0` release before installing or trying it.
+
 An experimental host-side companion mod for [Big Walk](https://store.steampowered.com/app/1478500/). Ramblers creates AI-controlled party members inside the host's game process without requiring or launching additional clients.
 
 ## Current state
