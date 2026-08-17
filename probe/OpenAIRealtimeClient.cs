@@ -323,7 +323,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             {
                 JsonElement transcriptElement;
                 if (root.TryGetProperty("transcript", out transcriptElement))
-                    _logs.Enqueue("SAY " + transcriptElement.GetString());
+                    _logs.Enqueue("SAY " + MakeTranscriptConsoleSafe(transcriptElement.GetString()));
                 return;
             }
 
@@ -331,7 +331,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             {
                 JsonElement transcriptElement;
                 if (root.TryGetProperty("transcript", out transcriptElement))
-                    _logs.Enqueue("HEARD " + transcriptElement.GetString());
+                    _logs.Enqueue("HEARD " + MakeTranscriptConsoleSafe(transcriptElement.GetString()));
                 return;
             }
 
@@ -360,6 +360,25 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         {
             _logs.Enqueue("INVALID_EVENT_JSON " + exception.Message);
         }
+    }
+
+    private static string MakeTranscriptConsoleSafe(string transcript)
+    {
+        if (string.IsNullOrEmpty(transcript))
+            return transcript;
+
+        // Realtime transcripts are valid Unicode, but BepInEx's legacy Windows
+        // console can display UTF-8 smart punctuation as multiple garbled
+        // characters. Normalize only transcript diagnostics at the log boundary.
+        return transcript
+            .Replace("\u2018", "'")
+            .Replace("\u2019", "'")
+            .Replace("\u201c", "\"")
+            .Replace("\u201d", "\"")
+            .Replace("\u2013", "-")
+            .Replace("\u2014", "-")
+            .Replace("\u2026", "...")
+            .Replace("\u00a0", " ");
     }
 
     private void QueueFunctionCalls(JsonElement root)
