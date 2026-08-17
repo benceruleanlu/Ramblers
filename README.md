@@ -38,22 +38,3 @@ If the game or repository is elsewhere, update the absolute paths in `probe/buil
 With Big Walk closed, copy `probe/build/BigWalkBotProbe.dll` into the game's `BepInEx/plugins` directory. Rename the deployed DLL to `BigWalkBotProbe.dll.disabled` to prevent it from loading.
 
 The Realtime integration reads `OPENAI_API_KEY` from the process or current Windows user environment. The key is not stored in this repository or the BepInEx configuration. This local-key path is for development only.
-
-## Code map
-
-- [`probe/BigWalkBotProbe.cs`](probe/BigWalkBotProbe.cs) — spawn, authority, motor control, and breadcrumb following.
-- [`probe/OpenAIRealtimeBridge.cs`](probe/OpenAIRealtimeBridge.cs) — microphone, Realtime session, voice gating, and tool-call boundary.
-- [`probe/build/compile.rsp`](probe/build/compile.rsp) — compiler inputs and game references.
-- [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md) — active runtime evidence after the archived probe history.
-- [`docs/archive/PROBE_HISTORY_0.2.0-0.5.2.md`](docs/archive/PROBE_HISTORY_0.2.0-0.5.2.md) — detailed experiment history.
-- [`docs/archive/HOST_MOD_FEASIBILITY.md`](docs/archive/HOST_MOD_FEASIBILITY.md) — original feasibility evidence and recovered-game findings.
-
-## Development rules
-
-- Keep frame-level movement deterministic; the model chooses bounded tools rather than writing motor input.
-- Touch Unity and game objects only on the Unity main thread.
-- Record exact runtime evidence in the experiment history before promoting a capability to the confirmed list above.
-
-## Next milestone
-
-Runtime-verify toggle-off suppression and out-of-range rejection before adding radio or synthetic speech output. Work beyond that is intentionally not committed as a roadmap.
