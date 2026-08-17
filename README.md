@@ -22,6 +22,10 @@ This is still a bounded prototype. General navigation, stuck recovery, puzzle in
 - **Reversible:** the mod uses BepInEx and in-memory Harmony hooks. It does not rewrite the game executable, IL2CPP files, assets, saves, or metadata.
 - **Evidence-based:** compilation and static inspection do not count as runtime proof.
 
+## Compatibility
+
+Ramblers `0.6.1` is tested with Big Walk `1.4.9` (build `2608141617`) and BepInEx IL2CPP `6.0.0-be.755`. Other game versions are unverified.
+
 ## Build and run
 
 The current response file expects:
