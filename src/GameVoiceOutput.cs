@@ -1,5 +1,5 @@
 using System;
-using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.IO;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using UnityEngine;
@@ -7,22 +7,30 @@ using UnityEngine;
 namespace Ramblers;
 
 /// <summary>
-/// Buffers one Realtime PCM response at a time and plays completed utterances
+/// Buffers Realtime PCM by conversation item and plays completed utterances
 /// from a dedicated 3D AudioSource attached to the companion's voice transform.
-/// This first output adapter is intentionally local-only; it does not inject
-/// synthetic packets into Big Walk's multiplayer voice transport.
+/// It also reports exactly how much audio was heard when playback is interrupted.
 /// </summary>
 internal sealed class GameVoiceOutput
 {
     private const int OutputSampleRate = 24000;
 
-    private readonly MemoryStream _currentResponse = new MemoryStream();
-    private readonly ConcurrentQueue<AudioClip> _pendingClips =
-        new ConcurrentQueue<AudioClip>();
+    private sealed class BufferedVoiceClip
+    {
+        internal AudioClip Clip;
+        internal string ItemId;
+        internal int ContentIndex;
+    }
+
+    private readonly MemoryStream _currentItemAudio = new MemoryStream();
+    private readonly Queue<BufferedVoiceClip> _pendingClips =
+        new Queue<BufferedVoiceClip>();
 
     private PlayerCharacter _speaker;
     private AudioSource _source;
-    private AudioClip _playingClip;
+    private BufferedVoiceClip _playing;
+    private string _currentItemId;
+    private int _currentContentIndex;
     private int _utteranceNumber;
 
     internal void Accept(RealtimeAudioPacket packet)
@@ -30,11 +38,24 @@ internal sealed class GameVoiceOutput
         if (packet == null)
             return;
 
-        if (packet.Pcm16 != null && packet.Pcm16.Length > 0)
-            _currentResponse.Write(packet.Pcm16, 0, packet.Pcm16.Length);
+        if (!string.IsNullOrEmpty(packet.ItemId))
+        {
+            if (_currentItemAudio.Length > 0 &&
+                (!string.Equals(_currentItemId, packet.ItemId, StringComparison.Ordinal) ||
+                 _currentContentIndex != packet.ContentIndex))
+            {
+                DropCurrentItem("audio_item_changed_before_done");
+            }
 
-        if (packet.EndsResponse)
-            QueueCompletedResponse();
+            _currentItemId = packet.ItemId;
+            _currentContentIndex = packet.ContentIndex;
+        }
+
+        if (packet.Pcm16 != null && packet.Pcm16.Length > 0)
+            _currentItemAudio.Write(packet.Pcm16, 0, packet.Pcm16.Length);
+
+        if (packet.EndsItem)
+            QueueCompletedItem();
     }
 
     internal void Tick()
@@ -52,40 +73,90 @@ internal sealed class GameVoiceOutput
         if (_source == null)
             return;
 
-        if (_playingClip != null && !_source.isPlaying)
+        if (_playing != null && !_source.isPlaying)
+            DestroyPlayingClip();
+
+        if (_source.isPlaying || _pendingClips.Count == 0)
+            return;
+
+        _playing = _pendingClips.Dequeue();
+        _source.clip = _playing.Clip;
+        _source.Play();
+        Plugin.Logger.LogInfo(
+            $"[AGENT] VOICE_PLAYING seconds={_playing.Clip.length:F2}, route=local_3d");
+    }
+
+    /// <summary>
+    /// Stops all assistant speech and returns truncations for conversation
+    /// items whose generated audio was not fully heard by the user.
+    /// </summary>
+    internal List<RealtimeAudioTruncation> Interrupt()
+    {
+        var truncations = new List<RealtimeAudioTruncation>();
+        var seenItems = new HashSet<string>(StringComparer.Ordinal);
+
+        if (_playing != null)
         {
-            UnityEngine.Object.Destroy(_playingClip);
-            _playingClip = null;
+            var playedSamples = _source == null
+                ? 0
+                : Math.Max(0, Math.Min(_source.timeSamples, _playing.Clip.samples));
+            AddTruncation(
+                truncations,
+                seenItems,
+                _playing.ItemId,
+                _playing.ContentIndex,
+                (int)Math.Round(playedSamples * 1000d / OutputSampleRate));
+        }
+
+        foreach (var pending in _pendingClips)
+        {
+            AddTruncation(
+                truncations,
+                seenItems,
+                pending.ItemId,
+                pending.ContentIndex,
+                0);
+        }
+
+        if (_currentItemAudio.Length > 0)
+        {
+            AddTruncation(
+                truncations,
+                seenItems,
+                _currentItemId,
+                _currentContentIndex,
+                0);
+        }
+
+        if (_source != null)
+        {
+            _source.Stop();
             _source.clip = null;
         }
 
-        if (_source.isPlaying)
-            return;
+        DestroyPlayingClip();
+        ClearPendingClips();
+        ResetCurrentItem();
 
-        AudioClip nextClip;
-        if (!_pendingClips.TryDequeue(out nextClip))
-            return;
+        if (truncations.Count > 0)
+            Plugin.Logger.LogInfo($"[AGENT] VOICE_INTERRUPTED items={truncations.Count}");
 
-        _playingClip = nextClip;
-        _source.clip = _playingClip;
-        _source.Play();
-        Plugin.Logger.LogInfo(
-            $"[AGENT] VOICE_PLAYING seconds={_playingClip.length:F2}, route=local_3d");
+        return truncations;
     }
 
     internal void Stop()
     {
-        _currentResponse.SetLength(0);
-        _currentResponse.Position = 0;
+        ResetCurrentItem();
         ClearPendingClips();
         ReleaseSource();
     }
 
-    private void QueueCompletedResponse()
+    private void QueueCompletedItem()
     {
-        var pcm = _currentResponse.ToArray();
-        _currentResponse.SetLength(0);
-        _currentResponse.Position = 0;
+        var pcm = _currentItemAudio.ToArray();
+        var itemId = _currentItemId;
+        var contentIndex = _currentContentIndex;
+        ResetCurrentItem();
 
         var sampleCount = pcm.Length / 2;
         if (sampleCount == 0)
@@ -117,7 +188,12 @@ internal sealed class GameVoiceOutput
                 return;
             }
 
-            _pendingClips.Enqueue(clip);
+            _pendingClips.Enqueue(new BufferedVoiceClip
+            {
+                Clip = clip,
+                ItemId = itemId,
+                ContentIndex = contentIndex
+            });
             Plugin.Logger.LogInfo(
                 $"[AGENT] VOICE_QUEUED seconds={sampleCount / (float)OutputSampleRate:F2}");
         }
@@ -126,6 +202,28 @@ internal sealed class GameVoiceOutput
             Plugin.Logger.LogWarning(
                 $"[AGENT] VOICE_DROPPED reason=audio_clip_error detail={exception.Message}");
         }
+    }
+
+    private static void AddTruncation(
+        ICollection<RealtimeAudioTruncation> truncations,
+        ISet<string> seenItems,
+        string itemId,
+        int contentIndex,
+        int audioEndMilliseconds)
+    {
+        if (string.IsNullOrEmpty(itemId))
+            return;
+
+        var key = itemId + ":" + contentIndex;
+        if (!seenItems.Add(key))
+            return;
+
+        truncations.Add(new RealtimeAudioTruncation
+        {
+            ItemId = itemId,
+            ContentIndex = contentIndex,
+            AudioEndMilliseconds = audioEndMilliseconds
+        });
     }
 
     private void EnsureSource(PlayerCharacter bot)
@@ -181,26 +279,48 @@ internal sealed class GameVoiceOutput
         }
     }
 
+    private void DropCurrentItem(string reason)
+    {
+        ResetCurrentItem();
+        Plugin.Logger.LogWarning($"[AGENT] VOICE_DROPPED reason={reason}");
+    }
+
     private void DropPendingIfNecessary(string reason)
     {
-        if (_pendingClips.IsEmpty)
+        if (_pendingClips.Count == 0 && _playing == null)
             return;
 
         ClearPendingClips();
+        DestroyPlayingClip();
         Plugin.Logger.LogWarning($"[AGENT] VOICE_DROPPED reason={reason}");
+    }
+
+    private void ResetCurrentItem()
+    {
+        _currentItemAudio.SetLength(0);
+        _currentItemAudio.Position = 0;
+        _currentItemId = null;
+        _currentContentIndex = 0;
     }
 
     private void ClearPendingClips()
     {
-        AudioClip clip;
-        while (_pendingClips.TryDequeue(out clip))
-            UnityEngine.Object.Destroy(clip);
-
-        if (_playingClip != null)
+        while (_pendingClips.Count > 0)
         {
-            UnityEngine.Object.Destroy(_playingClip);
-            _playingClip = null;
+            var pending = _pendingClips.Dequeue();
+            UnityEngine.Object.Destroy(pending.Clip);
         }
+    }
+
+    private void DestroyPlayingClip()
+    {
+        if (_playing == null)
+            return;
+
+        UnityEngine.Object.Destroy(_playing.Clip);
+        _playing = null;
+        if (_source != null)
+            _source.clip = null;
     }
 
     private void ReleaseSource()
@@ -212,12 +332,7 @@ internal sealed class GameVoiceOutput
             UnityEngine.Object.Destroy(_source);
         }
 
-        if (_playingClip != null)
-        {
-            UnityEngine.Object.Destroy(_playingClip);
-            _playingClip = null;
-        }
-
+        DestroyPlayingClip();
         _source = null;
         _speaker = null;
     }

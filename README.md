@@ -11,9 +11,11 @@ A companion spawns, keeps its own identity, and follows you on foot around bound
 
 Not working yet: general navigation, stuck recovery, puzzle interaction, and speech that remote guests can hear. Synthetic voice plays from a local 3D source on the companion's body, but that path has not been runtime-verified.
 
+Near-field noise reduction, automatic semantic VAD, WebSocket interruption and truncation, and serialized response creation are implemented in `0.7.6`, but await runtime verification.
+
 ## Compatibility
 
-Tested against Big Walk `1.4.9` (build `2608141617`) on BepInEx IL2CPP `6.0.0-be.755`. Other versions are unverified.
+Tested against Big Walk `1.4.9` (build `2608141617`) on BepInEx IL2CPP `6.0.0-be.755`. The established runtime baseline is Ramblers `0.7.5`; the `0.7.6` audio changes target the same bindings but await runtime verification. Other versions are unverified.
 
 ## Build
 
@@ -42,6 +44,6 @@ Ramblers reads `OPENAI_API_KEY` from the process or current Windows user environ
 
 The model never writes movement input and never touches a Unity object. It selects from a fixed tool allowlist, and C# does the driving.
 
-Big Walk voice state and microphone → bounded audio turn → OpenAI Realtime → a validated tool call or model audio → the companion controller, or local 3D playback from the companion's body. Synthetic speech is local-only and does not reach remote guests.
+Big Walk voice state and microphone → a continuous semantic-VAD stream or manual push-to-talk turn → OpenAI Realtime → a validated tool call or model audio → the companion controller, or local 3D playback from the companion's body. Synthetic speech is local-only and does not reach remote guests.
 
 Earlier probe experiments and the original host-only feasibility work are in [`docs/archive/`](docs/archive/).
