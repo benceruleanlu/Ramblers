@@ -67,7 +67,11 @@ internal sealed class CompanionLocomotion
     private Vector3 _lastMovementIntent;
     private float _walkSpeed = FallbackWalkSpeed;
     private float _runSpeed = FallbackRunSpeed;
+    private float _crouchWalkSpeed = FallbackWalkSpeed;
+    private float _crouchRunSpeed = FallbackRunSpeed;
     private bool _gaitSpeedsFromTunings;
+    private bool _crouchGaitSpeedsFromTunings;
+    private CompanionPosture _posture = CompanionPosture.Standing;
     private MovementGait _gait = MovementGait.Stopped;
     private float _lastCommandedSpeed;
     private int _avoidanceSign;
@@ -78,9 +82,15 @@ internal sealed class CompanionLocomotion
     private Vector3 _progressAnchor;
     private float _progressWindowStartedAt;
 
-    internal float WalkSpeed => _walkSpeed;
-    internal float RunSpeed => _runSpeed;
-    internal bool GaitSpeedsFromTunings => _gaitSpeedsFromTunings;
+    internal float WalkSpeed =>
+        _posture == CompanionPosture.Crouching ? _crouchWalkSpeed : _walkSpeed;
+    internal float RunSpeed =>
+        _posture == CompanionPosture.Crouching ? _crouchRunSpeed : _runSpeed;
+    internal bool GaitSpeedsFromTunings =>
+        _posture == CompanionPosture.Crouching
+            ? _crouchGaitSpeedsFromTunings
+            : _gaitSpeedsFromTunings;
+    internal CompanionPosture Posture => _posture;
     internal MovementGait Gait => _gait;
     internal float LastCommandedSpeed => _lastCommandedSpeed;
     internal Vector3 LastMovementIntent => _lastMovementIntent;
@@ -108,6 +118,19 @@ internal sealed class CompanionLocomotion
             ? tunings.forwardSprintSpeed
             : Mathf.Max(_walkSpeed, FallbackRunSpeed);
         _gaitSpeedsFromTunings = hasTunedWalkSpeed && hasTunedRunSpeed;
+
+        var hasTunedCrouchWalkSpeed = tunings != null && tunings.crouchForwardSpeed > 0.01f;
+        _crouchWalkSpeed = hasTunedCrouchWalkSpeed
+            ? tunings.crouchForwardSpeed
+            : _walkSpeed;
+
+        var hasTunedCrouchRunSpeed = tunings != null &&
+                                     tunings.crouchForwardSprintSpeed > _crouchWalkSpeed;
+        _crouchRunSpeed = hasTunedCrouchRunSpeed
+            ? tunings.crouchForwardSprintSpeed
+            : _crouchWalkSpeed;
+        _crouchGaitSpeedsFromTunings =
+            hasTunedCrouchWalkSpeed && hasTunedCrouchRunSpeed;
     }
 
     internal void Bind(CompanionBody body, float now)
@@ -118,6 +141,7 @@ internal sealed class CompanionLocomotion
         _lastSteeringAngle = 0f;
         _lastClearance = ObstacleProbeDistance;
         _lastDirectPathBlocked = false;
+        _posture = CompanionPosture.Standing;
         _gait = MovementGait.Stopped;
         _lastCommandedSpeed = 0f;
         ResetProgressObservation(now);
@@ -130,7 +154,11 @@ internal sealed class CompanionLocomotion
         _avoidanceSign = 0;
         _walkSpeed = FallbackWalkSpeed;
         _runSpeed = FallbackRunSpeed;
+        _crouchWalkSpeed = FallbackWalkSpeed;
+        _crouchRunSpeed = FallbackRunSpeed;
         _gaitSpeedsFromTunings = false;
+        _crouchGaitSpeedsFromTunings = false;
+        _posture = CompanionPosture.Standing;
         _gait = MovementGait.Stopped;
         _lastCommandedSpeed = 0f;
     }
@@ -223,6 +251,11 @@ internal sealed class CompanionLocomotion
         SetMovementGait(MovementGait.Stopped);
     }
 
+    internal void SetPosture(CompanionPosture posture)
+    {
+        _posture = posture;
+    }
+
     private float ResolveMovementSpeed(float pathDistance)
     {
         if (_gait != MovementGait.Run && pathDistance >= RunStartDistance)
@@ -239,7 +272,7 @@ internal sealed class CompanionLocomotion
                 $"[FOLLOW] GAIT walk trailDistance={pathDistance:F2}.");
         }
 
-        return _gait == MovementGait.Run ? _runSpeed : _walkSpeed;
+        return _gait == MovementGait.Run ? RunSpeed : WalkSpeed;
     }
 
     private void SetMovementGait(MovementGait gait)

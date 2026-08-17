@@ -106,14 +106,28 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             Plugin.Logger.LogInfo($"[AGENT] {message}");
 
         RealtimeFunctionCall functionCall;
+        var sentFunctionOutput = false;
         while (_client.TryDequeueFunctionCall(out functionCall))
         {
-            var result = AgentToolRouter.Execute(functionCall);
+            string result;
+            try
+            {
+                result = AgentToolRouter.Execute(functionCall);
+            }
+            catch (Exception exception)
+            {
+                result = AgentToolResult.Failure("action_execution_failed").ToJson();
+                Plugin.Logger.LogError(
+                    $"[AGENT] CALL_FAILED name={functionCall.Name}: {exception}");
+            }
             Plugin.Logger.LogInfo(
                 $"[AGENT] CALL name={functionCall.Name}, " +
                 $"arguments={functionCall.Arguments}, result={result}");
-            _client.SendFunctionResult(functionCall.CallId, result);
+            _client.SendFunctionOutput(functionCall.CallId, result);
+            sentFunctionOutput = true;
         }
+        if (sentFunctionOutput)
+            _client.RequestResponse();
 
         RealtimeClientEvent clientEvent;
         while (_client.TryDequeueClientEvent(out clientEvent))
