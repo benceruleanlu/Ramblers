@@ -12,7 +12,7 @@ An AI-controlled companion that appears and behaves as a complete second player 
 
 ## What is proven (runtime-confirmed)
 
-On Big Walk `1.4.8 2608070648` (Steam build `24611934`, Unity `6000.3.17f1`, IL2CPP) with BepInEx IL2CPP `6.0.0-be.755`, probes `0.2.0`, `0.3.2`, and `0.4.0` demonstrated:
+The primary bounded experiments ran on Big Walk `1.4.8 2608070648` (Steam build `24611934`, Unity `6000.3.17f1`, IL2CPP) with BepInEx IL2CPP `6.0.0-be.755`. Probes `0.2.0`, `0.3.2`, and `0.4.0` demonstrated:
 
 - The host can clone the real player prefab and spawn it via `NetworkServer.Spawn` with **no client connection** (`connectionToClient=null`, valid `netId`).
 - The synthetic player registers in `PlayerCharacter.allPlayerCharacters` (count = 2) and follows the normal **remote-player** code path (`isLocalPlayer=false`); the host camera and input stay on the human.
@@ -21,6 +21,8 @@ On Big Walk `1.4.8 2608070648` (Steam build `24611934`, Unity `6000.3.17f1`, IL2
 - A separate **Dissonance voice identity** (`NitrogenHostBot`) can be assigned and is tracked.
 - The host can drive the connectionless bot through the stock remote-player physics motor. In the bounded `0.3.2` test, the bot autonomously reached a point `1.5 m` from its start in `2.33 s`, stopped within the `0.65 m` tolerance, needed no recovery, remained non-local, and left the human as the local player.
 - The bot can record a short human breadcrumb trail at 10 Hz, follow it while maintaining a `2.25 m` separation, detect an obstacle with the real player rigidbody sweep, select a clear alternate heading, and stop at the follow distance. In the bounded `0.4.0` diagnostic it chose a `50°` bypass and reached the hold state while the obstacle was still present.
+
+A compatibility rerun on Big Walk `1.4.9 2608141617` used the same probe `0.4.0` binary (SHA-256 `464413222CFA1EAFFF8469EBC4938FA684B8EDBC0C042392FD42960D93B8094B`) after BepInEx regenerated the game's interop bindings. The probe loaded without a mod or Harmony startup failure, spawned and registered the connectionless bot, followed a manually driven 39-breadcrumb route, returned to `Holding`, and kept the human as the local player. This confirms the spawn and follow path on that build; it is not a full `1.4.9` regression suite, and the artificial obstacle-bypass diagnostic was not rerun.
 
 Raw logs, probe hashes, and the full evidence-boundary table are archived in [docs/archive/HOST_MOD_FEASIBILITY.md](docs/archive/HOST_MOD_FEASIBILITY.md). The experiment log continues in [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md).
 

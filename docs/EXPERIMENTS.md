@@ -87,3 +87,13 @@ Make the bot walk to a host-selected point while remaining a remote player. Succ
 - **Result:** hypothesis confirmed only for a short recorded trail and one artificial static obstacle in the staging room. This does not establish long trails, varied terrain, moving obstacles, ledges, doors, full route planning, or stuck recovery.
 - **Build:** compilation succeeded. DLL SHA-256: `464413222CFA1EAFFF8469EBC4938FA684B8EDBC0C042392FD42960D93B8094B`.
 - **Cleanup/deployment:** Big Walk was closed, `AutomatedLeaderWalk` was reset to `false`, and the verified DLL/PDB were renamed to versioned `.disabled` archives. No probe is loadable and no stock game files were rewritten.
+
+---
+
+## 2026-08-16: probe 0.4.0 compatibility rerun on Big Walk 1.4.9
+
+- **Hypothesis:** the runtime-verified `0.4.0` binary built and tested against Big Walk `1.4.8` remains compatible with the updated game's regenerated IL2CPP interop bindings.
+- **Setup:** Big Walk `1.4.9 2608141617`; BepInEx IL2CPP build 755; two-player `BotProbe` host save; the unchanged probe `0.4.0` binary with SHA-256 `464413222CFA1EAFFF8469EBC4938FA684B8EDBC0C042392FD42960D93B8094B`; `AutomatedLeaderWalk=false`; one Big Walk process. BepInEx detected the game update and regenerated its interop assemblies before this run.
+- **Observed:** the plugin loaded without a mod or Harmony startup failure. The bot spawned as `netId=580`, `connectionToClient=null`, `isLocalPlayer=False`, `serverOwnsTransform=True`, `movementResting=False`, and registry count `2`. Manual host movement produced 39 breadcrumbs and 24 logged `Following` status samples with matched requested/network movement intent and nonzero rigidbody velocity. The bot returned to `Holding`; the human remained the local player. The run emitted one `POSSIBLY_STUCK` detection while commanded displacement was low; as designed, no recovery or teleport was attempted.
+- **Result:** compatibility confirmed on `1.4.9 2608141617` for plugin initialization, bot spawn/registration, host-locality preservation, stock-motor locomotion, breadcrumb following, and hold behavior. This was not a full regression suite: the artificial obstacle-bypass diagnostic was not rerun, so its existing runtime proof remains the `1.4.8` experiment above.
+- **Deployment state:** the verified `0.4.0` DLL/PDB were left active in the BepInEx plugin folder for continued manual testing. No stock game files were rewritten.
