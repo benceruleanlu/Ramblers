@@ -1,0 +1,16 @@
+# Keep every checkout byte-identical to what is committed.
+#
+# Roslyn embeds a source-content checksum in the assembly's debug directory and
+# portable PDB, so the same source compiled with different line endings produces
+# a different dist/Ramblers.dll. Without this file that depended on each
+# developer's core.autocrlf, which made the SHA-256 that build.ps1 prints
+# incomparable between machines and left the committed artifact unreproducible.
+#
+# LF is chosen over CRLF so the working tree matches the stored blob exactly:
+# the bytes that are committed are the bytes the compiler reads.
+* text=auto eol=lf
+
+# Never line-ending convert build output.
+*.dll binary
+*.pdb binary
+*.exe binary
