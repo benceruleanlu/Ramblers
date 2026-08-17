@@ -1,6 +1,6 @@
 # Big Walk AI Companion: Host-Mod Feasibility Record
 
-> **Archived 2026-08-15.** Feasibility is proven; this record is kept for its raw runtime evidence, probe hashes, and detailed static-analysis notes. The living project hub is now [README.md](../../README.md) and the experiment log continues in [EXPERIMENTS.md](../EXPERIMENTS.md).
+> **Archived 2026-08-15.** Feasibility is proven; this record is kept for its raw runtime evidence, probe hashes, and detailed static-analysis notes. The living project hub is [README.md](../../README.md); later experiment records are also retained in this archive.
 
 Last updated: 2026-08-15
 
