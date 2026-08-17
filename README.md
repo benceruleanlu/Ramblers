@@ -19,6 +19,8 @@ Runtime tests have confirmed that the mod can:
 
 This is still a bounded prototype. General navigation, stuck recovery, puzzle interactions, and voice heard by remote guests are not implemented. Local 3D synthetic voice output is implemented but not yet runtime-verified. Toggle-off suppression, overlapping-response serialization, noise robustness, and radio routing remain runtime-unverified or unresolved.
 
+Following commands speed in Big Walk's own units, read from the bot's `PlayerTunings`, and selects only the stock walking or sprinting speed. A walking companion may begin running when the breadcrumb trail grows beyond `6.75 m`; once running, it stays in that gait until it stops instead of ramping back through an artificial jog. While following or holding nearby, its whole body turns toward the human at Big Walk's stock `180 degrees/s` body rate; only the remaining body-relative yaw and vertical aim use the replicated head state. The revised gait, facing, run animation, and obstacle behaviour at speed await user runtime verification.
+
 ## Constraints
 
 - **Host mod only:** no second Big Walk client or process.
