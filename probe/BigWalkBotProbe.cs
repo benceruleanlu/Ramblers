@@ -17,7 +17,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string Guid = "local.bigwalk.botprobe";
     public const string Name = "Ramblers";
-    public const string Version = "0.6.1";
+    public const string Version = "0.7.2";
 
     internal static ManualLogSource Logger = null;
     internal static ConfigEntry<bool> EnableRealtimeAgent = null;

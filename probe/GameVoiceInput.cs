@@ -15,6 +15,7 @@ internal sealed class GameVoiceInput
     private const float AudibilityThreshold = 0.0001f;
     private const float OpenMicrophoneRmsThreshold = 0.006f;
     private const float OpenMicrophoneSilenceHangover = 0.45f;
+    private const float MicrophoneUnavailableGrace = 0.5f;
 
     private AudioClip _microphoneClip;
     private Il2CppStructArray<float> _voiceActivitySamples;
@@ -26,6 +27,7 @@ internal sealed class GameVoiceInput
     private int _microphoneChannels;
     private int _resampleAccumulator;
     private bool _microphoneReadyLogged;
+    private float _microphoneUnavailableSince = -1f;
     private bool _voiceIntentWasActive;
     private bool _voiceStateUnavailableLogged;
     private bool _audibilityUnavailableLogged;
@@ -60,6 +62,7 @@ internal sealed class GameVoiceInput
         _microphoneFrequency = 0;
         _microphoneChannels = 0;
         _resampleAccumulator = 0;
+        _microphoneUnavailableSince = -1f;
         _directVoiceAttenuationCurve = null;
         _nextVoiceRouteResolveAt = 0f;
     }
@@ -82,6 +85,24 @@ internal sealed class GameVoiceInput
                 out useSilenceHangover,
                 out source))
         {
+            if (_microphoneUnavailableSince >= 0f)
+            {
+                var unavailableSeconds =
+                    Time.realtimeSinceStartup - _microphoneUnavailableSince;
+                if (unavailableSeconds < MicrophoneUnavailableGrace)
+                    return;
+
+                if (_capturingTurn)
+                {
+                    Plugin.Logger.LogWarning(
+                        $"[BOT-AGENT] Big Walk's microphone remained unavailable for " +
+                        $"{unavailableSeconds:F2}s; submitting the captured portion.");
+                    EndVoiceTurn(true, sink);
+                    _voiceIntentWasActive = false;
+                    return;
+                }
+            }
+
             CancelTurn(sink);
             return;
         }
@@ -146,14 +167,17 @@ internal sealed class GameVoiceInput
         var human = WorldManager.localPlayerCharacter;
         var comms = world == null ? null : world.dissonanceComms;
         if (world == null || human == null || comms == null)
+        {
+            ResetMicrophoneUnavailableState(false);
             return false;
+        }
 
         var channelOpen = !world.forceMutedBySystem && !comms.IsMuted;
         LogVoiceChannelState(channelOpen);
 
         if (SettingsHelper.pushToTalkModeActive)
         {
-            _voiceStateUnavailableLogged = false;
+            ResetMicrophoneUnavailableState(false);
             source = "game_ptt";
             LogConfiguredVoiceSource(source, "<none>");
             active = channelOpen;
@@ -171,26 +195,43 @@ internal sealed class GameVoiceInput
         // amplitude are not reliable local speech signals in this game.
         if (!channelOpen)
         {
-            _voiceStateUnavailableLogged = false;
+            ResetMicrophoneUnavailableState(false);
             return true;
         }
 
         float microphoneRms;
         if (TryGetRecentMicrophoneRms(out microphoneRms))
         {
-            _voiceStateUnavailableLogged = false;
+            ResetMicrophoneUnavailableState(true);
             useSilenceHangover = true;
             active = microphoneRms >= OpenMicrophoneRmsThreshold;
             return true;
         }
 
+        if (_microphoneUnavailableSince < 0f)
+            _microphoneUnavailableSince = Time.realtimeSinceStartup;
+
         if (!_voiceStateUnavailableLogged)
         {
             _voiceStateUnavailableLogged = true;
             Plugin.Logger.LogWarning(
-                "[BOT-AGENT] Big Walk's microphone state is not ready; agent listening is paused.");
+                "[BOT-AGENT] Big Walk's microphone state is temporarily unavailable; " +
+                "an active capture will be retained briefly.");
         }
         return false;
+    }
+
+    private void ResetMicrophoneUnavailableState(bool logRecovery)
+    {
+        if (logRecovery && _microphoneUnavailableSince >= 0f)
+        {
+            Plugin.Logger.LogInfo(
+                $"[BOT-AGENT] MICROPHONE_STATE_RECOVERED " +
+                $"afterSeconds={Time.realtimeSinceStartup - _microphoneUnavailableSince:F3}");
+        }
+
+        _microphoneUnavailableSince = -1f;
+        _voiceStateUnavailableLogged = false;
     }
 
     private void LogVoiceChannelState(bool channelOpen)
@@ -213,31 +254,87 @@ internal sealed class GameVoiceInput
 
         var clip = MicManager.GetClip(null);
         var position = MicManager.GetPosition(null);
-        if (clip == null || position <= 0 || clip.frequency <= 0 ||
+        if (clip == null || position < 0 || clip.frequency <= 0 ||
             clip.channels <= 0 || clip.samples <= 0)
         {
             return false;
         }
 
-        var frameCount = Math.Max(1, clip.frequency / 50);
-        if (position < frameCount)
+        var frameCount = Math.Min(clip.samples, Math.Max(1, clip.frequency / 50));
+        var startFrame = position - frameCount;
+        double sumSquares = 0;
+        var measuredSamples = 0;
+        if (startFrame >= 0)
+        {
+            if (!TryAccumulateMicrophoneRms(
+                    clip,
+                    startFrame,
+                    frameCount,
+                    clip.channels,
+                    ref sumSquares,
+                    ref measuredSamples))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            var tailFrameCount = -startFrame;
+            if (!TryAccumulateMicrophoneRms(
+                    clip,
+                    clip.samples - tailFrameCount,
+                    tailFrameCount,
+                    clip.channels,
+                    ref sumSquares,
+                    ref measuredSamples))
+            {
+                return false;
+            }
+
+            if (position > 0 && !TryAccumulateMicrophoneRms(
+                    clip,
+                    0,
+                    position,
+                    clip.channels,
+                    ref sumSquares,
+                    ref measuredSamples))
+            {
+                return false;
+            }
+        }
+
+        if (measuredSamples == 0)
             return false;
 
-        var sampleCount = frameCount * clip.channels;
+        rms = (float)Math.Sqrt(sumSquares / measuredSamples);
+        return true;
+    }
+
+    private bool TryAccumulateMicrophoneRms(
+        AudioClip clip,
+        int startFrame,
+        int frameCount,
+        int channelCount,
+        ref double sumSquares,
+        ref int measuredSamples)
+    {
+        if (frameCount <= 0)
+            return true;
+
+        var sampleCount = frameCount * channelCount;
         if (_voiceActivitySamples == null || _voiceActivitySamples.Length != sampleCount)
             _voiceActivitySamples = new Il2CppStructArray<float>(sampleCount);
 
-        if (!clip.GetData(_voiceActivitySamples, position - frameCount))
+        if (!clip.GetData(_voiceActivitySamples, startFrame))
             return false;
 
-        double sumSquares = 0;
         for (var index = 0; index < _voiceActivitySamples.Length; index++)
         {
             var sample = _voiceActivitySamples[index];
             sumSquares += sample * sample;
         }
 
-        rms = (float)Math.Sqrt(sumSquares / Math.Max(1, _voiceActivitySamples.Length));
+        measuredSamples += _voiceActivitySamples.Length;
         return true;
     }
 
