@@ -1,6 +1,6 @@
-# Big Walk AI Teammate
+# Ramblers
 
-An experimental host-side mod that creates an AI-controlled second player inside a [Big Walk](https://store.steampowered.com/app/1478500/) session. It runs in the host's game process; it does not require or launch a second client.
+An experimental host-side companion mod for [Big Walk](https://store.steampowered.com/app/1478500/). Ramblers creates AI-controlled party members inside the host's game process without requiring or launching additional clients.
 
 ## Current state
 

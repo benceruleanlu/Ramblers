@@ -25,3 +25,9 @@ Runtime evidence after the archived probe history in [`archive/PROBE_HISTORY_0.2
 - **Result:** the cleanup preserved spawn, toggle-mode speech segmentation, tool routing, follow/stay execution, and direct-voice spatial rejection. Toggle-off suppression still lacks an explicit `channelOpen=False` log in this run.
 - **Follow-up:** one rapid conversational sequence produced `API_ERROR Conversation already has an active response in progress`. It did not invalidate the successful tool calls, but input/response serialization remains an explicit reliability task.
 - **Artifact:** two consecutive deterministic builds produced identical artifacts, and the repository/deployed DLL matched SHA-256 `960886B6567645E27E61CC3A4DECEB90C62CE0EDBB4735DEC46737D67B5A3196` at checkpoint time.
+
+## 2026-08-16: Ramblers 0.6.1 project rename loaded
+
+- **Change:** renamed the public project and BepInEx display name to **Ramblers**; replaced the obsolete feasibility-probe runtime label and companion identity markers. The plugin GUID remains `local.bigwalk.botprobe` so the existing OpenAI configuration is retained.
+- **Observed:** a fresh launch logged `Loading [Ramblers 0.6.1]`, emitted `[RAMBLERS] Loaded version 0.6.1`, and reached OpenAI `CONNECTED` and `READY tools=set_follow_mode` without a startup error.
+- **Artifact:** two consecutive deterministic builds matched, and the deployed DLL matched SHA-256 `3BAA5BC5404294AE0716B6E674C2038B774A2A054449583F1FC6E9944E8A0470`.

@@ -16,8 +16,8 @@ namespace BigWalkBotProbe;
 public sealed class Plugin : BasePlugin
 {
     public const string Guid = "local.bigwalk.botprobe";
-    public const string Name = "Big Walk Bot Feasibility Probe";
-    public const string Version = "0.6.0";
+    public const string Name = "Ramblers";
+    public const string Version = "0.6.1";
 
     internal static ManualLogSource Logger = null;
     internal static ConfigEntry<bool> EnableRealtimeAgent = null;
@@ -48,14 +48,14 @@ public sealed class Plugin : BasePlugin
         AddComponent<BotController>();
         AddComponent<RealtimeAgentBridge>();
         Logger.LogInfo(
-            $"[BOT-PROBE] Loaded version {Version}. Waiting for a host session and local player.");
+            $"[RAMBLERS] Loaded version {Version}. Waiting for a host session and local player.");
     }
 }
 
-internal static class ProbeIdentity
+internal static class CompanionIdentity
 {
-    public const string ObjectName = "__NitrogenHostBotProbe";
-    public const string NetworkIdentifier = "local-bot:nitrogen";
+    public const string ObjectName = "__RamblersHostCompanion";
+    public const string NetworkIdentifier = "ramblers:companion:nitrogen";
 
     public static bool IsBot(PlayerNetworking networking)
     {
@@ -71,14 +71,14 @@ internal static class PlayerNetworkingStartPatch
 {
     private static bool Prefix(PlayerNetworking __instance)
     {
-        if (!ProbeIdentity.IsBot(__instance))
+        if (!CompanionIdentity.IsBot(__instance))
             return true;
 
         // The stock server-side Start path assumes connectionToClient and its
         // authenticationData are non-null. A server-owned bot intentionally has
         // neither, so identity is initialized before NetworkServer.Spawn instead.
         Plugin.Logger.LogInfo(
-            "[BOT-PROBE] Bypassed connection-dependent PlayerNetworking.Start for bot.");
+            "[RAMBLERS] Bypassed connection-dependent PlayerNetworking.Start for companion.");
         return false;
     }
 }
@@ -92,7 +92,7 @@ internal static class HouseNetworkTransformIsOwnedPatch
             return;
 
         var networking = __instance.GetComponent<PlayerNetworking>();
-        if (ProbeIdentity.IsBot(networking))
+        if (CompanionIdentity.IsBot(networking))
             __result = true;
     }
 }
@@ -111,7 +111,7 @@ internal static class HouseNetworkTransformIsRestingPatch
         // server-owned and driven directly by the host, so that remote-only gate
         // does not apply.
         var networking = __instance.GetComponent<PlayerNetworking>();
-        if (ProbeIdentity.IsBot(networking))
+        if (CompanionIdentity.IsBot(networking))
             __result = false;
     }
 }
@@ -283,7 +283,7 @@ internal sealed class BotController : MonoBehaviour
                 manager.playerPrefab,
                 position,
                 localPlayer.transform.rotation);
-            _bot.name = ProbeIdentity.ObjectName;
+            _bot.name = CompanionIdentity.ObjectName;
 
             var playerCharacter = _bot.GetComponent<PlayerCharacter>();
             var playerNetworking = _bot.GetComponent<PlayerNetworking>();
@@ -323,13 +323,13 @@ internal sealed class BotController : MonoBehaviour
             _nextNavigationTick = _followAt;
             _nextTrailSample = Time.realtimeSinceStartup + TrailSampleInterval;
             Plugin.Logger.LogInfo(
-                $"[BOT-PROBE] Spawn requested: netId={networkIdentity.netId}, " +
+                $"[RAMBLERS] Spawn requested: netId={networkIdentity.netId}, " +
                 $"connectionToClient={(networkIdentity.connectionToClient == null ? "null" : "non-null")}, " +
                 $"position={position}.");
         }
         catch (Exception exception)
         {
-            Plugin.Logger.LogError($"[BOT-PROBE] Spawn failed: {exception}");
+            Plugin.Logger.LogError($"[RAMBLERS] Spawn failed: {exception}");
             if (_bot != null)
                 UnityEngine.Object.Destroy(_bot);
             _bot = null;
@@ -825,7 +825,7 @@ internal sealed class BotController : MonoBehaviour
         _lastMovementIntent = Vector3.zero;
         _avoidanceSign = 0;
         ClearBreadcrumbs();
-        Plugin.Logger.LogInfo("[BOT-PROBE] Bot left the scene; probe state reset.");
+        Plugin.Logger.LogInfo("[RAMBLERS] Companion left the scene; controller state reset.");
     }
 
     private void OnDestroy()
@@ -851,7 +851,7 @@ internal sealed class BotController : MonoBehaviour
         MirrorIgnorancePlayer voiceIdentity)
     {
         var username = "Nitrogen";
-        var identifier = ProbeIdentity.NetworkIdentifier;
+        var identifier = CompanionIdentity.NetworkIdentifier;
         var moderationName = "Nitrogen";
         var epicUserId = string.Empty;
         ulong platformUserId = 0;
@@ -889,7 +889,7 @@ internal sealed class BotController : MonoBehaviour
             : PlayerCharacter.allPlayerCharacters.Count;
 
         Plugin.Logger.LogInfo(
-            "[BOT-PROBE] VERIFY " +
+            "[RAMBLERS] VERIFY " +
             $"probeVersion={Plugin.Version}, " +
             $"netId={identity?.netId ?? 0}, " +
             $"isServer={networking?.isServer}, " +
