@@ -13,9 +13,11 @@ Not working yet: general navigation, stuck recovery, puzzle interaction, and spe
 
 Near-field noise reduction, automatic semantic VAD, WebSocket interruption and truncation, and serialized response creation are implemented in `0.7.6`, but await runtime verification.
 
+The `0.8.0` source also adds standing, crouching, sitting, and one grounded jump as model-selected actions. Sitting suspends locomotion without erasing a follow request; standing resumes it. These actions await runtime verification.
+
 ## Compatibility
 
-Tested against Big Walk `1.4.9` (build `2608141617`) on BepInEx IL2CPP `6.0.0-be.755`. The established runtime baseline is Ramblers `0.7.5`; the `0.7.6` audio changes target the same bindings but await runtime verification. Other versions are unverified.
+Tested against Big Walk `1.4.9` (build `2608141617`) on BepInEx IL2CPP `6.0.0-be.755`. The established runtime baseline is Ramblers `0.7.5`; the `0.8.0` source targets the same bindings, but its audio, posture, jump, and multi-tool changes await runtime verification. Other versions are unverified.
 
 ## Build
 
@@ -45,5 +47,7 @@ Ramblers reads `OPENAI_API_KEY` from the process or current Windows user environ
 The model never writes movement input and never touches a Unity object. It selects from a fixed tool allowlist, and C# does the driving.
 
 Big Walk voice state and microphone → a continuous semantic-VAD stream or manual push-to-talk turn → OpenAI Realtime → a validated tool call or model audio → the companion controller, or local 3D playback from the companion's body. Synthetic speech is local-only and does not reach remote guests.
+
+The current model-facing surface is `set_follow_mode(follow | stay)`, `set_posture(standing | crouching | sitting)`, and `jump()`. Typed C# components arbitrate persistent follow intent, posture, and transient jump requests. Tool arguments are validated before Unity is touched, and multiple tool outputs are returned before one continuation response is requested.
 
 Earlier probe experiments and the original host-only feasibility work are in [`docs/archive/`](docs/archive/).

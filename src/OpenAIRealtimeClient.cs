@@ -173,7 +173,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             QueueJson(new { type = "response.cancel" });
     }
 
-    internal void SendFunctionResult(string callId, string resultJson)
+    internal void SendFunctionOutput(string callId, string resultJson)
     {
         QueueJson(new
         {
@@ -185,7 +185,6 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                 output = resultJson
             }
         });
-        RequestResponse();
     }
 
     internal void TruncateAudio(RealtimeAudioTruncation truncation)
@@ -271,32 +270,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                         voice = "marin"
                     }
                 },
-                tools = new[]
-                {
-                    new
-                    {
-                        type = "function",
-                        name = "set_follow_mode",
-                        description =
-                            "Start or stop the companion's verified breadcrumb-follow behavior.",
-                        parameters = new
-                        {
-                            type = "object",
-                            properties = new
-                            {
-                                mode = new
-                                {
-                                    type = "string",
-                                    description =
-                                        "Use follow to walk behind the human; use stay to stop and hold position.",
-                                    @enum = new[] { "follow", "stay" }
-                                }
-                            },
-                            required = new[] { "mode" },
-                            additionalProperties = false
-                        }
-                    }
-                },
+                tools = AgentToolCatalog.RealtimeDefinitions,
                 tool_choice = "auto"
             }
         };
@@ -373,7 +347,8 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             {
                 _ready = true;
                 _logs.Enqueue(
-                    "READY tools=set_follow_mode, noiseReduction=near_field, " +
+                    "READY tools=" + AgentToolCatalog.NamesForLog +
+                    ", noiseReduction=near_field, " +
                     "turnDetection=semantic_vad_auto");
                 return;
             }
@@ -472,7 +447,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         }
     }
 
-    private void RequestResponse()
+    internal void RequestResponse()
     {
         var shouldCreate = false;
         lock (_responseSync)
