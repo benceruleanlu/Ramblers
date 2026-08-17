@@ -17,3 +17,11 @@ Runtime evidence after the archived probe history in [`archive/PROBE_HISTORY_0.2
 - **Result:** confirmed for near-range toggle-open speech activity, consecutive silence-separated turns without retoggling, OpenAI tool selection, structured results, and deterministic follow/stay execution. The human remained the local player.
 - **Not established:** toggle-off suppression, direct out-of-range rejection, false-positive rate under background noise, radio routing, or audible bot speech.
 - **Artifact:** the repository build produced from this source and the active deployed DLL both matched SHA-256 `DDA7DF6B573D0E4634CFB5588C41845A0DDB2C0B16878E846F717300920557ED` at checkpoint time.
+
+## 2026-08-16: probe 0.6.0 architecture cleanup regression passed
+
+- **Change:** removed the automated leader/obstacle diagnostic and automatic-follow bypass; removed the falsified local Dissonance transmit/amplitude heuristics and arbitrary proximity-range fallback; separated the bot controller, game-voice input, tool router, Realtime lifecycle bridge, and WebSocket client; enabled deterministic compilation.
+- **Observed:** the plugin loaded as `0.6.0`, OpenAI reached `CONNECTED` and `READY`, and Nitrogen verified as the same connectionless server-owned non-local player. Near-range turns at `2.86 m` and `6.22 m` selected `follow` then `stay`, with both structured tool results succeeding. At `55.14 m`, the loaded stock attenuation curve evaluated to zero and three speech attempts logged `IGNORED reason=out_of_range`; returning in range restored listening and tool execution. The user accepted the cleanup regression test as working.
+- **Result:** the cleanup preserved spawn, toggle-mode speech segmentation, tool routing, follow/stay execution, and direct-voice spatial rejection. Toggle-off suppression still lacks an explicit `channelOpen=False` log in this run.
+- **Follow-up:** one rapid conversational sequence produced `API_ERROR Conversation already has an active response in progress`. It did not invalidate the successful tool calls, but input/response serialization remains an explicit reliability task.
+- **Artifact:** two consecutive deterministic builds produced identical artifacts, and the repository/deployed DLL matched SHA-256 `960886B6567645E27E61CC3A4DECEB90C62CE0EDBB4735DEC46737D67B5A3196` at checkpoint time.

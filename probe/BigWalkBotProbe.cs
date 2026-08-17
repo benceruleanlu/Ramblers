@@ -17,29 +17,15 @@ public sealed class Plugin : BasePlugin
 {
     public const string Guid = "local.bigwalk.botprobe";
     public const string Name = "Big Walk Bot Feasibility Probe";
-    public const string Version = "0.5.4";
+    public const string Version = "0.6.0";
 
     internal static ManualLogSource Logger = null;
-    internal static ConfigEntry<bool> AutomatedLeaderWalk = null;
-    internal static ConfigEntry<bool> StartFollowingAutomatically = null;
     internal static ConfigEntry<bool> EnableRealtimeAgent = null;
     internal static ConfigEntry<string> OpenAIRealtimeModel = null;
 
     public override void Load()
     {
         Logger = Log;
-        AutomatedLeaderWalk = Config.Bind(
-            "Testing",
-            "AutomatedLeaderWalk",
-            false,
-            "Move the host through one short physics-driven test path and place a temporary obstacle. " +
-            "Diagnostic only; keep false for normal play.");
-        StartFollowingAutomatically = Config.Bind(
-            "Testing",
-            "StartFollowingAutomatically",
-            false,
-            "Start breadcrumb following after spawn without an agent tool call. " +
-            "Diagnostic only; keep false when testing OpenAI tool selection.");
         EnableRealtimeAgent = Config.Bind(
             "OpenAI",
             "Enabled",
@@ -51,16 +37,15 @@ public sealed class Plugin : BasePlugin
             "Model",
             "gpt-realtime-2.1",
             "Realtime model ID. Keep the documented default unless deliberately testing another model.");
-        ClassInjector.RegisterTypeInIl2Cpp<ProbeRunner>();
+        ClassInjector.RegisterTypeInIl2Cpp<BotController>();
         ClassInjector.RegisterTypeInIl2Cpp<RealtimeAgentBridge>();
 
         var harmony = new Harmony(Guid);
         harmony.PatchAll(typeof(PlayerNetworkingStartPatch));
         harmony.PatchAll(typeof(HouseNetworkTransformIsOwnedPatch));
         harmony.PatchAll(typeof(HouseNetworkTransformIsRestingPatch));
-        harmony.PatchAll(typeof(PlayerMoverFixedUpdateTestPatch));
 
-        AddComponent<ProbeRunner>();
+        AddComponent<BotController>();
         AddComponent<RealtimeAgentBridge>();
         Logger.LogInfo(
             $"[BOT-PROBE] Loaded version {Version}. Waiting for a host session and local player.");
@@ -131,18 +116,8 @@ internal static class HouseNetworkTransformIsRestingPatch
     }
 }
 
-[HarmonyPatch(typeof(PlayerMover), "FixedUpdate")]
-internal static class PlayerMoverFixedUpdateTestPatch
+internal sealed class BotController : MonoBehaviour
 {
-    private static void Postfix(PlayerMover __instance)
-    {
-        ProbeRunner.ApplyAutomatedLeaderVelocity(__instance);
-    }
-}
-
-internal sealed class ProbeRunner : MonoBehaviour
-{
-    private const float FollowStartDelay = 4f;
     private const float NavigationInterval = 0.1f;
     private const float TrailSampleInterval = 0.1f;
     private const float BreadcrumbSpacing = 0.65f;
@@ -158,9 +133,6 @@ internal sealed class ProbeRunner : MonoBehaviour
     private const float StuckObservationWindow = 2.5f;
     private const float StuckMovementThreshold = 0.15f;
     private const float StatusLogInterval = 1f;
-    private const float TestLeaderSpeed = 0.75f;
-    private const float TestLeaderMaximumDistance = 2.5f;
-    private const float TestObstacleLifetime = 12f;
     private const int MaximumBreadcrumbs = 256;
 
     private static readonly float[] SteeringAngles =
@@ -217,44 +189,37 @@ internal sealed class ProbeRunner : MonoBehaviour
     private Vector3 _progressAnchor;
     private float _progressWindowStartedAt;
     private bool _stuckWarningIssued;
-    private Vector3 _testLeaderDirection;
-    private float _testLeaderEndsAt;
-    private float _testObstacleDestroyAt;
-    private bool _testLeaderActive;
-    private GameObject _testObstacle;
+    private static BotController _activeController;
 
-    private static ProbeRunner _activeTestRunner;
-    private static ProbeRunner _activeRunner;
-
-    public ProbeRunner(IntPtr pointer) : base(pointer)
+    public BotController(IntPtr pointer) : base(pointer)
     {
     }
 
     private void Awake()
     {
-        _activeRunner = this;
+        _activeController = this;
     }
 
     internal static string ExecuteAgentTool(string toolName, string mode)
     {
-        var runner = _activeRunner;
-        if (runner == null)
+        var controller = _activeController;
+        if (controller == null)
             return "{\"ok\":false,\"error\":\"bot_controller_unavailable\"}";
 
         if (!string.Equals(toolName, "set_follow_mode", StringComparison.Ordinal))
             return "{\"ok\":false,\"error\":\"unknown_tool\"}";
 
-        return runner.SetFollowMode(mode);
+        return controller.SetFollowMode(mode);
     }
 
     internal static bool TryGetVoiceParticipants(
         out PlayerCharacter human,
         out PlayerCharacter bot)
     {
-        var runner = _activeRunner;
+        var controller = _activeController;
         human = WorldManager.localPlayerCharacter;
-        bot = runner == null ? null : runner._botCharacter;
-        return human != null && bot != null && runner._bot != null;
+        bot = controller == null ? null : controller._botCharacter;
+        return human != null && bot != null && controller._bot != null;
     }
 
     private void Update()
@@ -298,7 +263,6 @@ internal sealed class ProbeRunner : MonoBehaviour
 
         try
         {
-            TickAutomatedLeaderTest(Time.realtimeSinceStartup);
             TickFollowPlayer();
         }
         catch (Exception exception)
@@ -343,8 +307,8 @@ internal sealed class ProbeRunner : MonoBehaviour
             _botNetworking = playerNetworking;
             _humanAtSpawn = localPlayer;
             _hasSpawnedBot = true;
-            _followRequested = Plugin.StartFollowingAutomatically.Value;
-            _followState = _followRequested ? FollowState.Waiting : FollowState.Idle;
+            _followRequested = false;
+            _followState = FollowState.Idle;
             _lastMovementIntent = Vector3.zero;
             _avoidanceSign = 0;
             _lastSteeringAngle = 0f;
@@ -355,9 +319,7 @@ internal sealed class ProbeRunner : MonoBehaviour
             AddBreadcrumb(localPlayer.transform.position);
 
             _verifyAt = Time.realtimeSinceStartup + 2f;
-            _followAt = _followRequested
-                ? Time.realtimeSinceStartup + FollowStartDelay
-                : float.PositiveInfinity;
+            _followAt = float.PositiveInfinity;
             _nextNavigationTick = _followAt;
             _nextTrailSample = Time.realtimeSinceStartup + TrailSampleInterval;
             Plugin.Logger.LogInfo(
@@ -434,8 +396,6 @@ internal sealed class ProbeRunner : MonoBehaviour
             $"bodyRadius={(bodyCollider == null ? -1f : bodyCollider.radius):F2}, " +
             $"bodyHeight={(bodyCollider == null ? -1f : bodyCollider.height):F2}.");
 
-        if (Plugin.AutomatedLeaderWalk.Value)
-            BeginAutomatedLeaderTest(now, human);
     }
 
     private string SetFollowMode(string mode)
@@ -668,147 +628,6 @@ internal sealed class ProbeRunner : MonoBehaviour
         return Physics.DefaultRaycastLayers;
     }
 
-    private void BeginAutomatedLeaderTest(float now, PlayerCharacter human)
-    {
-        var awayFromBot = human.transform.position - _bot.transform.position;
-        awayFromBot.y = 0f;
-        if (awayFromBot.sqrMagnitude < 0.01f)
-            awayFromBot = human.transform.forward;
-        awayFromBot.y = 0f;
-        awayFromBot.Normalize();
-
-        var bestDirection = Vector3.zero;
-        var bestClearance = 0f;
-        var bestScore = float.NegativeInfinity;
-        for (var index = 0; index < SteeringAngles.Length; index++)
-        {
-            var angle = SteeringAngles[index];
-            var candidate = Quaternion.AngleAxis(angle, Vector3.up) * awayFromBot;
-            var candidateClearance = MeasureCharacterClearance(
-                human,
-                candidate,
-                TestLeaderMaximumDistance + 0.5f);
-            var score = candidateClearance - Mathf.Abs(angle) * 0.003f;
-            if (score <= bestScore)
-                continue;
-
-            bestScore = score;
-            bestDirection = candidate;
-            bestClearance = candidateClearance;
-        }
-
-        var travelDistance = Mathf.Min(
-            TestLeaderMaximumDistance,
-            Mathf.Max(0f, bestClearance - 0.35f));
-        if (travelDistance < 0.75f || human.rb == null)
-        {
-            Plugin.Logger.LogWarning(
-                "[BOT-TEST] Automated leader walk skipped: no safe 0.75m path or rigidbody.");
-            return;
-        }
-
-        _testLeaderDirection = bestDirection;
-        _testLeaderEndsAt = now + travelDistance / TestLeaderSpeed;
-        _testLeaderActive = true;
-        _activeTestRunner = this;
-        CreateTestObstacle(now, human);
-        Plugin.Logger.LogInfo(
-            "[BOT-TEST] LEADER_START " +
-            $"direction={bestDirection}, plannedDistance={travelDistance:F2}, " +
-            $"speed={TestLeaderSpeed:F2}, obstacle={_testObstacle != null}.");
-    }
-
-    internal static void ApplyAutomatedLeaderVelocity(PlayerMover mover)
-    {
-        var runner = _activeTestRunner;
-        if (runner == null || !runner._testLeaderActive ||
-            Plugin.AutomatedLeaderWalk == null || !Plugin.AutomatedLeaderWalk.Value)
-        {
-            return;
-        }
-
-        var human = runner.GetHumanPlayer();
-        if (human == null || human.mover != mover || human.rb == null)
-            return;
-
-        var velocity = human.rb.linearVelocity;
-        velocity.x = runner._testLeaderDirection.x * TestLeaderSpeed;
-        velocity.z = runner._testLeaderDirection.z * TestLeaderSpeed;
-        human.rb.linearVelocity = velocity;
-    }
-
-    private void TickAutomatedLeaderTest(float now)
-    {
-        if (_testLeaderActive)
-        {
-            var human = GetHumanPlayer();
-            if (human == null || human.rb == null || now >= _testLeaderEndsAt)
-            {
-                if (human != null && human.rb != null)
-                {
-                    var velocity = human.rb.linearVelocity;
-                    velocity.x = 0f;
-                    velocity.z = 0f;
-                    human.rb.linearVelocity = velocity;
-                }
-
-                _testLeaderActive = false;
-                if (_activeTestRunner == this)
-                    _activeTestRunner = null;
-                Plugin.Logger.LogInfo(
-                    $"[BOT-TEST] LEADER_END position={human?.transform.position}.");
-            }
-            else
-            {
-                var velocity = human.rb.linearVelocity;
-                velocity.x = _testLeaderDirection.x * TestLeaderSpeed;
-                velocity.z = _testLeaderDirection.z * TestLeaderSpeed;
-                human.rb.linearVelocity = velocity;
-            }
-        }
-
-        if (_testObstacle != null && now >= _testObstacleDestroyAt)
-        {
-            UnityEngine.Object.Destroy(_testObstacle);
-            _testObstacle = null;
-            Plugin.Logger.LogInfo("[BOT-TEST] Temporary obstacle removed.");
-        }
-    }
-
-    private void CreateTestObstacle(float now, PlayerCharacter human)
-    {
-        _testObstacle = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        _testObstacle.name = "__NitrogenFollowTestObstacle";
-        var midpoint = (_bot.transform.position + human.transform.position) * 0.5f;
-        midpoint.y = Mathf.Min(_bot.transform.position.y, human.transform.position.y) + 0.75f;
-        _testObstacle.transform.position = midpoint;
-        _testObstacle.transform.localScale = new Vector3(0.7f, 1.5f, 0.7f);
-
-        if (human.ground != null && human.ground.groundCollider != null)
-        {
-            _testObstacle.layer = human.ground.groundCollider.gameObject.layer;
-        }
-        else
-        {
-            var mask = GetObstacleMask(human);
-            for (var layer = 0; layer < 32; layer++)
-            {
-                if ((mask & (1 << layer)) == 0)
-                    continue;
-                _testObstacle.layer = layer;
-                break;
-            }
-        }
-
-        Physics.SyncTransforms();
-
-        _testObstacleDestroyAt = now + TestObstacleLifetime;
-        Plugin.Logger.LogInfo(
-            "[BOT-TEST] OBSTACLE " +
-            $"position={midpoint}, scale={_testObstacle.transform.localScale}, " +
-            $"layer={_testObstacle.layer}, lifetime={TestObstacleLifetime:F1}s.");
-    }
-
     private void RecordHumanTrail()
     {
         var human = GetHumanPlayer();
@@ -1005,29 +824,14 @@ internal sealed class ProbeRunner : MonoBehaviour
         _followState = FollowState.Idle;
         _lastMovementIntent = Vector3.zero;
         _avoidanceSign = 0;
-        _testLeaderActive = false;
-        if (_activeTestRunner == this)
-            _activeTestRunner = null;
-        if (_testObstacle != null)
-            UnityEngine.Object.Destroy(_testObstacle);
-        _testObstacle = null;
         ClearBreadcrumbs();
         Plugin.Logger.LogInfo("[BOT-PROBE] Bot left the scene; probe state reset.");
     }
 
     private void OnDestroy()
     {
-        if (_activeRunner == this)
-            _activeRunner = null;
-
-        if (_activeTestRunner == this)
-            _activeTestRunner = null;
-
-        if (_testObstacle != null)
-        {
-            UnityEngine.Object.Destroy(_testObstacle);
-            _testObstacle = null;
-        }
+        if (_activeController == this)
+            _activeController = null;
 
         if (_botNetworking == null || !NetworkServer.active)
             return;
