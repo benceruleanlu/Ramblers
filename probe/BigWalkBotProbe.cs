@@ -17,7 +17,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string Guid = "local.bigwalk.botprobe";
     public const string Name = "Ramblers";
-    public const string Version = "0.7.2";
+    public const string Version = "0.7.5";
 
     internal static ManualLogSource Logger = null;
     internal static ConfigEntry<bool> EnableRealtimeAgent = null;
@@ -125,8 +125,23 @@ internal sealed class BotController : MonoBehaviour
     private const float FollowDistance = 2.25f;
     private const float ResumeDistance = 2.5f;
     private const float TrailResetDistance = 8f;
-    private const float SlowdownDistance = 2.25f;
-    private const float MinimumMovementIntent = 0.35f;
+
+    // PlayerNetworking.controlsVelocity is a world-space velocity in metres per
+    // second: PlayerMover.FixedUpdate feeds it through PlayerGround.GetSlopedMoveForce
+    // into the rigidbody for a remote body exactly as it does for a local one, whose
+    // magnitude comes from PlayerMover.GetForwardSpeed(). Movement is therefore
+    // commanded in game speed units, never as a normalized 0-1 intent.
+    // Walking and running are discrete player gaits. The threshold is the midpoint
+    // of the old blend interval, but there is no blended or jogging speed anymore.
+    // A run remains latched until the companion comes to a complete stop; walking
+    // may promote to running while moving, matching the stock player's controls.
+    private const float RunStartDistance = 6.75f;
+    private const float FallbackWalkSpeed = 3f;
+    private const float FallbackRunSpeed = 5.5f;
+    private const float BodyTurnSpeed = 180f;
+    private const float FallbackSideLookLimit = 85f;
+    private const float FallbackVerticalLookLimit = 55f;
+    private const float BrakingLookahead = 0.45f;
     private const float ObstacleProbeDistance = 1.5f;
     private const float MinimumClearance = 0.7f;
     private const float AvoidanceSideHold = 0.6f;
@@ -158,6 +173,13 @@ internal sealed class BotController : MonoBehaviour
         Failed
     }
 
+    private enum MovementGait
+    {
+        Stopped,
+        Walk,
+        Run
+    }
+
     private GameObject _bot;
     private PlayerCharacter _botCharacter;
     private PlayerNetworking _botNetworking;
@@ -178,6 +200,16 @@ internal sealed class BotController : MonoBehaviour
     private Vector3 _lastHumanTrailPosition;
     private bool _hasHumanTrailPosition;
     private Vector3 _lastMovementIntent;
+    private float _walkSpeed = FallbackWalkSpeed;
+    private float _runSpeed = FallbackRunSpeed;
+    private bool _gaitSpeedsFromTunings;
+    private MovementGait _movementGait = MovementGait.Stopped;
+    private float _lastCommandedSpeed;
+    private float _lastTrailDistance;
+    private Vector2 _headState;
+    private float _lastFacingUpdateAt;
+    private float _lastBodyYaw;
+    private float _lastTargetYaw;
     private Vector3 _currentTarget;
     private float _followStartedAt;
     private float _nextStatusLog;
@@ -300,6 +332,7 @@ internal sealed class BotController : MonoBehaviour
             }
 
             playerCharacter.mover.applyVelocityForRemotePlayers = true;
+            ResolveGaitSpeeds(playerCharacter);
             SetSyntheticIdentity(playerNetworking, voiceIdentity);
             NetworkServer.Spawn(_bot);
 
@@ -314,6 +347,13 @@ internal sealed class BotController : MonoBehaviour
             _lastSteeringAngle = 0f;
             _lastClearance = ObstacleProbeDistance;
             _lastDirectPathBlocked = false;
+            _movementGait = MovementGait.Stopped;
+            _lastCommandedSpeed = 0f;
+            _lastTrailDistance = 0f;
+            _headState = Vector2.zero;
+            _lastFacingUpdateAt = Time.realtimeSinceStartup;
+            _lastBodyYaw = _bot.transform.eulerAngles.y;
+            _lastTargetYaw = _lastBodyYaw;
             _stuckWarningIssued = false;
             ClearBreadcrumbs();
             AddBreadcrumb(localPlayer.transform.position);
@@ -382,6 +422,7 @@ internal sealed class BotController : MonoBehaviour
         _followState = FollowState.Following;
         _followStartedAt = now;
         _nextStatusLog = now;
+        _lastFacingUpdateAt = now;
         ResetProgressObservation(now);
 
         var bodyCollider = _botCharacter.collision == null
@@ -392,6 +433,10 @@ internal sealed class BotController : MonoBehaviour
             "[BOT-FOLLOW] START " +
             $"bot={_bot.transform.position}, human={human.transform.position}, " +
             $"followDistance={FollowDistance:F2}, breadcrumbSpacing={BreadcrumbSpacing:F2}, " +
+            $"walkSpeed={_walkSpeed:F2}, runSpeed={_runSpeed:F2}, " +
+            $"gaitSpeedsFromTunings={_gaitSpeedsFromTunings}, " +
+            $"runStartDistance={RunStartDistance:F2}, runLatchesUntilStop=true, " +
+            $"bodyTurnSpeed={BodyTurnSpeed:F0}, lookLimitsFromTunings=true, " +
             $"navigationHz={1f / NavigationInterval:F0}, obstacleMask={obstacleMask}, " +
             $"bodyRadius={(bodyCollider == null ? -1f : bodyCollider.radius):F2}, " +
             $"bodyHeight={(bodyCollider == null ? -1f : bodyCollider.height):F2}.");
@@ -444,6 +489,7 @@ internal sealed class BotController : MonoBehaviour
         }
 
         var botPosition = _bot.transform.position;
+        FaceHuman(human, now);
         var humanDistance = HorizontalDistance(botPosition, human.transform.position);
         if (humanDistance <= FollowDistance ||
             (_followState == FollowState.Holding && humanDistance < ResumeDistance))
@@ -468,6 +514,18 @@ internal sealed class BotController : MonoBehaviour
         }
 
         var desiredDirection = toTarget / targetDistance;
+
+        // The gait follows the remaining breadcrumb trail rather than the straight-line
+        // gap, so a human who is close through a wall but far along the walked route
+        // still makes the companion run.
+        var trailDistance = MeasureTrailDistance(botPosition, human.transform.position);
+        var gaitSpeed = ResolveMovementSpeed(trailDistance);
+        _lastTrailDistance = trailDistance;
+
+        // Look far enough ahead to stop from the gait being requested. The sweep never
+        // shortens below the walking probe, so obstacle detection is unchanged at walk.
+        var probeDistance = Mathf.Max(ObstacleProbeDistance, gaitSpeed * BrakingLookahead);
+
         Vector3 steeringDirection;
         float steeringAngle;
         float clearance;
@@ -475,6 +533,7 @@ internal sealed class BotController : MonoBehaviour
         if (!TryChooseSteering(
                 desiredDirection,
                 now,
+                probeDistance,
                 out steeringDirection,
                 out steeringAngle,
                 out clearance,
@@ -503,13 +562,12 @@ internal sealed class BotController : MonoBehaviour
         _lastSteeringAngle = steeringAngle;
         _lastClearance = clearance;
 
-        var intentMagnitude = Mathf.Clamp(
-            Mathf.Min(targetDistance, humanDistance - FollowDistance) / SlowdownDistance,
-            MinimumMovementIntent,
-            1f);
-        var clearanceScale = Mathf.Clamp01((clearance - 0.15f) / MinimumClearance);
-        intentMagnitude *= Mathf.Max(MinimumMovementIntent, clearanceScale);
-        SetMovementIntent(steeringDirection * intentMagnitude);
+        // Use the exact stock walk or run speed. Only immediate obstacle clearance
+        // may cap it for collision safety; distance to the player never creates a
+        // third, artificial "jog" speed.
+        var speed = Mathf.Min(gaitSpeed, clearance / BrakingLookahead);
+        _lastCommandedSpeed = speed;
+        SetMovementIntent(steeringDirection * speed);
 
         if (directBlocked &&
             (previousState != FollowState.Following ||
@@ -532,6 +590,7 @@ internal sealed class BotController : MonoBehaviour
     private bool TryChooseSteering(
         Vector3 desiredDirection,
         float now,
+        float probeDistance,
         out Vector3 steeringDirection,
         out float steeringAngle,
         out float clearance,
@@ -541,7 +600,7 @@ internal sealed class BotController : MonoBehaviour
         steeringAngle = 0f;
         clearance = 0f;
 
-        var directClearance = MeasureClearance(desiredDirection);
+        var directClearance = MeasureClearance(desiredDirection, probeDistance);
         directBlocked = directClearance < MinimumClearance;
         if (!directBlocked)
         {
@@ -556,7 +615,7 @@ internal sealed class BotController : MonoBehaviour
         {
             var angle = SteeringAngles[index];
             var candidate = Quaternion.AngleAxis(angle, Vector3.up) * desiredDirection;
-            var candidateClearance = MeasureClearance(candidate);
+            var candidateClearance = MeasureClearance(candidate, probeDistance);
             if (candidateClearance < MinimumClearance)
                 continue;
 
@@ -565,7 +624,12 @@ internal sealed class BotController : MonoBehaviour
             var sideBonus = now < _avoidanceSignUntil && candidateSign == _avoidanceSign
                 ? 0.35f
                 : 0f;
-            var score = candidateClearance - turnPenalty + sideBonus;
+
+            // Score on the walking probe window so a longer sweep at running speed
+            // cannot outweigh the turn penalty and change which detour is chosen.
+            var score = Mathf.Min(candidateClearance, ObstacleProbeDistance)
+                      - turnPenalty
+                      + sideBonus;
             if (score <= bestScore)
                 continue;
 
@@ -586,12 +650,151 @@ internal sealed class BotController : MonoBehaviour
         return true;
     }
 
-    private float MeasureClearance(Vector3 direction)
+    private float MeasureClearance(Vector3 direction, float probeDistance)
     {
         return MeasureCharacterClearance(
             _botCharacter,
             direction,
-            ObstacleProbeDistance);
+            probeDistance);
+    }
+
+    private void ResolveGaitSpeeds(PlayerCharacter character)
+    {
+        var tunings = character.tunings;
+        var hasTunedWalkSpeed = tunings != null && tunings.forwardSpeed > 0.01f;
+        _walkSpeed = hasTunedWalkSpeed ? tunings.forwardSpeed : FallbackWalkSpeed;
+
+        var hasTunedRunSpeed = tunings != null && tunings.forwardSprintSpeed > _walkSpeed;
+        _runSpeed = hasTunedRunSpeed
+            ? tunings.forwardSprintSpeed
+            : Mathf.Max(_walkSpeed, FallbackRunSpeed);
+        _gaitSpeedsFromTunings = hasTunedWalkSpeed && hasTunedRunSpeed;
+    }
+
+    private float ResolveMovementSpeed(float trailDistance)
+    {
+        if (_movementGait != MovementGait.Run && trailDistance >= RunStartDistance)
+        {
+            SetMovementGait(MovementGait.Run);
+            Plugin.Logger.LogInfo(
+                "[BOT-FOLLOW] GAIT run " +
+                $"trailDistance={trailDistance:F2}; latched until the next complete stop.");
+        }
+        else if (_movementGait == MovementGait.Stopped)
+        {
+            SetMovementGait(MovementGait.Walk);
+            Plugin.Logger.LogInfo(
+                $"[BOT-FOLLOW] GAIT walk trailDistance={trailDistance:F2}.");
+        }
+
+        return _movementGait == MovementGait.Run ? _runSpeed : _walkSpeed;
+    }
+
+    private void SetMovementGait(MovementGait gait)
+    {
+        _movementGait = gait;
+        if (_botCharacter?.sprinter == null)
+            return;
+
+        var sprinting = gait == MovementGait.Run;
+        _botCharacter.sprinter.isSprinting = sprinting;
+        _botCharacter.sprinter.sprintIsToggledOn = sprinting;
+    }
+
+    private void FaceHuman(PlayerCharacter human, float now)
+    {
+        if (human == null ||
+            _botCharacter?.head == null ||
+            _botCharacter.houseNetworkTransform == null ||
+            _botNetworking == null)
+            return;
+
+        var botHeadPosition = _botCharacter.cameraTransform == null
+            ? _bot.transform.position + Vector3.up * 1.5f
+            : _botCharacter.cameraTransform.position;
+        var humanHeadPosition = human.cameraTransform == null
+            ? human.transform.position + Vector3.up * 1.5f
+            : human.cameraTransform.position;
+        var toHuman = humanHeadPosition - botHeadPosition;
+        var horizontalDirection = new Vector3(toHuman.x, 0f, toHuman.z);
+        var horizontalDistance = horizontalDirection.magnitude;
+        if (horizontalDistance < 0.001f && Mathf.Abs(toHuman.y) < 0.001f)
+            return;
+
+        var networkTransform = _botCharacter.houseNetworkTransform;
+        var currentRotation = networkTransform.targetRotation;
+        var currentForward = currentRotation * Vector3.forward;
+        currentForward.y = 0f;
+        if (currentForward.sqrMagnitude < 0.0001f)
+        {
+            currentForward = _bot.transform.forward;
+            currentForward.y = 0f;
+        }
+
+        var bodyYaw = Mathf.Atan2(currentForward.x, currentForward.z) * Mathf.Rad2Deg;
+        var targetYaw = horizontalDistance < 0.001f
+            ? bodyYaw
+            : Mathf.Atan2(horizontalDirection.x, horizontalDirection.z) * Mathf.Rad2Deg;
+        var elapsed = _lastFacingUpdateAt <= 0f
+            ? NavigationInterval
+            : Mathf.Clamp(now - _lastFacingUpdateAt, 0f, NavigationInterval * 2f);
+        _lastFacingUpdateAt = now;
+
+        // Stock PlayerMover.UpdatePerFrameRotation absorbs horizontal look into
+        // PlayerCharacter.kernal at 180 degrees per second. That method is local-only,
+        // so a connectionless non-local companion performs the same body step here.
+        var yawError = Mathf.DeltaAngle(bodyYaw, targetYaw);
+        var bodyStep = Mathf.Clamp(
+            yawError,
+            -BodyTurnSpeed * elapsed,
+            BodyTurnSpeed * elapsed);
+        var nextRotation = Quaternion.AngleAxis(bodyStep, Vector3.up) * currentRotation;
+        networkTransform.targetRotation = nextRotation;
+
+        var tunings = _botCharacter.tunings;
+        var sideLookLimit = tunings != null && tunings.sideLookLimit > 0.01f
+            ? tunings.sideLookLimit
+            : FallbackSideLookLimit;
+        var upperLookLimit = tunings != null && tunings.upperLookLimit > 0.01f
+            ? tunings.upperLookLimit
+            : FallbackVerticalLookLimit;
+        var lowerLookLimit = tunings != null && tunings.lowerLookLimit > 0.01f
+            ? tunings.lowerLookLimit
+            : FallbackVerticalLookLimit;
+
+        // PlayerHead's replicated Vector2 is (yaw relative to the body, pitch).
+        // The residual yaw decays to zero as the body catches the target. Unity's
+        // positive X rotation looks downward, hence the negative pitch.
+        var remainingYaw = Mathf.DeltaAngle(bodyYaw + bodyStep, targetYaw);
+        var desiredPitch = -Mathf.Atan2(toHuman.y, horizontalDistance) * Mathf.Rad2Deg;
+        _headState = new Vector2(
+            Mathf.Clamp(remainingYaw, -sideLookLimit, sideLookLimit),
+            Mathf.Clamp(desiredPitch, -upperLookLimit, lowerLookLimit));
+
+        _lastBodyYaw = bodyYaw + bodyStep;
+        _lastTargetYaw = targetYaw;
+
+        // The body rotation is sampled by the already-owned HouseNetworkTransform;
+        // residual head pose uses the stock SyncVar/animator path.
+        _botCharacter.head.headState = _headState;
+        _botNetworking.NetworkheadState = _headState;
+    }
+
+    private float MeasureTrailDistance(Vector3 botPosition, Vector3 humanPosition)
+    {
+        if (_breadcrumbCount == 0)
+            return HorizontalDistance(botPosition, humanPosition);
+
+        var previous = PeekBreadcrumb();
+        var total = HorizontalDistance(botPosition, previous);
+        for (var offset = 1; offset < _breadcrumbCount; offset++)
+        {
+            var current = _breadcrumbs[(_breadcrumbHead + offset) % MaximumBreadcrumbs];
+            total += HorizontalDistance(previous, current);
+            previous = current;
+        }
+
+        return total + HorizontalDistance(previous, humanPosition);
     }
 
     private float MeasureCharacterClearance(
@@ -716,13 +919,15 @@ internal sealed class BotController : MonoBehaviour
     {
         if (_lastMovementIntent.sqrMagnitude > 0f)
             SetMovementIntent(Vector3.zero);
+        SetMovementGait(MovementGait.Stopped);
+        _lastCommandedSpeed = 0f;
         _followState = state;
         ResetProgressObservation(now);
     }
 
     private void ObservePossibleStuck(float now)
     {
-        if (_lastMovementIntent.magnitude < MinimumMovementIntent)
+        if (_lastCommandedSpeed <= 0.01f)
         {
             ResetProgressObservation(now);
             return;
@@ -739,8 +944,9 @@ internal sealed class BotController : MonoBehaviour
                 _stuckWarningIssued = true;
                 Plugin.Logger.LogWarning(
                     "[BOT-FOLLOW] POSSIBLY_STUCK " +
-                    $"moved={movement:F2}m in {StuckObservationWindow:F1}s while intent=" +
-                    $"{_lastMovementIntent.magnitude:F2}. Detection only; no recovery attempted.");
+                    $"moved={movement:F2}m in {StuckObservationWindow:F1}s while commanded " +
+                    $"speed={_lastCommandedSpeed:F2} m/s ({DescribeGait()}). " +
+                    "Detection only; no recovery attempted.");
             }
         }
         else
@@ -773,6 +979,7 @@ internal sealed class BotController : MonoBehaviour
         {
             _lastMovementIntent = Vector3.zero;
         }
+        SetMovementGait(MovementGait.Stopped);
 
         Plugin.Logger.LogError($"[BOT-FOLLOW] FAILED {reason}");
     }
@@ -806,11 +1013,20 @@ internal sealed class BotController : MonoBehaviour
             $"state={_followState}, elapsed={now - _followStartedAt:F2}, " +
             $"position={_bot.transform.position}, humanDistance={humanDistance:F2}, " +
             $"target={_currentTarget}, targetDistance={targetDistance:F2}, " +
+            $"trailDistance={_lastTrailDistance:F2}, " +
+            $"commandedSpeed={_lastCommandedSpeed:F2}, " +
+            $"gait={DescribeGait()}, bodyYaw={_lastBodyYaw:F1}, " +
+            $"targetYaw={_lastTargetYaw:F1}, headState={_headState}, " +
             $"breadcrumbs={_breadcrumbCount}, directBlocked={_lastDirectPathBlocked}, " +
             $"steeringAngle={_lastSteeringAngle:F0}, clearance={_lastClearance:F2}, " +
             $"intent={_lastMovementIntent}, rigidbodyVelocity={rigidbodyVelocity}, " +
             $"networkIntent={_botNetworking.controlsVelocity}, " +
             $"botIsLocalPlayer={_botNetworking.isLocalPlayer}, hostStillLocal={hostStillLocal}.");
+    }
+
+    private string DescribeGait()
+    {
+        return _movementGait.ToString().ToLowerInvariant();
     }
 
     private void ResetAfterBotDestroyed()
@@ -824,6 +1040,16 @@ internal sealed class BotController : MonoBehaviour
         _followState = FollowState.Idle;
         _lastMovementIntent = Vector3.zero;
         _avoidanceSign = 0;
+        _walkSpeed = FallbackWalkSpeed;
+        _runSpeed = FallbackRunSpeed;
+        _gaitSpeedsFromTunings = false;
+        _movementGait = MovementGait.Stopped;
+        _lastCommandedSpeed = 0f;
+        _lastTrailDistance = 0f;
+        _headState = Vector2.zero;
+        _lastFacingUpdateAt = 0f;
+        _lastBodyYaw = 0f;
+        _lastTargetYaw = 0f;
         ClearBreadcrumbs();
         Plugin.Logger.LogInfo("[RAMBLERS] Companion left the scene; controller state reset.");
     }
@@ -839,6 +1065,7 @@ internal sealed class BotController : MonoBehaviour
         try
         {
             SetMovementIntent(Vector3.zero);
+            SetMovementGait(MovementGait.Stopped);
         }
         catch
         {
@@ -901,6 +1128,11 @@ internal sealed class BotController : MonoBehaviour
             $"voicePlayerId={voiceIdentity?.PlayerId ?? "<none>"}, " +
             $"voiceTracking={voiceIdentity?.IsTracking}, " +
             $"remoteMotorEnabled={playerCharacter?.mover?.applyVelocityForRemotePlayers}, " +
+            $"tuningForwardSpeed={playerCharacter?.tunings?.forwardSpeed}, " +
+            $"tuningForwardSprintSpeed={playerCharacter?.tunings?.forwardSprintSpeed}, " +
+            $"tuningSideLookLimit={playerCharacter?.tunings?.sideLookLimit}, " +
+            $"tuningUpperLookLimit={playerCharacter?.tunings?.upperLookLimit}, " +
+            $"tuningLowerLookLimit={playerCharacter?.tunings?.lowerLookLimit}, " +
             $"movementResting={networkTransform?.IsRestingForPlayerMovement}, " +
             $"playerCharacterPresent={playerCharacter != null}.");
     }
