@@ -63,7 +63,13 @@ The Realtime integration reads `OPENAI_API_KEY` from the process or current Wind
 
 The model chooses from a small tool allowlist; it never writes movement input or touches Unity objects directly.
 
-- [`src/RamblersPlugin.cs`](src/RamblersPlugin.cs) — host-only spawn/authority adapters and the deterministic `CompanionController` for breadcrumb following.
+- [`src/RamblersPlugin.cs`](src/RamblersPlugin.cs) — BepInEx entry point, configuration, and IL2CPP type registration.
+- [`src/CompanionIdentity.cs`](src/CompanionIdentity.cs) — how a companion body is recognised, its synthetic identity, and the host-only authority patches.
+- [`src/CompanionController.cs`](src/CompanionController.cs) — companion lifecycle and the deterministic breadcrumb-follow behaviour.
+- [`src/CompanionBody.cs`](src/CompanionBody.cs) — the spawned companion's components, resolved once and handed to every behaviour.
+- [`src/CompanionLocomotion.cs`](src/CompanionLocomotion.cs) — gait, obstacle sweeping, steering, and stuck observation, driven by a direction and a route length.
+- [`src/CompanionFacing.cs`](src/CompanionFacing.cs) — body turn and head pose aimed at a caller-supplied world point.
+- [`src/BreadcrumbTrail.cs`](src/BreadcrumbTrail.cs) — bounded FIFO of walked positions; pure storage and geometry.
 - [`src/GameVoiceInput.cs`](src/GameVoiceInput.cs) — Big Walk toggle/hold state, existing microphone capture, direct-voice attenuation, and bounded PCM turns.
 - [`src/GameVoiceOutput.cs`](src/GameVoiceOutput.cs) — completed Realtime PCM utterances played by a local 3D audio source attached to the companion body.
 - [`src/OpenAIRealtimeBridge.cs`](src/OpenAIRealtimeBridge.cs) — thin Unity-main-thread lifecycle coordinator.
