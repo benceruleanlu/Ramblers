@@ -191,7 +191,8 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                     {
                         format = new
                         {
-                            type = "audio/pcm"
+                            type = "audio/pcm",
+                            rate = 24000
                         },
                         voice = "marin"
                     }
