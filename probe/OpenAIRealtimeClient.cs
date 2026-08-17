@@ -32,6 +32,12 @@ internal sealed class RealtimeFunctionCall
     internal string Arguments;
 }
 
+internal sealed class RealtimeAudioPacket
+{
+    internal byte[] Pcm16;
+    internal bool EndsResponse;
+}
+
 /// <summary>
 /// Pure managed WebSocket client. It exchanges JSON/PCM and queues model
 /// decisions for the Unity main thread; it never touches Unity objects.
@@ -46,6 +52,8 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
     private readonly ConcurrentQueue<string> _logs = new ConcurrentQueue<string>();
     private readonly ConcurrentQueue<RealtimeFunctionCall> _functionCalls =
         new ConcurrentQueue<RealtimeFunctionCall>();
+    private readonly ConcurrentQueue<RealtimeAudioPacket> _audioPackets =
+        new ConcurrentQueue<RealtimeAudioPacket>();
     private readonly SemaphoreSlim _outboundSignal = new SemaphoreSlim(0);
 
     private Task _runTask;
@@ -77,6 +85,11 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
     internal bool TryDequeueFunctionCall(out RealtimeFunctionCall functionCall)
     {
         return _functionCalls.TryDequeue(out functionCall);
+    }
+
+    internal bool TryDequeueAudioPacket(out RealtimeAudioPacket packet)
+    {
+        return _audioPackets.TryDequeue(out packet);
     }
 
     public void ClearInputAudio()
@@ -156,7 +169,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             {
                 type = "realtime",
                 model = _model,
-                output_modalities = new[] { "text" },
+                output_modalities = new[] { "audio" },
                 instructions =
                     "You are Nitrogen, a concise cooperative teammate inside Big Walk. " +
                     "When the human asks you to follow, come with them, walk with them, or keep up, " +
@@ -173,6 +186,14 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                             rate = 24000
                         },
                         turn_detection = (object)null
+                    },
+                    output = new
+                    {
+                        format = new
+                        {
+                            type = "audio/pcm"
+                        },
+                        voice = "marin"
                     }
                 },
                 tools = new[]
@@ -269,11 +290,39 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                 return;
             }
 
-            if (type == "response.output_text.done")
+            if (type == "response.output_audio.delta")
             {
-                JsonElement textElement;
-                if (root.TryGetProperty("text", out textElement))
-                    _logs.Enqueue("SAY " + textElement.GetString());
+                JsonElement deltaElement;
+                if (root.TryGetProperty("delta", out deltaElement))
+                {
+                    var delta = deltaElement.GetString();
+                    if (!string.IsNullOrEmpty(delta))
+                    {
+                        _audioPackets.Enqueue(new RealtimeAudioPacket
+                        {
+                            Pcm16 = Convert.FromBase64String(delta),
+                            EndsResponse = false
+                        });
+                    }
+                }
+                return;
+            }
+
+            if (type == "response.output_audio.done")
+            {
+                _audioPackets.Enqueue(new RealtimeAudioPacket
+                {
+                    Pcm16 = null,
+                    EndsResponse = true
+                });
+                return;
+            }
+
+            if (type == "response.output_audio_transcript.done")
+            {
+                JsonElement transcriptElement;
+                if (root.TryGetProperty("transcript", out transcriptElement))
+                    _logs.Enqueue("SAY " + transcriptElement.GetString());
                 return;
             }
 

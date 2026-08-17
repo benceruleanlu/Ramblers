@@ -14,7 +14,7 @@ Runtime tests have confirmed that the mod can:
 - Use Big Walk's toggle-to-talk state near the bot to split consecutive utterances into bounded agent turns without a separate mod keybind.
 - Reject speech when Big Walk's stock direct-voice attenuation curve reaches zero out of range.
 
-This is still a bounded prototype. General navigation, stuck recovery, puzzle interactions, synthetic voice output, and voice heard by remote guests are not implemented. Toggle-off suppression, overlapping-response serialization, noise robustness, and radio routing remain runtime-unverified or unresolved.
+This is still a bounded prototype. General navigation, stuck recovery, puzzle interactions, and voice heard by remote guests are not implemented. Local 3D synthetic voice output is implemented but not yet runtime-verified. Toggle-off suppression, overlapping-response serialization, noise robustness, and radio routing remain runtime-unverified or unresolved.
 
 ## Constraints
 
@@ -46,12 +46,13 @@ The model chooses from a small tool allowlist; it never writes movement input or
 
 - [`probe/BigWalkBotProbe.cs`](probe/BigWalkBotProbe.cs) — host-only spawn/authority adapters and the deterministic `BotController` for breadcrumb following.
 - [`probe/GameVoiceInput.cs`](probe/GameVoiceInput.cs) — Big Walk toggle/hold state, existing microphone capture, direct-voice attenuation, and bounded PCM turns.
+- [`probe/GameVoiceOutput.cs`](probe/GameVoiceOutput.cs) — completed Realtime PCM utterances played by a local 3D audio source attached to the companion body.
 - [`probe/OpenAIRealtimeBridge.cs`](probe/OpenAIRealtimeBridge.cs) — thin Unity-main-thread lifecycle coordinator.
 - [`probe/AgentToolRouter.cs`](probe/AgentToolRouter.cs) — exact tool allowlist, argument validation, and dispatch to the controller.
 - [`probe/OpenAIRealtimeClient.cs`](probe/OpenAIRealtimeClient.cs) — managed WebSocket/JSON/PCM transport with no Unity access.
 - [`probe/build/compile.rsp`](probe/build/compile.rsp) — compiler inputs and game references.
 
-The data path is: Big Walk voice state and microphone → bounded audio turn → OpenAI Realtime → validated tool call → deterministic bot controller. Future speech output belongs in a separate game-voice output adapter so the model transport does not depend on a particular in-game audio route.
+The data path is: Big Walk voice state and microphone → bounded audio turn → OpenAI Realtime → either a validated tool call or model audio → deterministic bot controller or the separate game-voice output adapter. The first voice-output route is local-only and does not send synthetic speech to remote guests.
 
 ## Evidence and development rules
 
@@ -63,4 +64,4 @@ The data path is: Big Walk voice state and microphone → bounded audio turn →
 
 ## Next milestone
 
-Runtime-verify toggle-off suppression and serialize overlapping model responses before adding radio or synthetic speech output. Work beyond that is intentionally not committed as a roadmap.
+Runtime-verify local 3D synthetic speech from Nitrogen's body. Radio and remote-guest speech remain separate later milestones. Work beyond that is intentionally not committed as a roadmap.

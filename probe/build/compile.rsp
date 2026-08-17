@@ -5,7 +5,7 @@
 /optimize+
 /deterministic+
 /debug:portable
-/out:"C:\Users\benja\Documents\ChatGPT\Big Walk\probe\build\BigWalkBotProbe.dll"
+/out:"probe\build\BigWalkBotProbe.dll"
 /reference:"C:\Program Files (x86)\Steam\steamapps\common\Big Walk\dotnet\System.Private.CoreLib.dll"
 /reference:"C:\Program Files (x86)\Steam\steamapps\common\Big Walk\dotnet\System.Runtime.dll"
 /reference:"C:\Program Files (x86)\Steam\steamapps\common\Big Walk\dotnet\netstandard.dll"
@@ -32,8 +32,9 @@
 /reference:"C:\Program Files (x86)\Steam\steamapps\common\Big Walk\BepInEx\interop\AudioSystem.dll"
 /reference:"C:\Program Files (x86)\Steam\steamapps\common\Big Walk\BepInEx\interop\UnityEngine.PhysicsModule.dll"
 /reference:"C:\Program Files (x86)\Steam\steamapps\common\Big Walk\BepInEx\interop\UnityEngine.InputLegacyModule.dll"
-"C:\Users\benja\Documents\ChatGPT\Big Walk\probe\BigWalkBotProbe.cs"
-"C:\Users\benja\Documents\ChatGPT\Big Walk\probe\OpenAIRealtimeBridge.cs"
-"C:\Users\benja\Documents\ChatGPT\Big Walk\probe\GameVoiceInput.cs"
-"C:\Users\benja\Documents\ChatGPT\Big Walk\probe\AgentToolRouter.cs"
-"C:\Users\benja\Documents\ChatGPT\Big Walk\probe\OpenAIRealtimeClient.cs"
+"probe\BigWalkBotProbe.cs"
+"probe\OpenAIRealtimeBridge.cs"
+"probe\GameVoiceInput.cs"
+"probe\GameVoiceOutput.cs"
+"probe\AgentToolRouter.cs"
+"probe\OpenAIRealtimeClient.cs"

@@ -12,6 +12,7 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
     private const float ReconnectDelay = 5f;
 
     private readonly GameVoiceInput _gameVoice = new GameVoiceInput();
+    private readonly GameVoiceOutput _gameVoiceOutput = new GameVoiceOutput();
     private OpenAIRealtimeClient _client;
     private float _nextConnectAt;
     private bool _missingKeyLogged;
@@ -30,6 +31,7 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
 
         EnsureClient();
         DrainClientEvents();
+        _gameVoiceOutput.Tick();
         _gameVoice.Tick(_client);
     }
 
@@ -111,11 +113,16 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
                 $"arguments={functionCall.Arguments}, result={result}");
             _client.SendFunctionResult(functionCall.CallId, result);
         }
+
+        RealtimeAudioPacket audioPacket;
+        while (_client.TryDequeueAudioPacket(out audioPacket))
+            _gameVoiceOutput.Accept(audioPacket);
     }
 
     private void StopClient()
     {
         _gameVoice.Stop(_client);
+        _gameVoiceOutput.Stop();
         if (_client == null)
             return;
 
