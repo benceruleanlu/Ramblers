@@ -3,92 +3,45 @@
 > [!WARNING]
 > **Under construction:** Ramblers is not ready for use. All `0.x.x` versions are development builds; please wait for the `1.0.0` release before installing or trying it.
 
-An experimental host-side companion mod for [Big Walk](https://store.steampowered.com/app/1478500/). Ramblers creates AI-controlled party members inside the host's game process without requiring or launching additional clients.
+An experimental host-side companion mod for [Big Walk](https://store.steampowered.com/app/1478500/). Ramblers spawns an AI-controlled party member inside the host's own game process — no second client, no second process. You talk to it using Big Walk's stock toggle-to-talk, and it walks itself using Big Walk's stock remote-player motor.
 
-## Current state
+## Status
 
-Runtime tests have confirmed that the mod can:
+A companion spawns, keeps its own identity, and follows you on foot around bounded obstacles, leaving your camera, input, and local-player status untouched. Speech reaches OpenAI Realtime through the game's existing microphone path and comes back as calls into a small action allowlist. It only listens while you are close enough that Big Walk's own voice falloff has not already silenced you.
 
-- Spawn and register a connectionless copy of the real player prefab as a non-local player.
-- Preserve the human player's camera, input, and local-player status.
-- Drive the bot through Big Walk's stock remote-player motor.
-- Follow a short human breadcrumb trail and steer around one bounded obstacle.
-- Send game-microphone audio to OpenAI Realtime and execute allowlisted `follow` and `stay` tool calls on Unity's main thread.
-- Use Big Walk's toggle-to-talk state near the bot to split consecutive utterances into bounded agent turns without a separate mod keybind.
-- Reject speech when Big Walk's stock direct-voice attenuation curve reaches zero out of range.
-
-This is still a bounded prototype. General navigation, stuck recovery, puzzle interactions, and voice heard by remote guests are not implemented. Local 3D synthetic voice output is implemented but not yet runtime-verified. Toggle-off suppression, overlapping-response serialization, noise robustness, and radio routing remain runtime-unverified or unresolved.
-
-Following commands speed in Big Walk's own units, read from the bot's `PlayerTunings`, and selects only the stock walking or sprinting speed. A walking companion may begin running when the breadcrumb trail grows beyond `6.75 m`; once running, it stays in that gait until it stops instead of ramping back through an artificial jog. While following or holding nearby, its whole body turns toward the human at Big Walk's stock `180 degrees/s` body rate; only the remaining body-relative yaw and vertical aim use the replicated head state. The revised gait, facing, run animation, and obstacle behaviour at speed await user runtime verification.
-
-## Constraints
-
-- **Host mod only:** no second Big Walk client or process.
-- **Reversible:** the mod uses BepInEx and in-memory Harmony hooks. It does not rewrite the game executable, IL2CPP files, assets, saves, or metadata.
-- **Evidence-based:** compilation and static inspection do not count as runtime proof.
+Not working yet: general navigation, stuck recovery, puzzle interaction, and speech that remote guests can hear. Synthetic voice plays from a local 3D source on the companion's body, but that path has not been runtime-verified.
 
 ## Compatibility
 
-Ramblers `0.7.5` is tested with Big Walk `1.4.9` (build `2608141617`) and BepInEx IL2CPP `6.0.0-be.755`. Other game versions are unverified.
+Tested against Big Walk `1.4.9` (build `2608141617`) on BepInEx IL2CPP `6.0.0-be.755`. Other versions are unverified.
 
-## Build and run
+## Build
 
-Requirements:
-
-- BepInEx IL2CPP `6.0.0-be.755`, initialized once so its interop assemblies exist.
-- Windows PowerShell 5.1 or newer.
-
-From the repository root, build with PowerShell:
+Requires Windows PowerShell 5.1 or newer and a BepInEx IL2CPP install that has been launched at least once, so its interop assemblies exist.
 
 ```powershell
 .\build.ps1
 ```
 
-The build discovers Big Walk across registered Steam libraries. On first use it downloads the pinned official `Microsoft.Net.Compilers.Toolset 4.14.0` NuGet package into the ignored `.tools/` directory and verifies its SHA-256 before extraction. It does not install software or change `PATH`, the registry, or system files.
+The build locates Big Walk through your registered Steam libraries and downloads a pinned Roslyn compiler into `.tools/` on first use. It installs nothing system-wide and leaves `PATH`, the registry, and system files alone. Override either path with a flag or an environment variable:
 
-For a non-Steam or otherwise custom setup, pass paths explicitly:
+| Flag | Environment variable |
+| --- | --- |
+| `-GamePath` | `RAMBLERS_GAME_PATH` |
+| `-CompilerPath` | `RAMBLERS_CSC_PATH` |
 
-```powershell
-.\build.ps1 -GamePath "D:\Games\Big Walk"
-.\build.ps1 -CompilerPath "D:\Tools\Roslyn\csc.exe"
-```
+Add `-NoRestore` to keep the build offline and fail if no compiler is already available.
 
-`RAMBLERS_GAME_PATH` and `RAMBLERS_CSC_PATH` provide equivalent environment-variable overrides. Use `-NoRestore` when the build must stay offline and fail if the compiler is not already available.
+## Install
 
-With Big Walk closed, copy `dist/Ramblers.dll` into the game's `BepInEx/plugins/Ramblers` directory. Rename the deployed DLL to `Ramblers.dll.disabled` to prevent it from loading.
+With Big Walk closed, copy `dist/Ramblers.dll` into `BepInEx/plugins/Ramblers` under the game directory. Rename the deployed file to `Ramblers.dll.disabled` to stop it loading.
 
-The Realtime integration reads `OPENAI_API_KEY` from the process or current Windows user environment. The key is not stored in this repository or the BepInEx configuration. This local-key path is for development only.
+Ramblers reads `OPENAI_API_KEY` from the process or current Windows user environment. No key is stored in this repository or in the BepInEx configuration. This local-key path is for development only.
 
-## Architecture
+## Design
 
-The model chooses from a small tool allowlist; it never writes movement input or touches Unity objects directly.
+The model never writes movement input and never touches a Unity object. It selects from a fixed tool allowlist, and C# does the driving.
 
-- [`src/RamblersPlugin.cs`](src/RamblersPlugin.cs) — BepInEx entry point, configuration, and IL2CPP type registration.
-- [`src/CompanionIdentity.cs`](src/CompanionIdentity.cs) — how a companion body is recognised, its synthetic identity, and the host-only authority patches.
-- [`src/CompanionController.cs`](src/CompanionController.cs) — companion lifecycle and the deterministic breadcrumb-follow behaviour.
-- [`src/CompanionBody.cs`](src/CompanionBody.cs) — the spawned companion's components, resolved once and handed to every behaviour.
-- [`src/CompanionLocomotion.cs`](src/CompanionLocomotion.cs) — gait, obstacle sweeping, steering, and stuck observation, driven by a direction and a route length.
-- [`src/CompanionFacing.cs`](src/CompanionFacing.cs) — body turn and head pose aimed at a caller-supplied world point.
-- [`src/BreadcrumbTrail.cs`](src/BreadcrumbTrail.cs) — bounded FIFO of walked positions; pure storage and geometry.
-- [`src/GameVoiceInput.cs`](src/GameVoiceInput.cs) — Big Walk toggle/hold state, existing microphone capture, direct-voice attenuation, and bounded PCM turns.
-- [`src/GameVoiceOutput.cs`](src/GameVoiceOutput.cs) — completed Realtime PCM utterances played by a local 3D audio source attached to the companion body.
-- [`src/OpenAIRealtimeBridge.cs`](src/OpenAIRealtimeBridge.cs) — thin Unity-main-thread lifecycle coordinator.
-- [`src/AgentToolRouter.cs`](src/AgentToolRouter.cs) — exact tool allowlist, argument validation, and dispatch to the controller.
-- [`src/AgentPrompt.cs`](src/AgentPrompt.cs) — the model-facing behavioural instructions, kept out of the transport.
-- [`src/OpenAIRealtimeClient.cs`](src/OpenAIRealtimeClient.cs) — managed WebSocket/JSON/PCM transport with no Unity access.
-- [`src/LogGate.cs`](src/LogGate.cs) — log gates that report a persistent condition once, or only when it changes.
-- [`build.ps1`](build.ps1) — portable compiler provisioning, Steam discovery, dependency validation, and compilation. It compiles every `.cs` under `src/`.
+Big Walk voice state and microphone → bounded audio turn → OpenAI Realtime → a validated tool call or model audio → the companion controller, or local 3D playback from the companion's body. Synthetic speech is local-only and does not reach remote guests.
 
-The data path is: Big Walk voice state and microphone → bounded audio turn → OpenAI Realtime → either a validated tool call or model audio → deterministic bot controller or the separate game-voice output adapter. The first voice-output route is local-only and does not send synthetic speech to remote guests.
-
-## Evidence and development rules
-
-- [`docs/archive/PROBE_HISTORY_0.2.0-0.5.2.md`](docs/archive/PROBE_HISTORY_0.2.0-0.5.2.md) contains the detailed experiments through probe `0.5.2`.
-- [`docs/archive/PROBE_HISTORY_0.5.3-0.7.5.md`](docs/archive/PROBE_HISTORY_0.5.3-0.7.5.md) contains the archived continuation through Ramblers `0.7.5`.
-- [`docs/archive/HOST_MOD_FEASIBILITY.md`](docs/archive/HOST_MOD_FEASIBILITY.md) contains the original host-only feasibility evidence.
-- Keep frame-level movement deterministic and touch Unity/game objects only on Unity's main thread.
-- Compilation and static inspection are not runtime proof; promote capabilities only after recording exact runtime evidence.
-
-## Next milestone
-
-Runtime-verify local 3D synthetic speech from Rambler's body. Radio and remote-guest speech remain separate later milestones. Work beyond that is intentionally not committed as a roadmap.
+Earlier probe experiments and the original host-only feasibility work are in [`docs/archive/`](docs/archive/).
