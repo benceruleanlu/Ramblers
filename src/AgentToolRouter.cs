@@ -1,7 +1,7 @@
 using System;
 using System.Text.Json;
 
-namespace BigWalkBotProbe;
+namespace Ramblers;
 
 /// <summary>
 /// Validates model-selected tools and arguments before any Unity-side action.
@@ -20,7 +20,7 @@ internal static class AgentToolRouter
         if (!TryReadFollowMode(functionCall.Arguments, out mode))
             return "{\"ok\":false,\"error\":\"invalid_arguments\"}";
 
-        return BotController.ExecuteAgentTool(functionCall.Name, mode);
+        return CompanionController.ExecuteAgentTool(functionCall.Name, mode);
     }
 
     private static bool TryReadFollowMode(string arguments, out string mode)

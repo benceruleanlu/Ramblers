@@ -29,7 +29,7 @@ Following commands speed in Big Walk's own units, read from the bot's `PlayerTun
 
 ## Compatibility
 
-Ramblers `0.6.1` is tested with Big Walk `1.4.9` (build `2608141617`) and BepInEx IL2CPP `6.0.0-be.755`. Other game versions are unverified.
+Ramblers `0.7.5` is tested with Big Walk `1.4.9` (build `2608141617`) and BepInEx IL2CPP `6.0.0-be.755`. Other game versions are unverified.
 
 ## Build and run
 
@@ -55,7 +55,7 @@ For a non-Steam or otherwise custom setup, pass paths explicitly:
 
 `RAMBLERS_GAME_PATH` and `RAMBLERS_CSC_PATH` provide equivalent environment-variable overrides. Use `-NoRestore` when the build must stay offline and fail if the compiler is not already available.
 
-With Big Walk closed, copy `probe/build/BigWalkBotProbe.dll` into the game's `BepInEx/plugins/BigWalkBotProbe` directory. Rename the deployed DLL to `BigWalkBotProbe.dll.disabled` to prevent it from loading.
+With Big Walk closed, copy `dist/Ramblers.dll` into the game's `BepInEx/plugins/Ramblers` directory. Rename the deployed DLL to `Ramblers.dll.disabled` to prevent it from loading.
 
 The Realtime integration reads `OPENAI_API_KEY` from the process or current Windows user environment. The key is not stored in this repository or the BepInEx configuration. This local-key path is for development only.
 
@@ -63,13 +63,15 @@ The Realtime integration reads `OPENAI_API_KEY` from the process or current Wind
 
 The model chooses from a small tool allowlist; it never writes movement input or touches Unity objects directly.
 
-- [`probe/BigWalkBotProbe.cs`](probe/BigWalkBotProbe.cs) — host-only spawn/authority adapters and the deterministic `BotController` for breadcrumb following.
-- [`probe/GameVoiceInput.cs`](probe/GameVoiceInput.cs) — Big Walk toggle/hold state, existing microphone capture, direct-voice attenuation, and bounded PCM turns.
-- [`probe/GameVoiceOutput.cs`](probe/GameVoiceOutput.cs) — completed Realtime PCM utterances played by a local 3D audio source attached to the companion body.
-- [`probe/OpenAIRealtimeBridge.cs`](probe/OpenAIRealtimeBridge.cs) — thin Unity-main-thread lifecycle coordinator.
-- [`probe/AgentToolRouter.cs`](probe/AgentToolRouter.cs) — exact tool allowlist, argument validation, and dispatch to the controller.
-- [`probe/OpenAIRealtimeClient.cs`](probe/OpenAIRealtimeClient.cs) — managed WebSocket/JSON/PCM transport with no Unity access.
-- [`build.ps1`](build.ps1) — portable compiler provisioning, Steam discovery, dependency validation, and compilation.
+- [`src/RamblersPlugin.cs`](src/RamblersPlugin.cs) — host-only spawn/authority adapters and the deterministic `CompanionController` for breadcrumb following.
+- [`src/GameVoiceInput.cs`](src/GameVoiceInput.cs) — Big Walk toggle/hold state, existing microphone capture, direct-voice attenuation, and bounded PCM turns.
+- [`src/GameVoiceOutput.cs`](src/GameVoiceOutput.cs) — completed Realtime PCM utterances played by a local 3D audio source attached to the companion body.
+- [`src/OpenAIRealtimeBridge.cs`](src/OpenAIRealtimeBridge.cs) — thin Unity-main-thread lifecycle coordinator.
+- [`src/AgentToolRouter.cs`](src/AgentToolRouter.cs) — exact tool allowlist, argument validation, and dispatch to the controller.
+- [`src/AgentPrompt.cs`](src/AgentPrompt.cs) — the model-facing behavioural instructions, kept out of the transport.
+- [`src/OpenAIRealtimeClient.cs`](src/OpenAIRealtimeClient.cs) — managed WebSocket/JSON/PCM transport with no Unity access.
+- [`src/LogGate.cs`](src/LogGate.cs) — log gates that report a persistent condition once, or only when it changes.
+- [`build.ps1`](build.ps1) — portable compiler provisioning, Steam discovery, dependency validation, and compilation. It compiles every `.cs` under `src/`.
 
 The data path is: Big Walk voice state and microphone → bounded audio turn → OpenAI Realtime → either a validated tool call or model audio → deterministic bot controller or the separate game-voice output adapter. The first voice-output route is local-only and does not send synthetic speech to remote guests.
 

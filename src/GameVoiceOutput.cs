@@ -4,7 +4,7 @@ using System.IO;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using UnityEngine;
 
-namespace BigWalkBotProbe;
+namespace Ramblers;
 
 /// <summary>
 /// Buffers one Realtime PCM response at a time and plays completed utterances
@@ -41,7 +41,7 @@ internal sealed class GameVoiceOutput
     {
         PlayerCharacter human;
         PlayerCharacter bot;
-        if (!BotController.TryGetVoiceParticipants(out human, out bot) || bot == null)
+        if (!CompanionController.TryGetVoiceParticipants(out human, out bot) || bot == null)
         {
             DropPendingIfNecessary("companion_unavailable");
             ReleaseSource();
@@ -70,7 +70,7 @@ internal sealed class GameVoiceOutput
         _source.clip = _playingClip;
         _source.Play();
         Plugin.Logger.LogInfo(
-            $"[BOT-AGENT] VOICE_PLAYING seconds={_playingClip.length:F2}, route=local_3d");
+            $"[AGENT] VOICE_PLAYING seconds={_playingClip.length:F2}, route=local_3d");
     }
 
     internal void Stop()
@@ -113,18 +113,18 @@ internal sealed class GameVoiceOutput
             {
                 UnityEngine.Object.Destroy(clip);
                 Plugin.Logger.LogWarning(
-                    "[BOT-AGENT] VOICE_DROPPED reason=audio_clip_write_failed");
+                    "[AGENT] VOICE_DROPPED reason=audio_clip_write_failed");
                 return;
             }
 
             _pendingClips.Enqueue(clip);
             Plugin.Logger.LogInfo(
-                $"[BOT-AGENT] VOICE_QUEUED seconds={sampleCount / (float)OutputSampleRate:F2}");
+                $"[AGENT] VOICE_QUEUED seconds={sampleCount / (float)OutputSampleRate:F2}");
         }
         catch (Exception exception)
         {
             Plugin.Logger.LogWarning(
-                $"[BOT-AGENT] VOICE_DROPPED reason=audio_clip_error detail={exception.Message}");
+                $"[AGENT] VOICE_DROPPED reason=audio_clip_error detail={exception.Message}");
         }
     }
 
@@ -169,7 +169,7 @@ internal sealed class GameVoiceOutput
             }
 
             Plugin.Logger.LogInfo(
-                $"[BOT-AGENT] VOICE_ROUTE_READY source=" +
+                $"[AGENT] VOICE_ROUTE_READY source=" +
                 $"{(playback == null ? "companion_body" : "player_voice_playback")}, " +
                 "route=local_3d");
         }
@@ -177,7 +177,7 @@ internal sealed class GameVoiceOutput
         {
             _source = null;
             Plugin.Logger.LogWarning(
-                $"[BOT-AGENT] VOICE_ROUTE_UNAVAILABLE detail={exception.Message}");
+                $"[AGENT] VOICE_ROUTE_UNAVAILABLE detail={exception.Message}");
         }
     }
 
@@ -187,7 +187,7 @@ internal sealed class GameVoiceOutput
             return;
 
         ClearPendingClips();
-        Plugin.Logger.LogWarning($"[BOT-AGENT] VOICE_DROPPED reason={reason}");
+        Plugin.Logger.LogWarning($"[AGENT] VOICE_DROPPED reason={reason}");
     }
 
     private void ClearPendingClips()
