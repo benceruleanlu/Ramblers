@@ -1,6 +1,6 @@
-# Active Experiment Log
+# Archived Probe History: 0.5.3-0.7.5
 
-Runtime evidence after the archived probe history in [`archive/PROBE_HISTORY_0.2.0-0.5.2.md`](archive/PROBE_HISTORY_0.2.0-0.5.2.md). Compilation and static inspection are not runtime proof.
+> **Archived 2026-08-17.** This record preserves runtime evidence after [`PROBE_HISTORY_0.2.0-0.5.2.md`](PROBE_HISTORY_0.2.0-0.5.2.md). Compilation and static inspection are not runtime proof.
 
 ## 2026-08-16: probe 0.5.3 spatial route repaired; local transmit signal falsified
 

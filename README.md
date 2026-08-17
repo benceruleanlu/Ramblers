@@ -75,8 +75,8 @@ The data path is: Big Walk voice state and microphone → bounded audio turn →
 
 ## Evidence and development rules
 
-- [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md) records active runtime evidence after the archived probe history.
-- [`docs/archive/PROBE_HISTORY_0.2.0-0.5.2.md`](docs/archive/PROBE_HISTORY_0.2.0-0.5.2.md) contains the earlier detailed experiments.
+- [`docs/archive/PROBE_HISTORY_0.2.0-0.5.2.md`](docs/archive/PROBE_HISTORY_0.2.0-0.5.2.md) contains the detailed experiments through probe `0.5.2`.
+- [`docs/archive/PROBE_HISTORY_0.5.3-0.7.5.md`](docs/archive/PROBE_HISTORY_0.5.3-0.7.5.md) contains the archived continuation through Ramblers `0.7.5`.
 - [`docs/archive/HOST_MOD_FEASIBILITY.md`](docs/archive/HOST_MOD_FEASIBILITY.md) contains the original host-only feasibility evidence.
 - Keep frame-level movement deterministic and touch Unity/game objects only on Unity's main thread.
 - Compilation and static inspection are not runtime proof; promote capabilities only after recording exact runtime evidence.
