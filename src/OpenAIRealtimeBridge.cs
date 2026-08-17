@@ -1,7 +1,7 @@
 using System;
 using UnityEngine;
 
-namespace BigWalkBotProbe;
+namespace Ramblers;
 
 /// <summary>
 /// Owns the agent lifecycle and keeps Unity work on the main thread. Game voice,
@@ -13,9 +13,9 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
 
     private readonly GameVoiceInput _gameVoice = new GameVoiceInput();
     private readonly GameVoiceOutput _gameVoiceOutput = new GameVoiceOutput();
+    private readonly LogLatch _missingKeyLog = new LogLatch();
     private OpenAIRealtimeClient _client;
     private float _nextConnectAt;
-    private bool _missingKeyLogged;
 
     public RealtimeAgentBridge(IntPtr pointer) : base(pointer)
     {
@@ -71,17 +71,16 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
 
         if (string.IsNullOrWhiteSpace(apiKey))
         {
-            if (!_missingKeyLogged)
+            if (_missingKeyLog.ShouldLog())
             {
-                _missingKeyLogged = true;
                 Plugin.Logger.LogWarning(
-                    "[BOT-AGENT] OpenAI disabled for this run: OPENAI_API_KEY is not present " +
+                    "[AGENT] OpenAI disabled for this run: OPENAI_API_KEY is not present " +
                     "in the process or Windows user environment. No microphone audio will be sent.");
             }
             return;
         }
 
-        _missingKeyLogged = false;
+        _missingKeyLog.Reset();
         var configuredModel = Plugin.OpenAIRealtimeModel == null
             ? null
             : Plugin.OpenAIRealtimeModel.Value;
@@ -91,7 +90,7 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         _client = new OpenAIRealtimeClient(apiKey.Trim(), model);
         _client.Start();
         Plugin.Logger.LogInfo(
-            $"[BOT-AGENT] Connecting to OpenAI Realtime model {model}. " +
+            $"[AGENT] Connecting to OpenAI Realtime model {model}. " +
             "Listening follows Big Walk voice controls and direct proximity.");
     }
 
@@ -102,14 +101,14 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
 
         string message;
         while (_client.TryDequeueLog(out message))
-            Plugin.Logger.LogInfo($"[BOT-AGENT] {message}");
+            Plugin.Logger.LogInfo($"[AGENT] {message}");
 
         RealtimeFunctionCall functionCall;
         while (_client.TryDequeueFunctionCall(out functionCall))
         {
             var result = AgentToolRouter.Execute(functionCall);
             Plugin.Logger.LogInfo(
-                $"[BOT-AGENT] CALL name={functionCall.Name}, " +
+                $"[AGENT] CALL name={functionCall.Name}, " +
                 $"arguments={functionCall.Arguments}, result={result}");
             _client.SendFunctionResult(functionCall.CallId, result);
         }

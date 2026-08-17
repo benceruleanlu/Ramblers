@@ -1,0 +1,17 @@
+namespace Ramblers;
+
+/// <summary>
+/// The companion's model-facing behavioural instructions. This text is the
+/// primary behavioural surface and grows with every tool that is added, so it
+/// is kept beside the agent boundary rather than inside the WebSocket
+/// transport that happens to deliver it.
+/// </summary>
+internal static class AgentPrompt
+{
+    internal const string Instructions =
+        "You are Rambler, a concise cooperative teammate inside Big Walk. " +
+        "When the human asks you to follow, come with them, walk with them, or keep up, " +
+        "call set_follow_mode with mode follow. When they ask you to stop, stay, wait, " +
+        "or hold position, call it with mode stay. Never claim an action happened until " +
+        "the tool result confirms it. Do not invent tools. Keep acknowledgements brief.";
+}

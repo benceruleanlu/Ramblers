@@ -15,7 +15,7 @@ using WebSocketReceiveResult = websockets::System.Net.WebSockets.WebSocketReceiv
 using WebSocketState = websockets::System.Net.WebSockets.WebSocketState;
 using RuntimeUri = privateuri::System.Uri;
 
-namespace BigWalkBotProbe;
+namespace Ramblers;
 
 internal interface IAgentAudioSink
 {
@@ -170,12 +170,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                 type = "realtime",
                 model = _model,
                 output_modalities = new[] { "audio" },
-                instructions =
-                    "You are Rambler, a concise cooperative teammate inside Big Walk. " +
-                    "When the human asks you to follow, come with them, walk with them, or keep up, " +
-                    "call set_follow_mode with mode follow. When they ask you to stop, stay, wait, " +
-                    "or hold position, call it with mode stay. Never claim an action happened until " +
-                    "the tool result confirms it. Do not invent tools. Keep acknowledgements brief.",
+                instructions = AgentPrompt.Instructions,
                 audio = new
                 {
                     input = new
@@ -324,14 +319,6 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                 JsonElement transcriptElement;
                 if (root.TryGetProperty("transcript", out transcriptElement))
                     _logs.Enqueue("SAY " + MakeTranscriptConsoleSafe(transcriptElement.GetString()));
-                return;
-            }
-
-            if (type == "conversation.item.input_audio_transcription.completed")
-            {
-                JsonElement transcriptElement;
-                if (root.TryGetProperty("transcript", out transcriptElement))
-                    _logs.Enqueue("HEARD " + MakeTranscriptConsoleSafe(transcriptElement.GetString()));
                 return;
             }
 

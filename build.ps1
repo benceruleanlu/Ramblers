@@ -213,20 +213,24 @@ else {
 }
 
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
-    $OutputPath = Join-Path $repositoryRoot "probe\build\BigWalkBotProbe.dll"
+    $OutputPath = Join-Path $repositoryRoot "dist\Ramblers.dll"
 }
 else {
     $OutputPath = Resolve-FullPath -Path $OutputPath -BasePath $repositoryRoot
 }
 
+# Compile every source under src/. Sorting keeps the compiler argument order
+# stable so /deterministic+ still yields a reproducible assembly.
+$sourceRoot = Join-Path $repositoryRoot "src"
 $sourcePaths = @(
-    "probe\BigWalkBotProbe.cs",
-    "probe\OpenAIRealtimeBridge.cs",
-    "probe\GameVoiceInput.cs",
-    "probe\GameVoiceOutput.cs",
-    "probe\AgentToolRouter.cs",
-    "probe\OpenAIRealtimeClient.cs"
-) | ForEach-Object { Join-Path $repositoryRoot $_ }
+    Get-ChildItem -LiteralPath $sourceRoot -Filter *.cs -Recurse -File |
+        Sort-Object -Property FullName |
+        ForEach-Object { $_.FullName }
+)
+
+if ($sourcePaths.Count -eq 0) {
+    throw "No C# sources were found under: $sourceRoot"
+}
 
 $referenceSpecs = @(
     @{ Path = "dotnet\System.Private.CoreLib.dll" },
@@ -258,12 +262,6 @@ $referenceSpecs = @(
 )
 
 $missingPaths = @()
-foreach ($sourcePath in $sourcePaths) {
-    if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
-        $missingPaths += $sourcePath
-    }
-}
-
 foreach ($referenceSpec in $referenceSpecs) {
     $referencePath = Join-Path $GamePath $referenceSpec.Path
     if (-not (Test-Path -LiteralPath $referencePath -PathType Leaf)) {

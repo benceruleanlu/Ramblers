@@ -10,12 +10,12 @@ using LobbyNetworking;
 using Mirror;
 using UnityEngine;
 
-namespace BigWalkBotProbe;
+namespace Ramblers;
 
 [BepInPlugin(Guid, Name, Version)]
 public sealed class Plugin : BasePlugin
 {
-    public const string Guid = "local.bigwalk.botprobe";
+    public const string Guid = "local.bigwalk.ramblers";
     public const string Name = "Ramblers";
     public const string Version = "0.7.5";
 
@@ -37,7 +37,7 @@ public sealed class Plugin : BasePlugin
             "Model",
             "gpt-realtime-2.1",
             "Realtime model ID. Keep the documented default unless deliberately testing another model.");
-        ClassInjector.RegisterTypeInIl2Cpp<BotController>();
+        ClassInjector.RegisterTypeInIl2Cpp<CompanionController>();
         ClassInjector.RegisterTypeInIl2Cpp<RealtimeAgentBridge>();
 
         var harmony = new Harmony(Guid);
@@ -45,7 +45,7 @@ public sealed class Plugin : BasePlugin
         harmony.PatchAll(typeof(HouseNetworkTransformIsOwnedPatch));
         harmony.PatchAll(typeof(HouseNetworkTransformIsRestingPatch));
 
-        AddComponent<BotController>();
+        AddComponent<CompanionController>();
         AddComponent<RealtimeAgentBridge>();
         Logger.LogInfo(
             $"[RAMBLERS] Loaded version {Version}. Waiting for a host session and local player.");
@@ -116,7 +116,7 @@ internal static class HouseNetworkTransformIsRestingPatch
     }
 }
 
-internal sealed class BotController : MonoBehaviour
+internal sealed class CompanionController : MonoBehaviour
 {
     private const float NavigationInterval = 0.1f;
     private const float TrailSampleInterval = 0.1f;
@@ -189,9 +189,10 @@ internal sealed class BotController : MonoBehaviour
     private float _followAt;
     private float _nextNavigationTick;
     private float _nextTrailSample;
-    private bool _verificationLogged;
     private bool _hasSpawnedBot;
     private bool _followRequested;
+    private readonly LogLatch _verificationLog = new LogLatch();
+    private readonly LogLatch _stuckWarningLog = new LogLatch();
 
     private FollowState _followState = FollowState.Idle;
     private readonly Vector3[] _breadcrumbs = new Vector3[MaximumBreadcrumbs];
@@ -220,10 +221,9 @@ internal sealed class BotController : MonoBehaviour
     private bool _lastDirectPathBlocked;
     private Vector3 _progressAnchor;
     private float _progressWindowStartedAt;
-    private bool _stuckWarningIssued;
-    private static BotController _activeController;
+    private static CompanionController _activeController;
 
-    public BotController(IntPtr pointer) : base(pointer)
+    public CompanionController(IntPtr pointer) : base(pointer)
     {
     }
 
@@ -258,7 +258,7 @@ internal sealed class BotController : MonoBehaviour
     {
         if (_bot != null)
         {
-            if (!_verificationLogged && Time.realtimeSinceStartup >= _verifyAt)
+            if (Time.realtimeSinceStartup >= _verifyAt && _verificationLog.ShouldLog())
                 LogVerification();
 
             if (Time.realtimeSinceStartup >= _nextTrailSample)
@@ -354,7 +354,7 @@ internal sealed class BotController : MonoBehaviour
             _lastFacingUpdateAt = Time.realtimeSinceStartup;
             _lastBodyYaw = _bot.transform.eulerAngles.y;
             _lastTargetYaw = _lastBodyYaw;
-            _stuckWarningIssued = false;
+            _stuckWarningLog.Reset();
             ClearBreadcrumbs();
             AddBreadcrumb(localPlayer.transform.position);
 
@@ -430,7 +430,7 @@ internal sealed class BotController : MonoBehaviour
             : _botCharacter.collision.bodyCollider;
         var obstacleMask = GetObstacleMask();
         Plugin.Logger.LogInfo(
-            "[BOT-FOLLOW] START " +
+            "[FOLLOW] START " +
             $"bot={_bot.transform.position}, human={human.transform.position}, " +
             $"followDistance={FollowDistance:F2}, breadcrumbSpacing={BreadcrumbSpacing:F2}, " +
             $"walkSpeed={_walkSpeed:F2}, runSpeed={_runSpeed:F2}, " +
@@ -462,7 +462,7 @@ internal sealed class BotController : MonoBehaviour
             ClearBreadcrumbs();
             AddBreadcrumb(human.transform.position);
             ResetProgressObservation(now);
-            Plugin.Logger.LogInfo("[BOT-AGENT] TOOL set_follow_mode mode=follow accepted.");
+            Plugin.Logger.LogInfo("[AGENT] TOOL set_follow_mode mode=follow accepted.");
             return "{\"ok\":true,\"mode\":\"follow\",\"status\":\"started\"}";
         }
 
@@ -471,7 +471,7 @@ internal sealed class BotController : MonoBehaviour
             _followRequested = false;
             _followAt = float.PositiveInfinity;
             StopForState(FollowState.Idle, now);
-            Plugin.Logger.LogInfo("[BOT-AGENT] TOOL set_follow_mode mode=stay accepted.");
+            Plugin.Logger.LogInfo("[AGENT] TOOL set_follow_mode mode=stay accepted.");
             return "{\"ok\":true,\"mode\":\"stay\",\"status\":\"stopped\"}";
         }
 
@@ -484,7 +484,7 @@ internal sealed class BotController : MonoBehaviour
         if (human == null)
         {
             StopForState(FollowState.Blocked, now);
-            Plugin.Logger.LogWarning("[BOT-FOLLOW] BLOCKED local human player is unavailable.");
+            Plugin.Logger.LogWarning("[FOLLOW] BLOCKED local human player is unavailable.");
             return;
         }
 
@@ -546,7 +546,7 @@ internal sealed class BotController : MonoBehaviour
             if (stateChanged)
             {
                 Plugin.Logger.LogWarning(
-                    "[BOT-FOLLOW] BLOCKED " +
+                    "[FOLLOW] BLOCKED " +
                     $"target={_currentTarget}, targetDistance={targetDistance:F2}, " +
                     $"humanDistance={humanDistance:F2}; no steering candidate had " +
                     $"{MinimumClearance:F2}m clearance. No recovery or teleport attempted.");
@@ -574,13 +574,13 @@ internal sealed class BotController : MonoBehaviour
              Mathf.Abs(previousAngle - steeringAngle) >= 1f))
         {
             Plugin.Logger.LogInfo(
-                "[BOT-FOLLOW] AVOID " +
+                "[FOLLOW] AVOID " +
                 $"steeringAngle={steeringAngle:F0}, clearance={clearance:F2}, " +
                 $"target={_currentTarget}, targetDistance={targetDistance:F2}.");
         }
         else if (!directBlocked && previousState == FollowState.Blocked)
         {
-            Plugin.Logger.LogInfo("[BOT-FOLLOW] Path clear; resuming breadcrumb follow.");
+            Plugin.Logger.LogInfo("[FOLLOW] Path clear; resuming breadcrumb follow.");
         }
 
         ObservePossibleStuck(now);
@@ -677,14 +677,14 @@ internal sealed class BotController : MonoBehaviour
         {
             SetMovementGait(MovementGait.Run);
             Plugin.Logger.LogInfo(
-                "[BOT-FOLLOW] GAIT run " +
+                "[FOLLOW] GAIT run " +
                 $"trailDistance={trailDistance:F2}; latched until the next complete stop.");
         }
         else if (_movementGait == MovementGait.Stopped)
         {
             SetMovementGait(MovementGait.Walk);
             Plugin.Logger.LogInfo(
-                $"[BOT-FOLLOW] GAIT walk trailDistance={trailDistance:F2}.");
+                $"[FOLLOW] GAIT walk trailDistance={trailDistance:F2}.");
         }
 
         return _movementGait == MovementGait.Run ? _runSpeed : _walkSpeed;
@@ -850,7 +850,7 @@ internal sealed class BotController : MonoBehaviour
             ClearBreadcrumbs();
             AddBreadcrumb(position);
             Plugin.Logger.LogWarning(
-                "[BOT-FOLLOW] TRAIL_RESET " +
+                "[FOLLOW] TRAIL_RESET " +
                 $"human moved {distance:F2}m between samples; refusing to invent a traversable segment.");
             return;
         }
@@ -939,11 +939,10 @@ internal sealed class BotController : MonoBehaviour
         var movement = HorizontalDistance(_progressAnchor, _bot.transform.position);
         if (movement < StuckMovementThreshold)
         {
-            if (!_stuckWarningIssued)
+            if (_stuckWarningLog.ShouldLog())
             {
-                _stuckWarningIssued = true;
                 Plugin.Logger.LogWarning(
-                    "[BOT-FOLLOW] POSSIBLY_STUCK " +
+                    "[FOLLOW] POSSIBLY_STUCK " +
                     $"moved={movement:F2}m in {StuckObservationWindow:F1}s while commanded " +
                     $"speed={_lastCommandedSpeed:F2} m/s ({DescribeGait()}). " +
                     "Detection only; no recovery attempted.");
@@ -951,7 +950,7 @@ internal sealed class BotController : MonoBehaviour
         }
         else
         {
-            _stuckWarningIssued = false;
+            _stuckWarningLog.Reset();
         }
 
         _progressAnchor = _bot.transform.position;
@@ -962,7 +961,7 @@ internal sealed class BotController : MonoBehaviour
     {
         _progressAnchor = _bot == null ? Vector3.zero : _bot.transform.position;
         _progressWindowStartedAt = now;
-        _stuckWarningIssued = false;
+        _stuckWarningLog.Reset();
     }
 
     private void FailFollow(string reason)
@@ -981,7 +980,7 @@ internal sealed class BotController : MonoBehaviour
         }
         SetMovementGait(MovementGait.Stopped);
 
-        Plugin.Logger.LogError($"[BOT-FOLLOW] FAILED {reason}");
+        Plugin.Logger.LogError($"[FOLLOW] FAILED {reason}");
     }
 
     private void SetMovementIntent(Vector3 worldMovementIntent)
@@ -1009,7 +1008,7 @@ internal sealed class BotController : MonoBehaviour
                              human.playerNetworking.isLocalPlayer;
 
         Plugin.Logger.LogInfo(
-            "[BOT-FOLLOW] STATUS " +
+            "[FOLLOW] STATUS " +
             $"state={_followState}, elapsed={now - _followStartedAt:F2}, " +
             $"position={_bot.transform.position}, humanDistance={humanDistance:F2}, " +
             $"target={_currentTarget}, targetDistance={targetDistance:F2}, " +
@@ -1035,7 +1034,7 @@ internal sealed class BotController : MonoBehaviour
         _botNetworking = null;
         _humanAtSpawn = null;
         _hasSpawnedBot = false;
-        _verificationLogged = false;
+        _verificationLog.Reset();
         _followRequested = false;
         _followState = FollowState.Idle;
         _lastMovementIntent = Vector3.zero;
@@ -1093,15 +1092,13 @@ internal sealed class BotController : MonoBehaviour
 
         if (voiceIdentity != null)
         {
-            var voicePlayerId = "RamblerHostBot";
+            var voicePlayerId = "RamblerHost";
             voiceIdentity.Network_playerId = voicePlayerId;
         }
     }
 
     private void LogVerification()
     {
-        _verificationLogged = true;
-
         if (_bot == null)
             return;
 
@@ -1117,7 +1114,7 @@ internal sealed class BotController : MonoBehaviour
 
         Plugin.Logger.LogInfo(
             "[RAMBLERS] VERIFY " +
-            $"probeVersion={Plugin.Version}, " +
+            $"version={Plugin.Version}, " +
             $"netId={identity?.netId ?? 0}, " +
             $"isServer={networking?.isServer}, " +
             $"isClient={networking?.isClient}, " +
