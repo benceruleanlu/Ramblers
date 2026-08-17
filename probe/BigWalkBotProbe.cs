@@ -55,7 +55,7 @@ public sealed class Plugin : BasePlugin
 internal static class CompanionIdentity
 {
     public const string ObjectName = "__RamblersHostCompanion";
-    public const string NetworkIdentifier = "ramblers:companion:nitrogen";
+    public const string NetworkIdentifier = "ramblers:companion:rambler";
 
     public static bool IsBot(PlayerNetworking networking)
     {
@@ -850,9 +850,9 @@ internal sealed class BotController : MonoBehaviour
         PlayerNetworking networking,
         MirrorIgnorancePlayer voiceIdentity)
     {
-        var username = "Nitrogen";
+        var username = "Rambler";
         var identifier = CompanionIdentity.NetworkIdentifier;
-        var moderationName = "Nitrogen";
+        var moderationName = "Rambler";
         var epicUserId = string.Empty;
         ulong platformUserId = 0;
         var isHost = false;
@@ -866,7 +866,7 @@ internal sealed class BotController : MonoBehaviour
 
         if (voiceIdentity != null)
         {
-            var voicePlayerId = "NitrogenHostBot";
+            var voicePlayerId = "RamblerHostBot";
             voiceIdentity.Network_playerId = voicePlayerId;
         }
     }
