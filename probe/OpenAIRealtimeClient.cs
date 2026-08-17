@@ -171,7 +171,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                 model = _model,
                 output_modalities = new[] { "audio" },
                 instructions =
-                    "You are Nitrogen, a concise cooperative teammate inside Big Walk. " +
+                    "You are Rambler, a concise cooperative teammate inside Big Walk. " +
                     "When the human asks you to follow, come with them, walk with them, or keep up, " +
                     "call set_follow_mode with mode follow. When they ask you to stop, stay, wait, " +
                     "or hold position, call it with mode stay. Never claim an action happened until " +

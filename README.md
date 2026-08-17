@@ -81,4 +81,4 @@ The data path is: Big Walk voice state and microphone → bounded audio turn →
 
 ## Next milestone
 
-Runtime-verify local 3D synthetic speech from Nitrogen's body. Radio and remote-guest speech remain separate later milestones. Work beyond that is intentionally not committed as a roadmap.
+Runtime-verify local 3D synthetic speech from Rambler's body. Radio and remote-guest speech remain separate later milestones. Work beyond that is intentionally not committed as a roadmap.
