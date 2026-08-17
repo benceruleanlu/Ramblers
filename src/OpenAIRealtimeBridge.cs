@@ -31,8 +31,10 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
 
         EnsureClient();
         DrainClientEvents();
+        var manualInterruptionRequested = _gameVoice.Tick(_client);
+        if (manualInterruptionRequested)
+            InterruptAssistantSpeech();
         _gameVoiceOutput.Tick();
-        _gameVoice.Tick(_client);
     }
 
     private void EnsureClient()
@@ -113,9 +115,24 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             _client.SendFunctionResult(functionCall.CallId, result);
         }
 
-        RealtimeAudioPacket audioPacket;
-        while (_client.TryDequeueAudioPacket(out audioPacket))
-            _gameVoiceOutput.Accept(audioPacket);
+        RealtimeClientEvent clientEvent;
+        while (_client.TryDequeueClientEvent(out clientEvent))
+        {
+            if (clientEvent.Type == RealtimeClientEventType.InputSpeechStarted)
+                InterruptAssistantSpeech();
+            else if (clientEvent.Type == RealtimeClientEventType.AudioPacket)
+                _gameVoiceOutput.Accept(clientEvent.AudioPacket);
+        }
+    }
+
+    private void InterruptAssistantSpeech()
+    {
+        var truncations = _gameVoiceOutput.Interrupt();
+        if (_client == null)
+            return;
+
+        for (var index = 0; index < truncations.Count; index++)
+            _client.TruncateAudio(truncations[index]);
     }
 
     private void StopClient()

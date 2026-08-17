@@ -4,17 +4,22 @@ using UnityEngine;
 
 namespace Ramblers;
 
+internal enum AgentTurnDetectionMode
+{
+    SemanticVad,
+    ManualPushToTalk
+}
+
 /// <summary>
-/// Adapts Big Walk's own voice state, microphone, and direct attenuation curve
-/// into bounded PCM turns. It does not know about WebSockets or agent tools.
+/// Adapts Big Walk's voice channel, microphone, and direct attenuation curve
+/// into a continuous Realtime PCM stream. Open-microphone turn boundaries are
+/// owned by server semantic VAD; Big Walk push-to-talk retains manual commits.
 /// </summary>
 internal sealed class GameVoiceInput
 {
     private const int RealtimeSampleRate = 24000;
-    private const int MinimumTurnSamples = RealtimeSampleRate / 10;
+    private const int MinimumManualTurnSamples = RealtimeSampleRate / 10;
     private const float AudibilityThreshold = 0.0001f;
-    private const float OpenMicrophoneRmsThreshold = 0.006f;
-    private const float OpenMicrophoneSilenceHangover = 0.45f;
     private const float MicrophoneUnavailableGrace = 0.5f;
 
     private readonly LogLatch _microphoneReadyLog = new LogLatch();
@@ -24,144 +29,113 @@ internal sealed class GameVoiceInput
     private readonly LogChange<string> _voiceSourceLog = new LogChange<string>();
 
     private AudioClip _microphoneClip;
-    private Il2CppStructArray<float> _voiceActivitySamples;
     private Il2CppStructArray<float> _captureSamples;
-    private bool _capturingTurn;
-    private int _capturedSamples;
+    private bool _streaming;
+    private int _streamedSamples;
     private int _microphoneReadPosition = -1;
     private int _microphoneFrequency;
     private int _microphoneChannels;
     private int _resampleAccumulator;
     private float _microphoneUnavailableSince = -1f;
     private bool _voiceIntentWasActive;
-    private float _silenceStartedAt = -1f;
+    private bool _hasConfiguredTurnMode;
+    private AgentTurnDetectionMode _configuredTurnMode;
     private float _nextVoiceRouteResolveAt;
-    private string _captureSource;
-    private float _captureDistance;
-    private float _captureAudibility;
+    private string _streamSource;
+    private float _streamDistance;
+    private float _streamAudibility;
     private AnimationCurve _directVoiceAttenuationCurve;
 
-    internal void Tick(IAgentAudioSink sink)
+    /// <summary>
+    /// Returns true when a manual push-to-talk press should immediately stop
+    /// any locally queued or playing assistant speech.
+    /// </summary>
+    internal bool Tick(IAgentAudioSink sink)
     {
         if (sink == null || !sink.IsReady)
         {
-            CancelTurn(sink);
-            return;
+            StopStreaming(false, sink);
+            return false;
         }
 
-        TickGameVoice(sink);
-        if (_capturingTurn)
+        bool channelOpen;
+        string source;
+        AgentTurnDetectionMode turnMode;
+        if (!TryGetGameVoiceState(out channelOpen, out source, out turnMode))
+        {
+            HandleUnavailableMicrophone(sink);
+            return false;
+        }
+
+        ConfigureTurnMode(turnMode, sink);
+
+        if (!channelOpen)
+        {
+            if (_streaming)
+                StopStreaming(turnMode == AgentTurnDetectionMode.ManualPushToTalk, sink);
+            _voiceIntentWasActive = false;
+            return false;
+        }
+
+        float distance;
+        float audibility;
+        if (!TryGetDirectVoiceAudibility(out distance, out audibility))
+        {
+            if (!_voiceIntentWasActive)
+            {
+                var reason = audibility < 0f ? "route_unavailable" : "out_of_range";
+                Plugin.Logger.LogInfo(
+                    $"[AGENT] AUDIO_IGNORED source={source}, route=direct, " +
+                    $"reason={reason}, distance={distance:F2}, audibility={audibility:F6}");
+            }
+
+            StopStreaming(false, sink);
+            _voiceIntentWasActive = true;
+            return false;
+        }
+
+        var manualTurnStarted = false;
+        if (!_streaming)
+        {
+            if (turnMode == AgentTurnDetectionMode.ManualPushToTalk)
+            {
+                sink.CancelActiveResponse();
+                manualTurnStarted = true;
+            }
+
+            BeginStreaming(source, turnMode, distance, audibility, sink);
+        }
+
+        if (_streaming)
             CaptureMicrophoneSamples(sink);
+
+        _voiceIntentWasActive = true;
+        return manualTurnStarted;
     }
 
     internal void Stop(IAgentAudioSink sink)
     {
-        CancelTurn(sink);
+        StopStreaming(false, sink);
         _microphoneClip = null;
         _microphoneReadPosition = -1;
         _microphoneFrequency = 0;
         _microphoneChannels = 0;
         _resampleAccumulator = 0;
         _microphoneUnavailableSince = -1f;
+        _voiceIntentWasActive = false;
+        _hasConfiguredTurnMode = false;
         _directVoiceAttenuationCurve = null;
         _nextVoiceRouteResolveAt = 0f;
     }
 
-    private void CancelTurn(IAgentAudioSink sink)
+    private bool TryGetGameVoiceState(
+        out bool channelOpen,
+        out string source,
+        out AgentTurnDetectionMode turnMode)
     {
-        if (_capturingTurn)
-            EndVoiceTurn(false, sink);
-        _voiceIntentWasActive = false;
-        _silenceStartedAt = -1f;
-    }
-
-    private void TickGameVoice(IAgentAudioSink sink)
-    {
-        bool voiceIntentActive;
-        bool useSilenceHangover;
-        string source;
-        if (!TryGetGameVoiceIntent(
-                out voiceIntentActive,
-                out useSilenceHangover,
-                out source))
-        {
-            if (_microphoneUnavailableSince >= 0f)
-            {
-                var unavailableSeconds =
-                    Time.realtimeSinceStartup - _microphoneUnavailableSince;
-                if (unavailableSeconds < MicrophoneUnavailableGrace)
-                    return;
-
-                if (_capturingTurn)
-                {
-                    Plugin.Logger.LogWarning(
-                        $"[AGENT] Big Walk's microphone remained unavailable for " +
-                        $"{unavailableSeconds:F2}s; submitting the captured portion.");
-                    EndVoiceTurn(true, sink);
-                    _voiceIntentWasActive = false;
-                    return;
-                }
-            }
-
-            CancelTurn(sink);
-            return;
-        }
-
-        float distance;
-        float audibility;
-        var directVoiceAudible = TryGetDirectVoiceAudibility(out distance, out audibility);
-
-        if (voiceIntentActive && !directVoiceAudible)
-        {
-            if (!_voiceIntentWasActive)
-            {
-                var reason = audibility < 0f ? "route_unavailable" : "out_of_range";
-                Plugin.Logger.LogInfo(
-                    $"[AGENT] IGNORED source={source}, route=direct, " +
-                    $"reason={reason}, distance={distance:F2}, audibility={audibility:F6}");
-            }
-
-            if (_capturingTurn)
-                EndVoiceTurn(false, sink);
-            _voiceIntentWasActive = true;
-            _silenceStartedAt = -1f;
-            return;
-        }
-
-        if (voiceIntentActive)
-        {
-            _silenceStartedAt = -1f;
-            if (!_capturingTurn)
-                BeginVoiceTurn(source, distance, audibility, sink);
-        }
-        else if (_capturingTurn)
-        {
-            if (!useSilenceHangover)
-            {
-                EndVoiceTurn(true, sink);
-            }
-            else if (_silenceStartedAt < 0f)
-            {
-                _silenceStartedAt = Time.realtimeSinceStartup;
-            }
-            else if (Time.realtimeSinceStartup - _silenceStartedAt >=
-                     OpenMicrophoneSilenceHangover)
-            {
-                EndVoiceTurn(true, sink);
-            }
-        }
-
-        _voiceIntentWasActive = voiceIntentActive;
-    }
-
-    private bool TryGetGameVoiceIntent(
-        out bool active,
-        out bool useSilenceHangover,
-        out string source)
-    {
-        active = false;
-        useSilenceHangover = false;
+        channelOpen = false;
         source = "game_voice";
+        turnMode = AgentTurnDetectionMode.SemanticVad;
 
         var world = WorldManager.instance;
         var human = WorldManager.localPlayerCharacter;
@@ -172,39 +146,28 @@ internal sealed class GameVoiceInput
             return false;
         }
 
-        var channelOpen = !world.forceMutedBySystem && !comms.IsMuted;
-        LogVoiceChannelState(channelOpen);
+        channelOpen = !world.forceMutedBySystem && !comms.IsMuted;
+        turnMode = SettingsHelper.pushToTalkModeActive
+            ? AgentTurnDetectionMode.ManualPushToTalk
+            : AgentTurnDetectionMode.SemanticVad;
+        source = turnMode == AgentTurnDetectionMode.ManualPushToTalk
+            ? "game_ptt"
+            : "game_semantic_vad";
 
-        if (SettingsHelper.pushToTalkModeActive)
-        {
-            ResetMicrophoneUnavailableState(false);
-            source = "game_ptt";
-            LogConfiguredVoiceSource(source, "<none>");
-            active = channelOpen;
-            return true;
-        }
-
-        source = "game_voice_activity";
+        LogVoiceChannelState(channelOpen, turnMode);
         var trigger = human.lips == null ? null : human.lips.broadcastTrigger;
-        var triggerMode = trigger == null ? "<none>" : trigger.Mode.ToString();
-        LogConfiguredVoiceSource(source, triggerMode);
+        LogConfiguredVoiceSource(source, trigger == null ? "<none>" : trigger.Mode.ToString());
 
-        // In toggle mode, Big Walk owns the hard mute/open state. Raw RMS from
-        // its existing MicManager capture supplies only the speech/silence edge.
-        // Runtime testing showed Dissonance's local transmit flag and processed
-        // amplitude are not reliable local speech signals in this game.
         if (!channelOpen)
         {
             ResetMicrophoneUnavailableState(false);
             return true;
         }
 
-        float microphoneRms;
-        if (TryGetRecentMicrophoneRms(out microphoneRms))
+        if (MicManager.IsRecording(null) && MicManager.GetClip(null) != null &&
+            MicManager.GetPosition(null) >= 0)
         {
             ResetMicrophoneUnavailableState(true);
-            useSilenceHangover = true;
-            active = microphoneRms >= OpenMicrophoneRmsThreshold;
             return true;
         }
 
@@ -215,9 +178,53 @@ internal sealed class GameVoiceInput
         {
             Plugin.Logger.LogWarning(
                 "[AGENT] Big Walk's microphone state is temporarily unavailable; " +
-                "an active capture will be retained briefly.");
+                "an active stream will be retained briefly.");
         }
         return false;
+    }
+
+    private void HandleUnavailableMicrophone(IAgentAudioSink sink)
+    {
+        if (_microphoneUnavailableSince < 0f)
+        {
+            StopStreaming(false, sink);
+            return;
+        }
+
+        var unavailableSeconds = Time.realtimeSinceStartup - _microphoneUnavailableSince;
+        if (unavailableSeconds < MicrophoneUnavailableGrace)
+            return;
+
+        var submitManualTurn =
+            _configuredTurnMode == AgentTurnDetectionMode.ManualPushToTalk;
+        if (_streaming)
+        {
+            Plugin.Logger.LogWarning(
+                $"[AGENT] Big Walk's microphone remained unavailable for " +
+                $"{unavailableSeconds:F2}s; " +
+                (submitManualTurn
+                    ? "submitting the captured push-to-talk audio."
+                    : "stopping the semantic VAD stream."));
+        }
+
+        StopStreaming(submitManualTurn, sink);
+        _voiceIntentWasActive = false;
+    }
+
+    private void ConfigureTurnMode(AgentTurnDetectionMode turnMode, IAgentAudioSink sink)
+    {
+        if (_hasConfiguredTurnMode && _configuredTurnMode == turnMode)
+            return;
+
+        if (_streaming)
+            StopStreaming(false, sink);
+
+        _configuredTurnMode = turnMode;
+        _hasConfiguredTurnMode = true;
+        sink.SetTurnDetectionMode(turnMode);
+        Plugin.Logger.LogInfo(
+            $"[AGENT] TURN_DETECTION mode=" +
+            $"{(turnMode == AgentTurnDetectionMode.SemanticVad ? "semantic_vad_auto" : "manual_ptt")}");
     }
 
     private void ResetMicrophoneUnavailableState(bool logRecovery)
@@ -233,106 +240,16 @@ internal sealed class GameVoiceInput
         _voiceStateUnavailableLog.Reset();
     }
 
-    private void LogVoiceChannelState(bool channelOpen)
+    private void LogVoiceChannelState(
+        bool channelOpen,
+        AgentTurnDetectionMode turnMode)
     {
         if (!_voiceChannelStateLog.ShouldLog(channelOpen))
             return;
 
         Plugin.Logger.LogInfo(
             $"[AGENT] GAME_VOICE_STATE channelOpen={channelOpen}, " +
-            $"mode={(SettingsHelper.pushToTalkModeActive ? "hold" : "toggle_or_open")}");
-    }
-
-    private bool TryGetRecentMicrophoneRms(out float rms)
-    {
-        rms = 0f;
-        if (!MicManager.IsRecording(null))
-            return false;
-
-        var clip = MicManager.GetClip(null);
-        var position = MicManager.GetPosition(null);
-        if (clip == null || position < 0 || clip.frequency <= 0 ||
-            clip.channels <= 0 || clip.samples <= 0)
-        {
-            return false;
-        }
-
-        var frameCount = Math.Min(clip.samples, Math.Max(1, clip.frequency / 50));
-        var startFrame = position - frameCount;
-        double sumSquares = 0;
-        var measuredSamples = 0;
-        if (startFrame >= 0)
-        {
-            if (!TryAccumulateMicrophoneRms(
-                    clip,
-                    startFrame,
-                    frameCount,
-                    clip.channels,
-                    ref sumSquares,
-                    ref measuredSamples))
-            {
-                return false;
-            }
-        }
-        else
-        {
-            var tailFrameCount = -startFrame;
-            if (!TryAccumulateMicrophoneRms(
-                    clip,
-                    clip.samples - tailFrameCount,
-                    tailFrameCount,
-                    clip.channels,
-                    ref sumSquares,
-                    ref measuredSamples))
-            {
-                return false;
-            }
-
-            if (position > 0 && !TryAccumulateMicrophoneRms(
-                    clip,
-                    0,
-                    position,
-                    clip.channels,
-                    ref sumSquares,
-                    ref measuredSamples))
-            {
-                return false;
-            }
-        }
-
-        if (measuredSamples == 0)
-            return false;
-
-        rms = (float)Math.Sqrt(sumSquares / measuredSamples);
-        return true;
-    }
-
-    private bool TryAccumulateMicrophoneRms(
-        AudioClip clip,
-        int startFrame,
-        int frameCount,
-        int channelCount,
-        ref double sumSquares,
-        ref int measuredSamples)
-    {
-        if (frameCount <= 0)
-            return true;
-
-        var sampleCount = frameCount * channelCount;
-        if (_voiceActivitySamples == null || _voiceActivitySamples.Length != sampleCount)
-            _voiceActivitySamples = new Il2CppStructArray<float>(sampleCount);
-
-        if (!clip.GetData(_voiceActivitySamples, startFrame))
-            return false;
-
-        for (var index = 0; index < _voiceActivitySamples.Length; index++)
-        {
-            var sample = _voiceActivitySamples[index];
-            sumSquares += sample * sample;
-        }
-
-        measuredSamples += _voiceActivitySamples.Length;
-        return true;
+            $"mode={(turnMode == AgentTurnDetectionMode.ManualPushToTalk ? "hold" : "toggle_or_open")}");
     }
 
     private void LogConfiguredVoiceSource(string source, string triggerMode)
@@ -413,8 +330,9 @@ internal sealed class GameVoiceInput
         return true;
     }
 
-    private void BeginVoiceTurn(
+    private void BeginStreaming(
         string source,
+        AgentTurnDetectionMode turnMode,
         float distance,
         float audibility,
         IAgentAudioSink sink)
@@ -426,46 +344,47 @@ internal sealed class GameVoiceInput
             return;
         }
 
-        _capturingTurn = true;
-        _capturedSamples = 0;
-        _captureSource = source;
-        _captureDistance = distance;
-        _captureAudibility = audibility;
+        _streaming = true;
+        _streamedSamples = 0;
+        _streamSource = source;
+        _streamDistance = distance;
+        _streamAudibility = audibility;
         sink.ClearInputAudio();
         Plugin.Logger.LogInfo(
-            $"[AGENT] LISTENING source={source}, route=direct, " +
+            $"[AGENT] AUDIO_STREAM_STARTED source={source}, route=direct, " +
+            $"turnDetection=" +
+            $"{(turnMode == AgentTurnDetectionMode.SemanticVad ? "semantic_vad_auto" : "manual_ptt")}, " +
             $"distance={distance:F2}, audibility={audibility:F6}");
     }
 
-    private void EndVoiceTurn(bool submit, IAgentAudioSink sink)
+    private void StopStreaming(bool submitManualTurn, IAgentAudioSink sink)
     {
-        if (_capturingTurn && submit && sink != null && sink.IsReady)
+        if (!_streaming)
+            return;
+
+        if (submitManualTurn && sink != null && sink.IsReady)
             CaptureMicrophoneSamples(sink);
 
-        _capturingTurn = false;
+        _streaming = false;
         _microphoneReadPosition = -1;
-        _silenceStartedAt = -1f;
 
-        if (!submit || sink == null || !sink.IsReady)
+        var submitted = false;
+        if (submitManualTurn && sink != null && sink.IsReady &&
+            _streamedSamples >= MinimumManualTurnSamples)
         {
-            if (sink != null && sink.IsReady)
-                sink.ClearInputAudio();
-            return;
+            sink.CommitInputAudioAndRespond();
+            submitted = true;
         }
-
-        if (_capturedSamples < MinimumTurnSamples)
+        else if (sink != null && sink.IsReady)
         {
             sink.ClearInputAudio();
-            Plugin.Logger.LogWarning(
-                $"[AGENT] Voice turn discarded: only {_capturedSamples} samples were captured.");
-            return;
         }
 
-        sink.CommitInputAudioAndRespond();
         Plugin.Logger.LogInfo(
-            $"[AGENT] SUBMITTED source={_captureSource}, route=direct, " +
-            $"distance={_captureDistance:F2}, audibility={_captureAudibility:F6}, " +
-            $"audioSeconds={_capturedSamples / (float)RealtimeSampleRate:F2}");
+            $"[AGENT] AUDIO_STREAM_STOPPED source={_streamSource}, route=direct, " +
+            $"status={(submitted ? "submitted" : "cleared")}, " +
+            $"distance={_streamDistance:F2}, audibility={_streamAudibility:F6}, " +
+            $"audioSeconds={_streamedSamples / (float)RealtimeSampleRate:F2}");
     }
 
     private bool TryBeginMicrophoneRead()
@@ -599,7 +518,7 @@ internal sealed class GameVoiceInput
 
         if (outputSamples * 2 != pcm.Length)
             Array.Resize(ref pcm, outputSamples * 2);
-        _capturedSamples += outputSamples;
+        _streamedSamples += outputSamples;
         sink.AppendInputAudio(pcm);
     }
 }

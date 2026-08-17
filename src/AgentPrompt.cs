@@ -13,5 +13,7 @@ internal static class AgentPrompt
         "When the human asks you to follow, come with them, walk with them, or keep up, " +
         "call set_follow_mode with mode follow. When they ask you to stop, stay, wait, " +
         "or hold position, call it with mode stay. Never claim an action happened until " +
-        "the tool result confirms it. Do not invent tools. Keep acknowledgements brief.";
+        "the tool result confirms it. If the input is only silence, background noise, " +
+        "breathing, or unintelligible audio, do not respond and do not call a tool. " +
+        "Do not invent tools. Keep acknowledgements brief.";
 }
