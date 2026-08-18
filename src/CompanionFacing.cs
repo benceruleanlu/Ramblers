@@ -21,6 +21,9 @@ internal sealed class CompanionFacing
     private float _lastUpdateAt;
     private float _lastBodyYaw;
     private float _lastTargetYaw;
+    private float _lastAimYawError = float.PositiveInfinity;
+    private float _lastAimPitchError = float.PositiveInfinity;
+    private Vector3 _lastAimDirection = Vector3.forward;
 
     internal CompanionFacing(float expectedUpdateInterval)
     {
@@ -30,6 +33,9 @@ internal sealed class CompanionFacing
     internal Vector2 HeadState => _headState;
     internal float LastBodyYaw => _lastBodyYaw;
     internal float LastTargetYaw => _lastTargetYaw;
+    internal float LastAimYawError => _lastAimYawError;
+    internal float LastAimPitchError => _lastAimPitchError;
+    internal Vector3 LastAimDirection => _lastAimDirection;
 
     internal void Bind(CompanionBody body, float now)
     {
@@ -38,6 +44,9 @@ internal sealed class CompanionFacing
         _lastUpdateAt = now;
         _lastBodyYaw = body.Transform.eulerAngles.y;
         _lastTargetYaw = _lastBodyYaw;
+        _lastAimYawError = float.PositiveInfinity;
+        _lastAimPitchError = float.PositiveInfinity;
+        _lastAimDirection = body.Transform.forward;
     }
 
     /// <summary>
@@ -56,6 +65,9 @@ internal sealed class CompanionFacing
         _lastUpdateAt = 0f;
         _lastBodyYaw = 0f;
         _lastTargetYaw = 0f;
+        _lastAimYawError = float.PositiveInfinity;
+        _lastAimPitchError = float.PositiveInfinity;
+        _lastAimDirection = Vector3.forward;
     }
 
     internal void Face(Vector3 targetPoint, float now)
@@ -70,7 +82,11 @@ internal sealed class CompanionFacing
         var horizontalDirection = new Vector3(toTarget.x, 0f, toTarget.z);
         var horizontalDistance = horizontalDirection.magnitude;
         if (horizontalDistance < 0.001f && Mathf.Abs(toTarget.y) < 0.001f)
+        {
+            _lastAimYawError = 0f;
+            _lastAimPitchError = 0f;
             return;
+        }
 
         var networkTransform = _body.Character.houseNetworkTransform;
         var currentRotation = networkTransform.targetRotation;
@@ -118,12 +134,23 @@ internal sealed class CompanionFacing
         // positive X rotation looks downward, hence the negative pitch.
         var remainingYaw = Mathf.DeltaAngle(bodyYaw + bodyStep, targetYaw);
         var desiredPitch = -Mathf.Atan2(toTarget.y, horizontalDistance) * Mathf.Rad2Deg;
-        _headState = new Vector2(
-            Mathf.Clamp(remainingYaw, -sideLookLimit, sideLookLimit),
-            Mathf.Clamp(desiredPitch, -upperLookLimit, lowerLookLimit));
+        var clampedHeadYaw = Mathf.Clamp(remainingYaw, -sideLookLimit, sideLookLimit);
+        var clampedHeadPitch = Mathf.Clamp(
+            desiredPitch,
+            -upperLookLimit,
+            lowerLookLimit);
+        _headState = new Vector2(clampedHeadYaw, clampedHeadPitch);
 
         _lastBodyYaw = bodyYaw + bodyStep;
         _lastTargetYaw = targetYaw;
+        _lastAimYawError = Mathf.Abs(Mathf.DeltaAngle(
+            _lastBodyYaw + clampedHeadYaw,
+            targetYaw));
+        _lastAimPitchError = Mathf.Abs(desiredPitch - clampedHeadPitch);
+        _lastAimDirection = Quaternion.Euler(
+            clampedHeadPitch,
+            _lastBodyYaw + clampedHeadYaw,
+            0f) * Vector3.forward;
 
         // The body rotation is sampled by the already-owned HouseNetworkTransform;
         // residual head pose uses the stock SyncVar/animator path.

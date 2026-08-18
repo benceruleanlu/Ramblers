@@ -20,8 +20,11 @@ internal sealed class CompanionController : MonoBehaviour
     private float _nextPoll;
     private float _verifyAt;
     private bool _hasSpawnedBot;
+    private long _activeJobToken;
+    private string _activeJobName;
 
     private static CompanionController _activeController;
+    private static long _nextJobToken;
 
     public CompanionController(IntPtr pointer) : base(pointer)
     {
@@ -57,6 +60,113 @@ internal sealed class CompanionController : MonoBehaviour
         if (!TryGetCommandTarget(out controller, out failure))
             return failure;
         return controller._actions.RequestJump(Time.realtimeSinceStartup);
+    }
+
+    internal static AgentToolResult CancelActiveWork()
+    {
+        CompanionController controller;
+        AgentToolResult failure;
+        if (!TryGetCommandTarget(out controller, out failure))
+            return failure;
+        controller._activeJobToken = 0;
+        controller._activeJobName = null;
+        return controller._actions.CancelActiveWork(Time.realtimeSinceStartup);
+    }
+
+    internal static bool TryBeginJob(
+        string jobName,
+        out CompanionJobHandle handle,
+        out AgentToolResult failure)
+    {
+        handle = null;
+        CompanionController controller;
+        if (!TryGetCommandTarget(out controller, out failure))
+            return false;
+
+        float timeoutSeconds;
+        if (!controller._actions.TryBeginJob(
+                jobName,
+                Time.realtimeSinceStartup,
+                out timeoutSeconds,
+                out failure))
+        {
+            return false;
+        }
+
+        controller._activeJobToken = ++_nextJobToken;
+        controller._activeJobName = jobName;
+        handle = new CompanionJobHandle
+        {
+            Token = controller._activeJobToken,
+            TimeoutSeconds = timeoutSeconds
+        };
+        return true;
+    }
+
+    internal static bool TryTakeJobCompletion(
+        long operationToken,
+        out CompanionJobCompletion completion)
+    {
+        var controller = _activeController;
+        if (controller == null || controller._body == null ||
+            !controller._body.IsAlive || !controller._hasSpawnedBot)
+        {
+            completion = CompanionJobCompletion.Failed("bot_not_spawned");
+            return true;
+        }
+
+        if (operationToken == 0 || controller._activeJobToken != operationToken)
+        {
+            // The job this caller was waiting on was cancelled or replaced.
+            completion = CompanionJobCompletion.Failed("cancelled");
+            return true;
+        }
+
+        if (!controller._actions.TryTakeJobCompletion(
+                controller._activeJobName,
+                Time.realtimeSinceStartup,
+                out completion))
+        {
+            return false;
+        }
+
+        // A job that succeeded may still hold something past completion — an
+        // inspection keeps its gaze — so it keeps its token until the model has
+        // responded. A failed job has nothing left to own.
+        if (completion == null || completion.Result == null || !completion.Result.Ok)
+        {
+            controller._activeJobToken = 0;
+            controller._activeJobName = null;
+        }
+        return true;
+    }
+
+    internal static void CancelJob(long operationToken)
+    {
+        var controller = _activeController;
+        if (controller != null && operationToken != 0 &&
+            controller._activeJobToken == operationToken)
+        {
+            controller._actions.CancelJob(
+                controller._activeJobName,
+                Time.realtimeSinceStartup);
+            controller._activeJobToken = 0;
+            controller._activeJobName = null;
+        }
+    }
+
+    internal static void ConcludeJob(long operationToken)
+    {
+        var controller = _activeController;
+        if (controller != null && operationToken != 0 &&
+            controller._activeJobToken == operationToken)
+        {
+            controller._actions.ConcludeJob(
+                controller._activeJobName,
+                Time.realtimeSinceStartup);
+            controller._activeJobToken = 0;
+            controller._activeJobName = null;
+        }
     }
 
     internal static bool TryGetVoiceParticipants(
@@ -145,6 +255,24 @@ internal sealed class CompanionController : MonoBehaviour
         }
     }
 
+    private void LateUpdate()
+    {
+        if (_body == null || !_body.IsAlive)
+            return;
+
+        try
+        {
+            _actions.TickLateFrame(Time.realtimeSinceStartup);
+        }
+        catch (Exception exception)
+        {
+            _actions.FailActiveJobs(
+                "action_execution_failed",
+                Time.realtimeSinceStartup);
+            Plugin.Logger.LogError($"[ACTION] Job update failed: {exception}");
+        }
+    }
+
     private void TrySpawn(NetworkManager manager, PlayerCharacter localPlayer)
     {
         GameObject spawned = null;
@@ -187,6 +315,10 @@ internal sealed class CompanionController : MonoBehaviour
                 playerNetworking,
                 networkIdentity,
                 networkTransform);
+            // A controller can survive a body replacement. Invalidating the
+            // active token prevents an old deferred call from targeting it.
+            _activeJobToken = 0;
+            _activeJobName = null;
             _hasSpawnedBot = true;
             _actions.Bind(_body, localPlayer, now);
 
@@ -217,6 +349,8 @@ internal sealed class CompanionController : MonoBehaviour
         _actions.Release();
         _body = null;
         _hasSpawnedBot = false;
+        _activeJobToken = 0;
+        _activeJobName = null;
         _verificationLog.Reset();
         Plugin.Logger.LogInfo("[RAMBLERS] Companion left the scene; controller state reset.");
     }
@@ -225,10 +359,13 @@ internal sealed class CompanionController : MonoBehaviour
     {
         if (_activeController == this)
             _activeController = null;
+        _activeJobToken = 0;
+        _activeJobName = null;
 
         try
         {
             _actions.StopQuietly();
+            _actions.Release();
         }
         catch
         {

@@ -244,6 +244,7 @@ $referenceSpecs = @(
     @{ Path = "dotnet\System.Net.WebSockets.Client.dll"; Alias = "websocketclient" },
     @{ Path = "dotnet\System.Private.Uri.dll"; Alias = "privateuri" },
     @{ Path = "dotnet\System.Text.Json.dll" },
+    @{ Path = "dotnet\System.IO.Compression.dll" },
     @{ Path = "BepInEx\core\BepInEx.Core.dll" },
     @{ Path = "BepInEx\core\BepInEx.Unity.Common.dll" },
     @{ Path = "BepInEx\core\BepInEx.Unity.IL2CPP.dll" },

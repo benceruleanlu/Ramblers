@@ -9,10 +9,10 @@ namespace Ramblers;
 /// </summary>
 internal static class AgentToolRouter
 {
-    internal static string Execute(RealtimeFunctionCall functionCall)
+    internal static AgentToolDispatch Execute(RealtimeFunctionCall functionCall)
     {
         if (functionCall == null || string.IsNullOrEmpty(functionCall.Name))
-            return AgentToolResult.Failure("unknown_tool").ToJson();
+            return AgentToolDispatch.Immediate(AgentToolResult.Failure("unknown_tool"));
 
         AgentToolResult result;
         switch (functionCall.Name)
@@ -26,12 +26,19 @@ internal static class AgentToolRouter
             case AgentToolCatalog.Jump:
                 result = ExecuteJump(functionCall.Arguments);
                 break;
+            case AgentToolCatalog.InspectReference:
+                return ExecuteJob(
+                    AgentToolCatalog.InspectReference,
+                    functionCall.Arguments);
+            case AgentToolCatalog.CancelAction:
+                result = ExecuteCancelAction(functionCall.Arguments);
+                break;
             default:
                 result = AgentToolResult.Failure("unknown_tool");
                 break;
         }
 
-        return result.ToJson();
+        return AgentToolDispatch.Immediate(result);
     }
 
     private static AgentToolResult ExecuteFollowMode(string arguments)
@@ -67,6 +74,30 @@ internal static class AgentToolRouter
         if (!IsEmptyObject(arguments))
             return AgentToolResult.Failure("invalid_arguments");
         return CompanionController.RequestJump();
+    }
+
+    /// <summary>
+    /// Starts a multi-frame companion job. The model's turn stays open until the
+    /// job reports a terminal result, so no branch here is specific to what the
+    /// job actually does.
+    /// </summary>
+    private static AgentToolDispatch ExecuteJob(string jobName, string arguments)
+    {
+        if (!IsEmptyObject(arguments))
+            return AgentToolDispatch.Immediate(AgentToolResult.Failure("invalid_arguments"));
+
+        AgentToolResult failure;
+        CompanionJobHandle handle;
+        if (!CompanionController.TryBeginJob(jobName, out handle, out failure))
+            return AgentToolDispatch.Immediate(failure);
+        return AgentToolDispatch.Pending(handle.Token, handle.TimeoutSeconds);
+    }
+
+    private static AgentToolResult ExecuteCancelAction(string arguments)
+    {
+        if (!IsEmptyObject(arguments))
+            return AgentToolResult.Failure("invalid_arguments");
+        return CompanionController.CancelActiveWork();
     }
 
     private static bool TryReadOnlyStringArgument(

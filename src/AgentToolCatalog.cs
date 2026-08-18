@@ -9,8 +9,11 @@ internal static class AgentToolCatalog
     internal const string SetFollowMode = "set_follow_mode";
     internal const string SetPosture = "set_posture";
     internal const string Jump = "jump";
+    internal const string InspectReference = "inspect_reference";
+    internal const string CancelAction = "cancel_action";
 
-    internal const string NamesForLog = "set_follow_mode,set_posture,jump";
+    internal const string NamesForLog =
+        "set_follow_mode,set_posture,jump,inspect_reference,cancel_action";
 
     internal static readonly object[] RealtimeDefinitions =
     {
@@ -65,6 +68,34 @@ internal static class AgentToolCatalog
             name = Jump,
             description =
                 "Queue one jump when the companion is standing on jumpable ground.",
+            parameters = new
+            {
+                type = "object",
+                properties = new { },
+                required = new string[0],
+                additionalProperties = false
+            }
+        },
+        new
+        {
+            type = "function",
+            name = InspectReference,
+            description =
+                "Look where the human is looking and capture one image from the companion's own point of view. Use when the human asks you to look at, inspect, identify, read, or comment on something they are showing you. The visual result arrives after this tool completes.",
+            parameters = new
+            {
+                type = "object",
+                properties = new { },
+                required = new string[0],
+                additionalProperties = false
+            }
+        },
+        new
+        {
+            type = "function",
+            name = CancelAction,
+            description =
+                "Immediately stop whatever the companion is doing: any in-progress action, a queued jump, and any active following. Use when the human says stop, never mind, forget it, cancel that, or wait. This does not change posture.",
             parameters = new
             {
                 type = "object",
