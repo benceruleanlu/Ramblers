@@ -37,6 +37,7 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
     private PendingToolBatch _pendingToolBatch;
     private float _nextConnectAt;
     private bool _userSpeaking;
+    private bool _continuationHeld;
     private bool _concludeJobOnAssistantAudio;
     private long _lingeringJobToken;
 
@@ -60,7 +61,35 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         // the outstanding-batch guard in the client, not by going deaf.
         if (_gameVoice.Tick(_client))
             InterruptAssistantSpeech();
+        ReleaseHeldContinuation();
         _gameVoiceOutput.Tick();
+    }
+
+    /// <summary>
+    /// True while the human is mid-utterance in either turn mode. Semantic VAD
+    /// reports its boundaries as server events; a push-to-talk hold has none, so
+    /// it is read from the capture itself.
+    /// </summary>
+    private bool IsHumanSpeaking()
+    {
+        return _userSpeaking || _gameVoice.IsCapturingManualTurn;
+    }
+
+    /// <summary>
+    /// Requests the response a completed tool batch had to hold back. Driving it
+    /// from one place covers a push-to-talk release too short to commit, which
+    /// would otherwise strand the outputs with nothing left to ask for them.
+    /// </summary>
+    private void ReleaseHeldContinuation()
+    {
+        if (!_continuationHeld || _client == null || IsHumanSpeaking())
+            return;
+
+        _continuationHeld = false;
+        // RequestResponse only latches and tries to reserve, so overlapping with
+        // a commit that already asked for one is refused rather than doubled.
+        _client.RequestResponse();
+        Plugin.Logger.LogInfo("[AGENT] CONTINUATION_RELEASED.");
     }
 
     private void EnsureClient()
@@ -285,17 +314,20 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         }
 
         // Outputs are always submitted. Creating the response is held back while
-        // the human is mid-sentence, so the continuation cannot start talking
-        // over an utterance the model has not heard the end of yet; the next
-        // speech_stopped requests it instead.
+        // the human is mid-utterance, so the continuation cannot start talking
+        // over speech the model has not heard the end of yet.
+        var humanSpeaking = IsHumanSpeaking();
         var sent = pending.Client != null &&
                    pending.Client.CompleteFunctionCallBatch(
                        pending.ResponseId,
                        outputs,
                        pending.Continuation,
-                       !_userSpeaking);
-        if (sent && _userSpeaking)
-            Plugin.Logger.LogInfo("[AGENT] CONTINUATION_HELD reason=user_speaking.");
+                       !humanSpeaking);
+        if (sent && humanSpeaking)
+        {
+            _continuationHeld = true;
+            Plugin.Logger.LogInfo("[AGENT] CONTINUATION_HELD reason=human_speaking.");
+        }
         var continuationCount = pending.Continuation == null
             ? 0
             : pending.Continuation.Length;
@@ -339,6 +371,7 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         Plugin.Logger.LogInfo(
             $"[AGENT] TOOL_BATCH_CANCELLED responseId={_pendingToolBatch.ResponseId}.");
         _pendingToolBatch = null;
+        _continuationHeld = false;
         _concludeJobOnAssistantAudio = false;
         _lingeringJobToken = 0;
     }
@@ -359,6 +392,8 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         CompanionController.CancelJob(_lingeringJobToken);
         _lingeringJobToken = 0;
         _concludeJobOnAssistantAudio = false;
+        _continuationHeld = false;
+        _userSpeaking = false;
         _gameVoice.Stop(_client);
         _gameVoiceOutput.Stop();
         if (_client == null)

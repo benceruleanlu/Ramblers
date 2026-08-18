@@ -113,6 +113,17 @@ internal sealed class GameVoiceInput
         return manualTurnStarted;
     }
 
+    /// <summary>
+    /// True while a push-to-talk press is capturing audio that has not been
+    /// committed yet. Manual turns are the one mode with no server VAD, so a
+    /// caller that needs to know whether the human is mid-utterance has to read
+    /// it here rather than from speech_started and speech_stopped.
+    /// </summary>
+    internal bool IsCapturingManualTurn =>
+        _streaming &&
+        _hasConfiguredTurnMode &&
+        _configuredTurnMode == AgentTurnDetectionMode.ManualPushToTalk;
+
     internal void Stop(IAgentAudioSink sink)
     {
         StopStreaming(false, sink);
