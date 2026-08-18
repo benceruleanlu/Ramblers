@@ -53,6 +53,11 @@ internal sealed class GameVoiceOutput
         // play cursor into a per-item offset for conversation.item.truncate.
         internal long RingStartSample = -1;
         internal int WrittenSamples;
+
+        // Samples banked from ring timelines this segment has already outlived.
+        // An underrun restart rebases the play cursor, so what came before it
+        // can no longer be measured against RingStartSample.
+        internal int DeliveredSamples;
     }
 
     private readonly List<VoiceSegment> _segments = new List<VoiceSegment>();
@@ -109,7 +114,18 @@ internal sealed class GameVoiceOutput
             return;
 
         if (_playing)
+        {
             ObservePlayback();
+
+            // A stall longer than the buffered lead leaves the play head past
+            // the write cursor. Writing on that timeline would land behind the
+            // read head, so rebase before FillRing rather than after.
+            if (!IsFullyStaged() &&
+                PlayedSamples() >= _writeBlocksTotal * BlockSamples)
+            {
+                RestartAfterUnderrun();
+            }
+        }
 
         FillRing();
         MaintainSilenceGuard();
@@ -145,12 +161,16 @@ internal sealed class GameVoiceOutput
         for (var index = 0; index < _segments.Count; index++)
         {
             var segment = _segments[index];
-            var heard = 0L;
+            var heard = (long)segment.DeliveredSamples;
             if (segment.RingStartSample >= 0)
             {
                 var reached = played - segment.RingStartSample;
                 if (reached > 0)
-                    heard = Math.Min(reached, segment.WrittenSamples);
+                {
+                    heard += Math.Min(
+                        reached,
+                        segment.WrittenSamples - segment.DeliveredSamples);
+                }
             }
 
             var before = truncations.Count;
@@ -424,6 +444,33 @@ internal sealed class GameVoiceOutput
             $"[AGENT] VOICE_STREAM_STARTED utterance={_utteranceNumber}, " +
             $"bufferedMs={_writeBlocksTotal * BlockSamples * 1000L / OutputSampleRate}, " +
             "route=local_3d");
+    }
+
+    /// <summary>
+    /// Recovers from the play head overtaking the write cursor. Playback stops
+    /// and the ring is rebased, so staged audio re-enters at the head of a fresh
+    /// timeline behind a full jitter buffer instead of being written into slots
+    /// the read head has already passed.
+    /// </summary>
+    private void RestartAfterUnderrun()
+    {
+        for (var index = 0; index < _segments.Count; index++)
+        {
+            var segment = _segments[index];
+
+            // Everything written before the rebase counts as delivered. A gap
+            // in the middle cannot be expressed as one truncation offset, and
+            // under-reporting would make the model repeat what was mostly heard.
+            segment.DeliveredSamples = segment.WrittenSamples;
+            segment.RingStartSample = -1;
+        }
+
+        var starvedMs = (PlayedSamples() - _writeBlocksTotal * BlockSamples) *
+                        1000L / OutputSampleRate;
+        StopSource();
+        PrepareRing();
+        Plugin.Logger.LogWarning(
+            $"[AGENT] VOICE_UNDERRUN starvedMs={starvedMs}, action=rebased");
     }
 
     private void StopPlayback()
