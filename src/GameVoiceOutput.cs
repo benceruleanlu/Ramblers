@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using UnityEngine;
 
@@ -135,6 +136,7 @@ internal sealed class GameVoiceOutput
     {
         var truncations = new List<RealtimeAudioTruncation>();
         var seenItems = new HashSet<string>(StringComparer.Ordinal);
+        var heardReport = new StringBuilder();
 
         if (_playing)
             ObservePlayback();
@@ -151,12 +153,25 @@ internal sealed class GameVoiceOutput
                     heard = Math.Min(reached, segment.WrittenSamples);
             }
 
+            var before = truncations.Count;
             AddTruncation(
                 truncations,
                 seenItems,
                 segment.ItemId,
                 segment.ContentIndex,
                 (int)(heard * 1000L / OutputSampleRate));
+            if (truncations.Count == before)
+                continue;
+
+            // Heard against generated, so the truncation offset can be read
+            // back rather than inferred from the item count alone.
+            if (heardReport.Length > 0)
+                heardReport.Append(' ');
+            heardReport
+                .Append(heard * 1000L / OutputSampleRate)
+                .Append('/')
+                .Append(segment.WrittenSamples * 1000L / OutputSampleRate)
+                .Append("ms");
         }
 
         StopSource();
@@ -164,7 +179,8 @@ internal sealed class GameVoiceOutput
         PrepareRing();
 
         if (truncations.Count > 0)
-            Plugin.Logger.LogInfo($"[AGENT] VOICE_INTERRUPTED items={truncations.Count}");
+            Plugin.Logger.LogInfo(
+                $"[AGENT] VOICE_INTERRUPTED items={truncations.Count}, heard={heardReport}");
 
         return truncations;
     }
