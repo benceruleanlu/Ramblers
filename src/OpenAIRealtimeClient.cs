@@ -779,7 +779,8 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             return null;
 
         var hasText = !string.IsNullOrWhiteSpace(item.Text);
-        var hasImage = item.ImageJpeg != null && item.ImageJpeg.Length > 0;
+        var hasImage = item.ImageBytes != null && item.ImageBytes.Length > 0 &&
+                       !string.IsNullOrWhiteSpace(item.ImageMediaType);
         if (!hasText && !hasImage)
             return null;
 
@@ -792,8 +793,8 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             content[next] = new
             {
                 type = "input_image",
-                image_url = "data:image/jpeg;base64," +
-                            Convert.ToBase64String(item.ImageJpeg)
+                image_url = "data:" + item.ImageMediaType + ";base64," +
+                            Convert.ToBase64String(item.ImageBytes)
             };
         }
 

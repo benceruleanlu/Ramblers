@@ -289,14 +289,16 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
             {
                 AgentContinuationItem.FromImage(
                     DescribeObservation(observation),
-                    observation.JpegBytes)
+                    observation.ImageBytes,
+                    observation.MediaType)
             }
         };
         _state = InspectionState.HoldingReference;
         _stateStartedAt = now;
         Plugin.Logger.LogInfo(
             $"[VISION] CAPTURED width={observation.Width}, height={observation.Height}, " +
-            $"jpegBytes={observation.JpegBytes.Length}, lookSeconds={lookSeconds:F2}, " +
+            $"imageBytes={observation.ImageBytes.Length}, " +
+            $"mediaType={observation.MediaType}, lookSeconds={lookSeconds:F2}, " +
             $"aimYawError={_attention.LastAimYawError:F1}, " +
             $"aimPitchError={_attention.LastAimPitchError:F1}, " +
             $"alignmentTimedOut={alignmentTimedOut}.");
