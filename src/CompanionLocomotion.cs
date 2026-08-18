@@ -14,8 +14,6 @@ internal enum MovementGait
 /// </summary>
 internal struct SteeringStatus
 {
-    internal bool Moving;
-    internal float CommandedSpeed;
     internal float SteeringAngle;
     internal float Clearance;
     internal bool DirectPathBlocked;
@@ -214,8 +212,6 @@ internal sealed class CompanionLocomotion
         _lastCommandedSpeed = speed;
         SetMovementIntent(steeringDirection * speed);
 
-        status.Moving = true;
-        status.CommandedSpeed = speed;
         status.SteeringAngle = steeringAngle;
         status.Clearance = clearance;
         status.DirectPathBlocked = directBlocked;
