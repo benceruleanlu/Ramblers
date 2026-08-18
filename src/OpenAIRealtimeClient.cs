@@ -59,15 +59,13 @@ internal enum RealtimeClientEventType
 {
     AudioPacket,
     InputSpeechStarted,
-    InputSpeechStopped,
-    InputAudioCleared
+    InputSpeechStopped
 }
 
 internal sealed class RealtimeClientEvent
 {
     internal RealtimeClientEventType Type;
     internal RealtimeAudioPacket AudioPacket;
-    internal long InputEpoch;
 }
 
 internal sealed class RealtimeAudioTruncation
@@ -93,8 +91,6 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         new ConcurrentQueue<RealtimeFunctionCallBatch>();
     private readonly ConcurrentQueue<RealtimeClientEvent> _clientEvents =
         new ConcurrentQueue<RealtimeClientEvent>();
-    private readonly ConcurrentQueue<long> _pendingInputClearEpochs =
-        new ConcurrentQueue<long>();
     private readonly SemaphoreSlim _outboundSignal = new SemaphoreSlim(0);
     private readonly object _responseSync = new object();
     private readonly HashSet<string> _outstandingToolBatchIds = new HashSet<string>();
@@ -107,8 +103,6 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
     private bool _responseRequested;
     private string _responseCreateEventId;
     private long _eventSequence;
-    private long _inputEpochSequence;
-    private long _audioAppendSequence;
     private bool _disposed;
 
     internal OpenAIRealtimeClient(string apiKey, string model)
@@ -165,28 +159,18 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
 
     public void ClearInputAudio()
     {
-        QueueInputAudioClear(0);
+        QueueInputAudioClear();
     }
 
     public void AppendInputAudio(byte[] pcm16)
     {
         if (pcm16 == null || pcm16.Length == 0)
             return;
-        Interlocked.Increment(ref _audioAppendSequence);
         QueueJson(new
         {
             type = "input_audio_buffer.append",
             audio = Convert.ToBase64String(pcm16)
         });
-    }
-
-    internal long AudioAppendSequence => Interlocked.Read(ref _audioAppendSequence);
-
-    internal long BeginInputAudioEpochBarrier()
-    {
-        var epoch = Interlocked.Increment(ref _inputEpochSequence);
-        QueueInputAudioClear(epoch);
-        return epoch;
     }
 
     public void CommitInputAudioAndRespond()
@@ -208,10 +192,17 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             QueueJson(new { type = "response.cancel" });
     }
 
+    /// <summary>
+    /// Submits a batch's function outputs and continuation items. Pass false for
+    /// <paramref name="requestResponse"/> to leave the response uncreated, which
+    /// the caller does while the human is still speaking; a pending request from
+    /// an earlier turn is preserved either way and fires at the next opening.
+    /// </summary>
     internal bool CompleteFunctionCallBatch(
         string responseId,
         RealtimeFunctionOutput[] outputs,
-        AgentContinuationItem[] continuation)
+        AgentContinuationItem[] continuation,
+        bool requestResponse)
     {
         if (string.IsNullOrEmpty(responseId) || outputs == null)
             return false;
@@ -267,8 +258,11 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         {
             if (!_outstandingToolBatchIds.Remove(responseId))
                 return false;
-            _responseRequested = true;
-            shouldCreate = TryReserveResponseCreate();
+            if (requestResponse)
+            {
+                _responseRequested = true;
+                shouldCreate = TryReserveResponseCreate();
+            }
         }
 
         if (shouldCreate)
@@ -461,18 +455,6 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                     Type = RealtimeClientEventType.InputSpeechStopped
                 });
                 _logs.Enqueue("INPUT_SPEECH_STOPPED");
-                return;
-            }
-
-            if (type == "input_audio_buffer.cleared")
-            {
-                long epoch;
-                _pendingInputClearEpochs.TryDequeue(out epoch);
-                _clientEvents.Enqueue(new RealtimeClientEvent
-                {
-                    Type = RealtimeClientEventType.InputAudioCleared,
-                    InputEpoch = epoch
-                });
                 return;
             }
 
@@ -809,9 +791,8 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         QueueJson(new { event_id = eventId, type = "response.create" });
     }
 
-    private void QueueInputAudioClear(long epoch)
+    private void QueueInputAudioClear()
     {
-        _pendingInputClearEpochs.Enqueue(epoch);
         QueueJson(new
         {
             event_id = NextEventId("input_clear"),
