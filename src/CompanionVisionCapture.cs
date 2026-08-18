@@ -34,8 +34,16 @@ internal static class CompanionVisionCapture
     private const int CaptureWidth = 640;
     private const int CaptureHeight = 360;
     private const float EyeForwardOffset = 0.06f;
+    // Far enough forward of the eye to exclude the companion's own head, close
+    // enough to keep a held or nearby object in frame.
+    private const float NearClipPlane = 0.05f;
 
-    private static bool? _apiAvailable;
+    private static bool _probed;
+    private static bool _captureSupported;
+    private static bool _canCopyFrom;
+    private static bool _canSetAspect;
+    private static bool _canSetNearClip;
+    private static bool _canHideRenderers;
 
     internal static bool TryCapture(
         CompanionBody body,
@@ -96,9 +104,12 @@ internal static class CompanionVisionCapture
             cameraObject = new GameObject("Ramblers Vision Camera");
             cameraObject.hideFlags = HideFlags.HideAndDontSave;
             captureCamera = cameraObject.AddComponent<Camera>();
-            // CopyFrom each capture keeps the companion's view in step with the
-            // player's current field of view, clip planes, and culling mask.
-            captureCamera.CopyFrom(sourceCamera);
+            // CopyFrom keeps the companion's view in step with the player's
+            // current field of view, clip planes, and culling mask. Where it is
+            // unavailable the fresh camera's defaults are used instead, which
+            // still produces a usable frame.
+            if (_canCopyFrom)
+                captureCamera.CopyFrom(sourceCamera);
             captureCamera.enabled = false;
             captureCamera.targetTexture = null;
             captureCamera.transform.position = eyePosition + forward * EyeForwardOffset;
@@ -106,9 +117,10 @@ internal static class CompanionVisionCapture
                 ? Vector3.forward
                 : Vector3.up;
             captureCamera.transform.rotation = Quaternion.LookRotation(forward, up);
-            captureCamera.aspect = CaptureWidth / (float)CaptureHeight;
-            captureCamera.rect = new Rect(0f, 0f, 1f, 1f);
-            captureCamera.nearClipPlane = Mathf.Max(0.05f, captureCamera.nearClipPlane);
+            if (_canSetAspect)
+                captureCamera.aspect = CaptureWidth / (float)CaptureHeight;
+            if (_canSetNearClip)
+                captureCamera.nearClipPlane = NearClipPlane;
 
             renderTexture = RenderTexture.GetTemporary(
                 CaptureWidth,
@@ -188,58 +200,70 @@ internal static class CompanionVisionCapture
     }
 
     /// <summary>
-    /// Verifies the Unity entry points this capture depends on before the first
-    /// use. Every one of them is reachable in Big Walk's build, but that is a
-    /// property of the shipped game rather than of the Unity version, so it is
-    /// checked rather than assumed.
+    /// Verifies the Unity entry points this capture depends on before first use.
+    ///
+    /// Only four are genuinely required. The rest improve the capture but have
+    /// usable defaults, so a stripped one degrades the image instead of
+    /// disabling the whole capability. Every probe runs — none short-circuit —
+    /// so one run reports the complete picture rather than the first failure.
     /// </summary>
     private static bool IsCaptureSupported()
     {
-        if (_apiAvailable.HasValue)
-            return _apiAvailable.Value;
+        if (_probed)
+            return _captureSupported;
+        _probed = true;
 
-        var available =
-            UnityApiProbe.IsMethodPresent(
-                UnityApiProbe.CoreModule,
-                "UnityEngine.Rendering",
-                "RenderPipeline",
-                "SubmitRenderRequest",
-                2) &&
-            UnityApiProbe.IsMethodPresent(
-                UnityApiProbe.CoreModule,
-                "UnityEngine",
-                "Camera",
-                "CopyFrom",
-                1) &&
-            UnityApiProbe.IsMethodPresent(
-                UnityApiProbe.CoreModule,
-                "UnityEngine",
-                "Texture2D",
-                "ReadPixels",
-                4) &&
-            UnityApiProbe.IsMethodPresent(
-                UnityApiProbe.CoreModule,
-                "UnityEngine",
-                "Texture2D",
-                "GetRawTextureData",
-                0) &&
-            UnityApiProbe.IsMethodPresent(
-                UnityApiProbe.CoreModule,
-                "UnityEngine",
-                "Renderer",
-                "set_forceRenderingOff",
-                1);
+        // Ground truth for anything the probes report as missing: a non-zero
+        // method count proves the type resolved, so a negative result is a real
+        // strip rather than a failed class lookup.
+        UnityApiProbe.DescribeType(
+            UnityApiProbe.CoreModule,
+            "UnityEngine",
+            "Camera",
+            new[] { "CopyFrom", "targetTexture", "aspect", "ClipPlane", "stereo" });
 
-        _apiAvailable = available;
-        if (!available)
+        var canSubmitRender = Probe("UnityEngine.Rendering", "RenderPipeline", "SubmitRenderRequest", 2);
+        var canSetTargetTexture = Probe("UnityEngine", "Camera", "set_targetTexture", 1);
+        var canReadPixels = Probe("UnityEngine", "Texture2D", "ReadPixels", 4);
+        var canReadRaw = Probe("UnityEngine", "Texture2D", "GetRawTextureData", 0);
+
+        _canCopyFrom = Probe("UnityEngine", "Camera", "CopyFrom", 1);
+        _canSetAspect = Probe("UnityEngine", "Camera", "set_aspect", 1);
+        _canSetNearClip = Probe("UnityEngine", "Camera", "set_nearClipPlane", 1);
+        _canHideRenderers = Probe("UnityEngine", "Renderer", "set_forceRenderingOff", 1);
+
+        _captureSupported = canSubmitRender && canSetTargetTexture &&
+                            canReadPixels && canReadRaw;
+        if (!_captureSupported)
         {
             Plugin.Logger.LogWarning(
-                "[VISION] DISABLED reason=required Unity render APIs are absent " +
+                "[VISION] DISABLED reason=a required Unity render API is absent " +
                 "from this build; inspect_reference will report failure instead " +
                 "of capturing.");
         }
+        else if (!_canCopyFrom || !_canHideRenderers)
+        {
+            Plugin.Logger.LogWarning(
+                $"[VISION] DEGRADED copyFrom={_canCopyFrom}, " +
+                $"hideCompanion={_canHideRenderers}; capturing with Unity's " +
+                "default camera configuration where a setter is unavailable.");
+        }
 
-        return available;
+        return _captureSupported;
+    }
+
+    private static bool Probe(
+        string namespaceName,
+        string typeName,
+        string methodName,
+        int argumentCount)
+    {
+        return UnityApiProbe.IsMethodPresent(
+            UnityApiProbe.CoreModule,
+            namespaceName,
+            typeName,
+            methodName,
+            argumentCount);
     }
 
     private static Camera ResolveSourceCamera(PlayerCharacter human)
@@ -259,11 +283,17 @@ internal static class CompanionVisionCapture
         RenderTexture destination,
         CompanionBody body)
     {
-        var renderers = body.GameObject.GetComponentsInChildren<Renderer>(true);
-        var previousStates = new bool[renderers.Length];
+        // Without forceRenderingOff the companion may appear in its own frame.
+        // The eye offset and near plane hide most of it, so this degrades the
+        // image rather than invalidating it.
+        var renderers = _canHideRenderers
+            ? body.GameObject.GetComponentsInChildren<Renderer>(true)
+            : null;
+        var count = renderers == null ? 0 : renderers.Length;
+        var previousStates = new bool[count];
         try
         {
-            for (var index = 0; index < renderers.Length; index++)
+            for (var index = 0; index < count; index++)
             {
                 var renderer = renderers[index];
                 if (renderer == null)
@@ -284,7 +314,7 @@ internal static class CompanionVisionCapture
         }
         finally
         {
-            for (var index = 0; index < renderers.Length; index++)
+            for (var index = 0; index < count; index++)
             {
                 var renderer = renderers[index];
                 if (renderer != null)
