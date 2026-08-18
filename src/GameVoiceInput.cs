@@ -40,7 +40,6 @@ internal sealed class GameVoiceInput
     private bool _voiceIntentWasActive;
     private bool _hasConfiguredTurnMode;
     private AgentTurnDetectionMode _configuredTurnMode;
-    private bool _waitingForManualRelease;
     private float _nextVoiceRouteResolveAt;
     private string _streamSource;
     private float _streamDistance;
@@ -56,14 +55,6 @@ internal sealed class GameVoiceInput
         if (sink == null || !sink.IsReady)
         {
             StopStreaming(false, sink);
-            return false;
-        }
-
-        if (_waitingForManualRelease)
-        {
-            if (IsManualVoiceGateOpen() && MicManager.IsRecording(null))
-                return false;
-            _waitingForManualRelease = false;
             return false;
         }
 
@@ -133,39 +124,9 @@ internal sealed class GameVoiceInput
         _microphoneUnavailableSince = -1f;
         _voiceIntentWasActive = false;
         _hasConfiguredTurnMode = false;
-        _waitingForManualRelease = false;
         _directVoiceAttenuationCurve = null;
         _nextVoiceRouteResolveAt = 0f;
     }
-
-    /// <summary>
-    /// Drops any partial utterance and re-bases the microphone cursor so audio
-    /// spoken during an embodied tool is never uploaded as a delayed backlog.
-    /// </summary>
-    internal void Pause(IAgentAudioSink sink)
-    {
-        _waitingForManualRelease =
-            _hasConfiguredTurnMode &&
-            _configuredTurnMode == AgentTurnDetectionMode.ManualPushToTalk &&
-            IsManualVoiceGateOpen() &&
-            MicManager.IsRecording(null);
-
-        if (_streaming)
-            StopStreaming(false, sink);
-        else if (sink != null && sink.IsReady)
-            sink.ClearInputAudio();
-
-        _microphoneClip = null;
-        _microphoneReadPosition = -1;
-        _microphoneFrequency = 0;
-        _microphoneChannels = 0;
-        _resampleAccumulator = 0;
-        _microphoneUnavailableSince = -1f;
-        _voiceIntentWasActive = false;
-        Plugin.Logger.LogInfo("[AGENT] AUDIO_PAUSED reason=embodied_tool.");
-    }
-
-    internal bool IsWaitingForManualRelease => _waitingForManualRelease;
 
     private static bool IsManualVoiceGateOpen()
     {
