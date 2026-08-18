@@ -12,7 +12,13 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
     private const float MaximumHumanGlanceSeconds = 0.65f;
     private const float HumanAimToleranceDegrees = 12f;
     private const float MinimumReferenceLookSeconds = 0.30f;
-    private const float MaximumReferenceLookSeconds = 1.25f;
+
+    // A reference directly behind the companion needs a full half-turn, and the
+    // aim can only advance as fast as the body absorbs it once head yaw
+    // saturates — 180 degrees per second, so about 1.2s worst case. The old
+    // 1.25s budget was set when facing snapped onto its target and would now
+    // time out on rear references rather than aiming at them.
+    private const float MaximumReferenceLookSeconds = 2.00f;
     private const float ReferenceSettleSeconds = 0.10f;
     private const float ReferenceHoldSeconds = 3.00f;
     private const float ReferenceAimToleranceDegrees = 4f;
@@ -372,7 +378,7 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
 
             var hitTransform = hit.collider == null ? null : hit.collider.transform;
             if (!IsHumanBodyCollider(hit.collider, human) &&
-                !IsUnderRoot(hitTransform, body.Transform))
+                !body.Contains(hitTransform))
             {
                 referencePoint = hit.point;
                 rayHit = true;
@@ -400,12 +406,6 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
         if (Camera.main != null)
             return Camera.main.transform;
         return human == null ? null : human.cameraTransform;
-    }
-
-    private static bool IsUnderRoot(Transform candidate, Transform root)
-    {
-        return candidate != null && root != null &&
-               (candidate == root || candidate.IsChildOf(root));
     }
 
     private static bool IsHumanBodyCollider(

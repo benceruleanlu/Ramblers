@@ -169,6 +169,23 @@ internal sealed class CompanionController : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// Tells the companion whether a conversation is in progress. Unlike the
+    /// action entry points this is ambient state rather than a command, so it is
+    /// silently ignored when there is no body to apply it to.
+    /// </summary>
+    internal static void SetConversationActive(bool active)
+    {
+        var controller = _activeController;
+        if (controller == null || controller._body == null ||
+            !controller._body.IsAlive || !controller._hasSpawnedBot)
+        {
+            return;
+        }
+
+        controller._actions.SetConversationActive(active);
+    }
+
     internal static bool TryGetVoiceParticipants(
         out PlayerCharacter human,
         out PlayerCharacter bot)

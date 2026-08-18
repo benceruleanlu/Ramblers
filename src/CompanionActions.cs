@@ -29,6 +29,7 @@ internal sealed class CompanionActionCoordinator
     private readonly CompanionFacing _facing = new CompanionFacing(CompanionFollowBehavior.NavigationInterval);
     private readonly CompanionAttention _attention;
     private readonly CompanionFollowBehavior _follow;
+    private readonly CompanionAmbientGaze _ambientGaze;
     private readonly CompanionPostureActuator _posture = new CompanionPostureActuator();
     private readonly CompanionJumpActuator _jump = new CompanionJumpActuator();
     private readonly ICompanionJob[] _jobs;
@@ -37,6 +38,7 @@ internal sealed class CompanionActionCoordinator
     {
         _attention = new CompanionAttention(_facing);
         _follow = new CompanionFollowBehavior(_locomotion, _attention);
+        _ambientGaze = new CompanionAmbientGaze(_attention);
         _jobs = new ICompanionJob[]
         {
             new CompanionInspectionBehavior(_attention)
@@ -53,7 +55,9 @@ internal sealed class CompanionActionCoordinator
         for (var index = 0; index < _jobs.Length; index++)
             _jobs[index].Bind(body, human);
         _locomotion.SetPosture(_posture.Current);
+        _attention.SetBodyTurnAllowed(BodyTurnAllowed);
         _follow.Bind(body, human, now);
+        _ambientGaze.Bind(body, human, now);
     }
 
     internal void TickFrame(float now)
@@ -65,6 +69,9 @@ internal sealed class CompanionActionCoordinator
     {
         for (var index = 0; index < _jobs.Length; index++)
             _jobs[index].Tick(now);
+        // The idle habit publishes underneath whatever a job is claiming, so it
+        // resolves by channel priority rather than by asking what else is running.
+        _ambientGaze.Tick(now, _locomotion.LastMovementIntent);
         _attention.Tick(now);
         // A job can release locomotion part-way through its own lifetime, so the
         // navigation gate is re-evaluated every frame rather than only when a
@@ -106,10 +113,28 @@ internal sealed class CompanionActionCoordinator
             return result;
 
         _locomotion.SetPosture(_posture.Current);
+        _attention.SetBodyTurnAllowed(BodyTurnAllowed);
         if (_posture.BlocksMovement)
             _locomotion.Stop(now);
         RefreshMovementGate(now);
         return result;
+    }
+
+    /// <summary>
+    /// Whether the companion may turn its body to look at something. Sitting is
+    /// the one posture where it may not: stock PlayerMover.UpdatePerFrameRotation
+    /// skips its head-yaw drain while PlayerSitter reports sitting, so a seated
+    /// player looks around with their head alone.
+    /// </summary>
+    private bool BodyTurnAllowed => _posture.Current != CompanionPosture.Sitting;
+
+    /// <summary>
+    /// Reports whether the human and companion are mid-conversation, which pins
+    /// the idle gaze to the human for as long as it lasts.
+    /// </summary>
+    internal void SetConversationActive(bool active)
+    {
+        _ambientGaze.SetConversationActive(active);
     }
 
     internal AgentToolResult RequestJump(float now)
@@ -234,6 +259,7 @@ internal sealed class CompanionActionCoordinator
     {
         for (var index = 0; index < _jobs.Length; index++)
             _jobs[index].Release();
+        _ambientGaze.Release();
         _follow.Release();
         _jump.Release();
         _posture.Release();

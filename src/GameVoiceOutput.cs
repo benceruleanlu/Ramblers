@@ -78,6 +78,9 @@ internal sealed class GameVoiceOutput
     private bool _playing;
     private int _utteranceNumber;
 
+    /// <summary>True while synthetic speech is actually coming out of the body.</summary>
+    internal bool IsSpeaking => _playing;
+
     internal void Accept(RealtimeAudioPacket packet)
     {
         if (packet == null)

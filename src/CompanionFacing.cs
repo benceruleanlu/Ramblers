@@ -11,6 +11,15 @@ namespace Ramblers;
 internal sealed class CompanionFacing
 {
     internal const float BodyTurnSpeed = 180f;
+
+    // A deliberate look is mouse motion, not teleportation. Aiming straight at
+    // a new target would put the whole angular error into headState.x on the
+    // first frame, a residual only a fast flick reaches, because the stock
+    // 180 deg/s drain is eating the input the whole time a real hand is moving.
+    // The gain gives the ease-out a hand has on approach; the cap is its peak.
+    private const float LookRate = 300f;
+    private const float LookApproachGain = 8f;
+
     private const float FallbackSideLookLimit = 85f;
     private const float FallbackVerticalLookLimit = 55f;
 
@@ -18,6 +27,7 @@ internal sealed class CompanionFacing
 
     private CompanionBody _body;
     private Vector2 _headState;
+    private bool _bodyTurnAllowed = true;
     private float _lastUpdateAt;
     private float _lastBodyYaw;
     private float _lastTargetYaw;
@@ -58,10 +68,23 @@ internal sealed class CompanionFacing
         _lastUpdateAt = now;
     }
 
+    /// <summary>
+    /// Whether head yaw may be absorbed into the body. Stock
+    /// PlayerMover.UpdatePerFrameRotation skips its drain block entirely while
+    /// PlayerSitter.isSittingCorrected is true, so a seated player is the one
+    /// case that can hold a sustained head yaw instead of turning to face
+    /// what they are looking at.
+    /// </summary>
+    internal void SetBodyTurnAllowed(bool allowed)
+    {
+        _bodyTurnAllowed = allowed;
+    }
+
     internal void Release()
     {
         _body = null;
         _headState = Vector2.zero;
+        _bodyTurnAllowed = true;
         _lastUpdateAt = 0f;
         _lastBodyYaw = 0f;
         _lastTargetYaw = 0f;
@@ -107,17 +130,6 @@ internal sealed class CompanionFacing
             : Mathf.Clamp(now - _lastUpdateAt, 0f, _expectedUpdateInterval * 2f);
         _lastUpdateAt = now;
 
-        // Stock PlayerMover.UpdatePerFrameRotation absorbs horizontal look into
-        // PlayerCharacter.kernal at 180 degrees per second. That method is local-only,
-        // so a connectionless non-local companion performs the same body step here.
-        var yawError = Mathf.DeltaAngle(bodyYaw, targetYaw);
-        var bodyStep = Mathf.Clamp(
-            yawError,
-            -BodyTurnSpeed * elapsed,
-            BodyTurnSpeed * elapsed);
-        var nextRotation = Quaternion.AngleAxis(bodyStep, Vector3.up) * currentRotation;
-        networkTransform.targetRotation = nextRotation;
-
         var tunings = _body.Character.tunings;
         var sideLookLimit = tunings != null && tunings.sideLookLimit > 0.01f
             ? tunings.sideLookLimit
@@ -130,31 +142,86 @@ internal sealed class CompanionFacing
             : FallbackVerticalLookLimit;
 
         // PlayerHead's replicated Vector2 is (yaw relative to the body, pitch).
-        // The residual yaw decays to zero as the body catches the target. Unity's
-        // positive X rotation looks downward, hence the negative pitch.
-        var remainingYaw = Mathf.DeltaAngle(bodyYaw + bodyStep, targetYaw);
+        // Unity's positive X rotation looks downward, hence the negative pitch.
+        // The aim is wherever the head is currently pointing; look input moves
+        // it toward the target at a bounded rate, exactly as a hand on a mouse
+        // does, and PlayerHead.SetHeadStateLocal accumulates that delta.
         var desiredPitch = -Mathf.Atan2(toTarget.y, horizontalDistance) * Mathf.Rad2Deg;
-        var clampedHeadYaw = Mathf.Clamp(remainingYaw, -sideLookLimit, sideLookLimit);
-        var clampedHeadPitch = Mathf.Clamp(
-            desiredPitch,
+        var maxLookStep = LookRate * elapsed;
+        var aimYaw = bodyYaw + _headState.x;
+        var headYaw = Mathf.Clamp(
+            _headState.x + LookStep(Mathf.DeltaAngle(aimYaw, targetYaw), elapsed, maxLookStep),
+            -sideLookLimit,
+            sideLookLimit);
+        var headPitch = Mathf.Clamp(
+            _headState.y + LookStep(desiredPitch - _headState.y, elapsed, maxLookStep),
             -upperLookLimit,
             lowerLookLimit);
-        _headState = new Vector2(clampedHeadYaw, clampedHeadPitch);
+        ApplyLowerCornerLimit(ref headYaw, ref headPitch, sideLookLimit, lowerLookLimit);
 
+        // Stock PlayerMover.UpdatePerFrameRotation subtracts up to 180 degrees
+        // per second from headState.x and adds it to PlayerCharacter.kernal, so
+        // the residual is a lag buffer rather than a pose: it always decays to
+        // zero once the aim settles. That method is local-only, so a
+        // connectionless non-local companion performs the same step here.
+        var bodyStep = _bodyTurnAllowed
+            ? Mathf.Clamp(headYaw, -BodyTurnSpeed * elapsed, BodyTurnSpeed * elapsed)
+            : 0f;
+        headYaw -= bodyStep;
+        if (bodyStep != 0f)
+        {
+            networkTransform.targetRotation =
+                Quaternion.AngleAxis(bodyStep, Vector3.up) * currentRotation;
+        }
+
+        _headState = new Vector2(headYaw, headPitch);
         _lastBodyYaw = bodyYaw + bodyStep;
         _lastTargetYaw = targetYaw;
         _lastAimYawError = Mathf.Abs(Mathf.DeltaAngle(
-            _lastBodyYaw + clampedHeadYaw,
+            _lastBodyYaw + headYaw,
             targetYaw));
-        _lastAimPitchError = Mathf.Abs(desiredPitch - clampedHeadPitch);
+        _lastAimPitchError = Mathf.Abs(desiredPitch - headPitch);
         _lastAimDirection = Quaternion.Euler(
-            clampedHeadPitch,
-            _lastBodyYaw + clampedHeadYaw,
+            headPitch,
+            _lastBodyYaw + headYaw,
             0f) * Vector3.forward;
 
         // The body rotation is sampled by the already-owned HouseNetworkTransform;
         // residual head pose uses the stock SyncVar/animator path.
         _body.Character.head.headState = _headState;
         _body.Networking.NetworkheadState = _headState;
+    }
+
+    /// <summary>
+    /// One frame of simulated look input: proportional to the error so the aim
+    /// eases onto the target, capped so it never exceeds a plausible hand.
+    /// </summary>
+    private static float LookStep(float error, float elapsed, float maxStep)
+    {
+        var step = Mathf.Clamp(error * LookApproachGain * elapsed, -maxStep, maxStep);
+        return Mathf.Abs(step) > Mathf.Abs(error) ? error : step;
+    }
+
+    /// <summary>
+    /// PlayerHead.SetHeadStateLocal shrinks the side-look allowance as the head
+    /// pitches down, so looking at the ground and far to the side at once is not
+    /// a pose a player can hold. Reproduced on the same ellipse the stock method
+    /// uses, gated on the same downward-pitch test.
+    /// </summary>
+    private static void ApplyLowerCornerLimit(
+        ref float headYaw,
+        ref float headPitch,
+        float sideLookLimit,
+        float lowerLookLimit)
+    {
+        if (headPitch <= 0f || sideLookLimit <= 0.01f || lowerLookLimit <= 0.01f)
+            return;
+
+        var scale = lowerLookLimit / sideLookLimit;
+        var limited = Vector2.ClampMagnitude(
+            new Vector2(headYaw * scale, headPitch),
+            lowerLookLimit);
+        headYaw = limited.x / scale;
+        headPitch = limited.y;
     }
 }
