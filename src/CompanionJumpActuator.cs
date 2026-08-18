@@ -16,6 +16,8 @@ internal sealed class CompanionJumpActuator
     private bool _queued;
     private float _nextRequestAt;
 
+    internal bool IsQueued => _queued;
+
     internal void Bind(CompanionBody body)
     {
         _body = body;

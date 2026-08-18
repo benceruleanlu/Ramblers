@@ -1,3 +1,4 @@
+using System;
 using Mirror;
 using UnityEngine;
 
@@ -33,7 +34,7 @@ internal sealed class CompanionFollowBehavior
 
     private readonly BreadcrumbTrail _trail = new BreadcrumbTrail(MaximumBreadcrumbs);
     private readonly CompanionLocomotion _locomotion;
-    private readonly CompanionFacing _facing;
+    private readonly CompanionAttention _attention;
 
     private CompanionBody _body;
     private PlayerCharacter _humanAtSpawn;
@@ -46,13 +47,14 @@ internal sealed class CompanionFollowBehavior
     private Vector3 _currentTarget;
     private float _followStartedAt;
     private float _nextStatusLog;
+    private string _suspensionReason;
 
     internal CompanionFollowBehavior(
         CompanionLocomotion locomotion,
-        CompanionFacing facing)
+        CompanionAttention attention)
     {
         _locomotion = locomotion;
-        _facing = facing;
+        _attention = attention;
     }
 
     internal void Bind(CompanionBody body, PlayerCharacter human, float now)
@@ -62,6 +64,7 @@ internal sealed class CompanionFollowBehavior
         _followRequested = false;
         _state = FollowState.Idle;
         _lastTrailDistance = 0f;
+        _suspensionReason = null;
         _followAt = float.PositiveInfinity;
         _nextNavigationTick = _followAt;
         _nextTrailSample = now + TrailSampleInterval;
@@ -79,13 +82,14 @@ internal sealed class CompanionFollowBehavior
         RecordHumanTrail();
     }
 
-    internal void TickFixed(float now, bool movementAllowed)
+    internal void TickFixed(float now, bool movementAllowed, string movementBlocker)
     {
         if (_body == null || !_body.IsAlive)
             return;
 
         if (!_followRequested)
         {
+            _attention.ClearFollowTarget();
             if (_state != FollowState.Idle ||
                 _locomotion.LastMovementIntent.sqrMagnitude > 0f)
             {
@@ -96,12 +100,12 @@ internal sealed class CompanionFollowBehavior
 
         if (!movementAllowed)
         {
-            SetMovementAllowed(false, now);
+            SetMovementAllowed(false, now, movementBlocker);
             return;
         }
 
         if (_state == FollowState.Suspended)
-            SetMovementAllowed(true, now);
+            SetMovementAllowed(true, now, null);
         if (_state == FollowState.Failed)
             return;
         if (now < _followAt)
@@ -128,7 +132,11 @@ internal sealed class CompanionFollowBehavior
         NavigateTowardHuman(now);
     }
 
-    internal AgentToolResult SetMode(FollowMode mode, float now, bool movementAllowed)
+    internal AgentToolResult SetMode(
+        FollowMode mode,
+        float now,
+        bool movementAllowed,
+        string movementBlocker)
     {
         if (_body == null || !_body.IsAlive)
             return AgentToolResult.Failure("bot_not_spawned");
@@ -141,10 +149,12 @@ internal sealed class CompanionFollowBehavior
 
             _followRequested = true;
             _state = movementAllowed ? FollowState.Waiting : FollowState.Suspended;
+            _suspensionReason = movementAllowed ? null : movementBlocker;
             _followAt = now;
             _nextNavigationTick = now;
             _trail.Clear();
             _trail.Add(human.transform.position);
+            _attention.SetFollowTarget(CompanionBody.HeadPositionOf(human));
             _locomotion.ResetProgressObservation(now);
             var status = movementAllowed ? "started" : "suspended";
             Plugin.Logger.LogInfo(
@@ -156,7 +166,9 @@ internal sealed class CompanionFollowBehavior
         }
 
         _followRequested = false;
+        _suspensionReason = null;
         _followAt = float.PositiveInfinity;
+        _attention.ClearFollowTarget();
         StopForState(FollowState.Idle, now);
         Plugin.Logger.LogInfo(
             $"[AGENT] TOOL {AgentToolCatalog.SetFollowMode} mode=stay status=stopped.");
@@ -166,18 +178,31 @@ internal sealed class CompanionFollowBehavior
             "stay");
     }
 
-    internal void SetMovementAllowed(bool allowed, float now)
+    internal void SetMovementAllowed(bool allowed, float now, string movementBlocker)
     {
         if (!_followRequested)
             return;
 
         if (!allowed)
         {
+            var nextReason = movementBlocker ?? "companion_action";
+            var reasonChanged = !string.Equals(
+                _suspensionReason,
+                nextReason,
+                StringComparison.Ordinal);
             if (_state != FollowState.Suspended ||
                 _locomotion.LastMovementIntent.sqrMagnitude > 0f)
             {
                 StopForState(FollowState.Suspended, now);
-                Plugin.Logger.LogInfo("[FOLLOW] SUSPENDED by companion posture.");
+                _suspensionReason = nextReason;
+                Plugin.Logger.LogInfo(
+                    $"[FOLLOW] SUSPENDED by {_suspensionReason}.");
+            }
+            else if (reasonChanged)
+            {
+                _suspensionReason = nextReason;
+                Plugin.Logger.LogInfo(
+                    $"[FOLLOW] SUSPENSION_BLOCKER changed to {_suspensionReason}.");
             }
             return;
         }
@@ -188,9 +213,11 @@ internal sealed class CompanionFollowBehavior
         _state = FollowState.Waiting;
         _followAt = now;
         _nextNavigationTick = now;
-        _facing.ResumeAt(now);
+        _attention.ResumeAt(now);
         _locomotion.ResetProgressObservation(now);
-        Plugin.Logger.LogInfo("[FOLLOW] RESUMED after companion posture changed.");
+        Plugin.Logger.LogInfo(
+            $"[FOLLOW] RESUMED after {_suspensionReason ?? "companion_action"} cleared.");
+        _suspensionReason = null;
     }
 
     private void BeginFollowing(float now)
@@ -205,7 +232,7 @@ internal sealed class CompanionFollowBehavior
         _state = FollowState.Following;
         _followStartedAt = now;
         _nextStatusLog = now;
-        _facing.ResumeAt(now);
+        _attention.ResumeAt(now);
         _locomotion.ResetProgressObservation(now);
 
         var bodyCollider = _body.Character.collision == null
@@ -237,7 +264,7 @@ internal sealed class CompanionFollowBehavior
         }
 
         var botPosition = _body.Position;
-        _facing.Face(CompanionBody.HeadPositionOf(human), now);
+        _attention.SetFollowTarget(CompanionBody.HeadPositionOf(human));
         var humanDistance = BreadcrumbTrail.HorizontalDistance(
             botPosition,
             human.transform.position);
@@ -357,6 +384,7 @@ internal sealed class CompanionFollowBehavior
             return;
 
         _state = FollowState.Failed;
+        _attention.ClearFollowTarget();
         _locomotion.StopQuietly();
         Plugin.Logger.LogError($"[FOLLOW] FAILED {reason}");
     }
@@ -387,8 +415,8 @@ internal sealed class CompanionFollowBehavior
             $"trailDistance={_lastTrailDistance:F2}, " +
             $"commandedSpeed={_locomotion.LastCommandedSpeed:F2}, " +
             $"gait={_locomotion.DescribeGait()}, posture={CompanionPostureActuator.Describe(_locomotion.Posture)}, " +
-            $"bodyYaw={_facing.LastBodyYaw:F1}, targetYaw={_facing.LastTargetYaw:F1}, " +
-            $"headState={_facing.HeadState}, breadcrumbs={_trail.Count}, " +
+            $"bodyYaw={_attention.LastBodyYaw:F1}, targetYaw={_attention.LastTargetYaw:F1}, " +
+            $"headState={_attention.HeadState}, breadcrumbs={_trail.Count}, " +
             $"directBlocked={_locomotion.LastDirectPathBlocked}, " +
             $"steeringAngle={_locomotion.LastSteeringAngle:F0}, " +
             $"clearance={_locomotion.LastClearance:F2}, " +
@@ -402,8 +430,10 @@ internal sealed class CompanionFollowBehavior
         _body = null;
         _humanAtSpawn = null;
         _followRequested = false;
+        _suspensionReason = null;
         _state = FollowState.Idle;
         _lastTrailDistance = 0f;
         _trail.Clear();
+        _attention.ClearFollowTarget();
     }
 }

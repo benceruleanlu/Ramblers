@@ -4,6 +4,7 @@ extern alias privateuri;
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Text.Json;
@@ -34,6 +35,18 @@ internal sealed class RealtimeFunctionCall
     internal string Arguments;
 }
 
+internal sealed class RealtimeFunctionCallBatch
+{
+    internal string ResponseId;
+    internal RealtimeFunctionCall[] Calls;
+}
+
+internal sealed class RealtimeFunctionOutput
+{
+    internal string CallId;
+    internal string ResultJson;
+}
+
 internal sealed class RealtimeAudioPacket
 {
     internal byte[] Pcm16;
@@ -45,13 +58,16 @@ internal sealed class RealtimeAudioPacket
 internal enum RealtimeClientEventType
 {
     AudioPacket,
-    InputSpeechStarted
+    InputSpeechStarted,
+    InputSpeechStopped,
+    InputAudioCleared
 }
 
 internal sealed class RealtimeClientEvent
 {
     internal RealtimeClientEventType Type;
     internal RealtimeAudioPacket AudioPacket;
+    internal long InputEpoch;
 }
 
 internal sealed class RealtimeAudioTruncation
@@ -73,12 +89,15 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
     private readonly CancellationTokenSource _cancellation = new CancellationTokenSource();
     private readonly ConcurrentQueue<string> _outbound = new ConcurrentQueue<string>();
     private readonly ConcurrentQueue<string> _logs = new ConcurrentQueue<string>();
-    private readonly ConcurrentQueue<RealtimeFunctionCall> _functionCalls =
-        new ConcurrentQueue<RealtimeFunctionCall>();
+    private readonly ConcurrentQueue<RealtimeFunctionCallBatch> _functionCallBatches =
+        new ConcurrentQueue<RealtimeFunctionCallBatch>();
     private readonly ConcurrentQueue<RealtimeClientEvent> _clientEvents =
         new ConcurrentQueue<RealtimeClientEvent>();
+    private readonly ConcurrentQueue<long> _pendingInputClearEpochs =
+        new ConcurrentQueue<long>();
     private readonly SemaphoreSlim _outboundSignal = new SemaphoreSlim(0);
     private readonly object _responseSync = new object();
+    private readonly HashSet<string> _outstandingToolBatchIds = new HashSet<string>();
 
     private Task _runTask;
     private volatile bool _ready;
@@ -86,6 +105,10 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
     private bool _responseActive;
     private bool _responseCreateQueued;
     private bool _responseRequested;
+    private string _responseCreateEventId;
+    private long _eventSequence;
+    private long _inputEpochSequence;
+    private long _audioAppendSequence;
     private bool _disposed;
 
     internal OpenAIRealtimeClient(string apiKey, string model)
@@ -109,9 +132,9 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         return _logs.TryDequeue(out message);
     }
 
-    internal bool TryDequeueFunctionCall(out RealtimeFunctionCall functionCall)
+    internal bool TryDequeueFunctionCallBatch(out RealtimeFunctionCallBatch batch)
     {
-        return _functionCalls.TryDequeue(out functionCall);
+        return _functionCallBatches.TryDequeue(out batch);
     }
 
     internal bool TryDequeueClientEvent(out RealtimeClientEvent clientEvent)
@@ -142,16 +165,28 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
 
     public void ClearInputAudio()
     {
-        QueueJson(new { type = "input_audio_buffer.clear" });
+        QueueInputAudioClear(0);
     }
 
     public void AppendInputAudio(byte[] pcm16)
     {
+        if (pcm16 == null || pcm16.Length == 0)
+            return;
+        Interlocked.Increment(ref _audioAppendSequence);
         QueueJson(new
         {
             type = "input_audio_buffer.append",
             audio = Convert.ToBase64String(pcm16)
         });
+    }
+
+    internal long AudioAppendSequence => Interlocked.Read(ref _audioAppendSequence);
+
+    internal long BeginInputAudioEpochBarrier()
+    {
+        var epoch = Interlocked.Increment(ref _inputEpochSequence);
+        QueueInputAudioClear(epoch);
+        return epoch;
     }
 
     public void CommitInputAudioAndRespond()
@@ -173,18 +208,79 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             QueueJson(new { type = "response.cancel" });
     }
 
-    internal void SendFunctionOutput(string callId, string resultJson)
+    internal bool CompleteFunctionCallBatch(
+        string responseId,
+        RealtimeFunctionOutput[] outputs,
+        CompanionVisionObservation observation)
     {
-        QueueJson(new
+        if (string.IsNullOrEmpty(responseId) || outputs == null)
+            return false;
+
+        lock (_responseSync)
         {
-            type = "conversation.item.create",
-            item = new
+            if (!_outstandingToolBatchIds.Contains(responseId))
+                return false;
+        }
+
+        for (var index = 0; index < outputs.Length; index++)
+        {
+            var output = outputs[index];
+            if (output == null || string.IsNullOrEmpty(output.CallId))
+                continue;
+            QueueJson(new
             {
-                type = "function_call_output",
-                call_id = callId,
-                output = resultJson
-            }
-        });
+                event_id = NextEventId("function_output"),
+                type = "conversation.item.create",
+                item = new
+                {
+                    type = "function_call_output",
+                    call_id = output.CallId,
+                    output = output.ResultJson ??
+                             AgentToolResult.Failure("action_execution_failed").ToJson()
+                }
+            });
+        }
+
+        if (observation?.JpegBytes != null && observation.JpegBytes.Length > 0)
+        {
+            var provenance =
+                "Bot-eye observation captured for inspect_reference. " +
+                $"human_gaze_raycast_hit={observation.ReferenceRayHit}; " +
+                $"alignment_timed_out={observation.AlignmentTimedOut}.";
+            QueueJson(new
+            {
+                event_id = NextEventId("vision_input"),
+                type = "conversation.item.create",
+                item = new
+                {
+                    type = "message",
+                    role = "user",
+                    content = new object[]
+                    {
+                        new { type = "input_text", text = provenance },
+                        new
+                        {
+                            type = "input_image",
+                            image_url = "data:image/jpeg;base64," +
+                                        Convert.ToBase64String(observation.JpegBytes)
+                        }
+                    }
+                }
+            });
+        }
+
+        var shouldCreate = false;
+        lock (_responseSync)
+        {
+            if (!_outstandingToolBatchIds.Remove(responseId))
+                return false;
+            _responseRequested = true;
+            shouldCreate = TryReserveResponseCreate();
+        }
+
+        if (shouldCreate)
+            QueueResponseCreate();
+        return true;
     }
 
     internal void TruncateAudio(RealtimeAudioTruncation truncation)
@@ -283,7 +379,9 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         {
             type = "semantic_vad",
             eagerness = "auto",
-            create_response = true,
+            // The client owns response.create so a deferred embodied tool can
+            // finish its function outputs and image before one continuation.
+            create_response = false,
             interrupt_response = true
         };
     }
@@ -349,7 +447,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                 _logs.Enqueue(
                     "READY tools=" + AgentToolCatalog.NamesForLog +
                     ", noiseReduction=near_field, " +
-                    "turnDetection=semantic_vad_auto");
+                    "turnDetection=semantic_vad_client_response");
                 return;
             }
 
@@ -360,6 +458,28 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                     Type = RealtimeClientEventType.InputSpeechStarted
                 });
                 _logs.Enqueue("INPUT_SPEECH_STARTED");
+                return;
+            }
+
+            if (type == "input_audio_buffer.speech_stopped")
+            {
+                _clientEvents.Enqueue(new RealtimeClientEvent
+                {
+                    Type = RealtimeClientEventType.InputSpeechStopped
+                });
+                _logs.Enqueue("INPUT_SPEECH_STOPPED");
+                return;
+            }
+
+            if (type == "input_audio_buffer.cleared")
+            {
+                long epoch;
+                _pendingInputClearEpochs.TryDequeue(out epoch);
+                _clientEvents.Enqueue(new RealtimeClientEvent
+                {
+                    Type = RealtimeClientEventType.InputAudioCleared,
+                    InputEpoch = epoch
+                });
                 return;
             }
 
@@ -419,8 +539,8 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
 
             if (type == "response.done")
             {
+                QueueFunctionCallBatch(root);
                 MarkResponseDone();
-                QueueFunctionCalls(root);
                 return;
             }
 
@@ -432,7 +552,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                     error.TryGetProperty("message", out message))
                 {
                     var errorMessage = message.GetString();
-                    HandleResponseCreateError(error, errorMessage);
+                    HandleResponseCreateError(root, error, errorMessage);
                     _logs.Enqueue("API_ERROR " + errorMessage);
                 }
                 else
@@ -457,7 +577,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         }
 
         if (shouldCreate)
-            QueueJson(new { type = "response.create" });
+            QueueResponseCreate();
     }
 
     private void MarkResponseCreated()
@@ -466,6 +586,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         {
             _responseActive = true;
             _responseCreateQueued = false;
+            _responseCreateEventId = null;
         }
     }
 
@@ -476,16 +597,18 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         {
             _responseActive = false;
             _responseCreateQueued = false;
+            _responseCreateEventId = null;
             shouldCreate = TryReserveResponseCreate();
         }
 
         if (shouldCreate)
-            QueueJson(new { type = "response.create" });
+            QueueResponseCreate();
     }
 
     private bool TryReserveResponseCreate()
     {
-        if (!_responseRequested || _responseActive || _responseCreateQueued)
+        if (!_responseRequested || _responseActive || _responseCreateQueued ||
+            _outstandingToolBatchIds.Count > 0)
             return false;
 
         _responseRequested = false;
@@ -493,7 +616,10 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         return true;
     }
 
-    private void HandleResponseCreateError(JsonElement error, string message)
+    private void HandleResponseCreateError(
+        JsonElement root,
+        JsonElement error,
+        string message)
     {
         JsonElement codeElement;
         var code = error.TryGetProperty("code", out codeElement)
@@ -504,9 +630,25 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             (!string.IsNullOrEmpty(message) &&
              message.IndexOf("active response", StringComparison.OrdinalIgnoreCase) >= 0);
 
+        var eventId = GetString(root, "event_id");
+        if (string.IsNullOrEmpty(eventId))
+            eventId = GetString(error, "event_id");
+
         lock (_responseSync)
         {
+            if (!string.IsNullOrEmpty(eventId) &&
+                !string.Equals(
+                    eventId,
+                    _responseCreateEventId,
+                    StringComparison.Ordinal))
+            {
+                return;
+            }
+            if (!_responseCreateQueued)
+                return;
+
             _responseCreateQueued = false;
+            _responseCreateEventId = null;
             if (activeResponseConflict)
             {
                 // A server-created semantic-VAD response can race its
@@ -554,7 +696,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             .Replace("\u00a0", " ");
     }
 
-    private void QueueFunctionCalls(JsonElement root)
+    private void QueueFunctionCallBatch(JsonElement root)
     {
         JsonElement response;
         JsonElement output;
@@ -565,6 +707,17 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             return;
         }
 
+        JsonElement responseStatus;
+        if (response.TryGetProperty("status", out responseStatus) &&
+            !string.Equals(
+                responseStatus.GetString(),
+                "completed",
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var calls = new List<RealtimeFunctionCall>();
         foreach (var item in output.EnumerateArray())
         {
             JsonElement type;
@@ -581,13 +734,62 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                 continue;
             }
 
-            _functionCalls.Enqueue(new RealtimeFunctionCall
+            JsonElement itemStatus;
+            if (item.TryGetProperty("status", out itemStatus) &&
+                !string.Equals(
+                    itemStatus.GetString(),
+                    "completed",
+                    StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            calls.Add(new RealtimeFunctionCall
             {
                 Name = name.GetString(),
                 CallId = callId.GetString(),
                 Arguments = arguments.GetString()
             });
         }
+
+        if (calls.Count == 0)
+            return;
+
+        var responseId = GetString(response, "id");
+        if (string.IsNullOrEmpty(responseId))
+            responseId = "tool_batch_" + calls[0].CallId;
+
+        lock (_responseSync)
+            _outstandingToolBatchIds.Add(responseId);
+        _functionCallBatches.Enqueue(new RealtimeFunctionCallBatch
+        {
+            ResponseId = responseId,
+            Calls = calls.ToArray()
+        });
+    }
+
+    private void QueueResponseCreate()
+    {
+        var eventId = NextEventId("response_create");
+        lock (_responseSync)
+            _responseCreateEventId = eventId;
+        QueueJson(new { event_id = eventId, type = "response.create" });
+    }
+
+    private void QueueInputAudioClear(long epoch)
+    {
+        _pendingInputClearEpochs.Enqueue(epoch);
+        QueueJson(new
+        {
+            event_id = NextEventId("input_clear"),
+            type = "input_audio_buffer.clear"
+        });
+    }
+
+    private string NextEventId(string category)
+    {
+        return "ramblers_" + category + "_" +
+               Interlocked.Increment(ref _eventSequence).ToString();
     }
 
     private void QueueJson(object payload)
@@ -620,6 +822,11 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             return;
         _disposed = true;
         _ready = false;
+        lock (_responseSync)
+        {
+            _outstandingToolBatchIds.Clear();
+            _responseCreateEventId = null;
+        }
         _cancellation.Cancel();
         try
         {

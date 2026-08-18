@@ -9,10 +9,10 @@ namespace Ramblers;
 /// </summary>
 internal static class AgentToolRouter
 {
-    internal static string Execute(RealtimeFunctionCall functionCall)
+    internal static AgentToolDispatch Execute(RealtimeFunctionCall functionCall)
     {
         if (functionCall == null || string.IsNullOrEmpty(functionCall.Name))
-            return AgentToolResult.Failure("unknown_tool").ToJson();
+            return AgentToolDispatch.Immediate(AgentToolResult.Failure("unknown_tool"));
 
         AgentToolResult result;
         switch (functionCall.Name)
@@ -26,12 +26,14 @@ internal static class AgentToolRouter
             case AgentToolCatalog.Jump:
                 result = ExecuteJump(functionCall.Arguments);
                 break;
+            case AgentToolCatalog.InspectReference:
+                return ExecuteInspectReference(functionCall.Arguments);
             default:
                 result = AgentToolResult.Failure("unknown_tool");
                 break;
         }
 
-        return result.ToJson();
+        return AgentToolDispatch.Immediate(result);
     }
 
     private static AgentToolResult ExecuteFollowMode(string arguments)
@@ -67,6 +69,18 @@ internal static class AgentToolRouter
         if (!IsEmptyObject(arguments))
             return AgentToolResult.Failure("invalid_arguments");
         return CompanionController.RequestJump();
+    }
+
+    private static AgentToolDispatch ExecuteInspectReference(string arguments)
+    {
+        if (!IsEmptyObject(arguments))
+            return AgentToolDispatch.Immediate(AgentToolResult.Failure("invalid_arguments"));
+
+        AgentToolResult failure;
+        long operationToken;
+        if (!CompanionController.TryBeginInspection(out failure, out operationToken))
+            return AgentToolDispatch.Immediate(failure);
+        return AgentToolDispatch.Pending(operationToken);
     }
 
     private static bool TryReadOnlyStringArgument(

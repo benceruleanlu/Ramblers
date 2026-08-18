@@ -256,6 +256,7 @@ $referenceSpecs = @(
     @{ Path = "BepInEx\interop\Il2Cppmscorlib.dll" },
     @{ Path = "BepInEx\interop\UnityEngine.CoreModule.dll" },
     @{ Path = "BepInEx\interop\UnityEngine.AudioModule.dll" },
+    @{ Path = "BepInEx\interop\UnityEngine.ImageConversionModule.dll" },
     @{ Path = "BepInEx\interop\AudioSystem.dll" },
     @{ Path = "BepInEx\interop\UnityEngine.PhysicsModule.dll" },
     @{ Path = "BepInEx\interop\UnityEngine.InputLegacyModule.dll" }

@@ -20,8 +20,10 @@ internal sealed class CompanionController : MonoBehaviour
     private float _nextPoll;
     private float _verifyAt;
     private bool _hasSpawnedBot;
+    private long _activeInspectionToken;
 
     private static CompanionController _activeController;
+    private static long _nextInspectionToken;
 
     public CompanionController(IntPtr pointer) : base(pointer)
     {
@@ -57,6 +59,76 @@ internal sealed class CompanionController : MonoBehaviour
         if (!TryGetCommandTarget(out controller, out failure))
             return failure;
         return controller._actions.RequestJump(Time.realtimeSinceStartup);
+    }
+
+    internal static bool TryBeginInspection(
+        out AgentToolResult failure,
+        out long operationToken)
+    {
+        operationToken = 0;
+        CompanionController controller;
+        if (!TryGetCommandTarget(out controller, out failure))
+            return false;
+        var started = controller._actions.TryBeginInspection(
+            Time.realtimeSinceStartup,
+            out failure);
+        if (started)
+        {
+            operationToken = ++_nextInspectionToken;
+            controller._activeInspectionToken = operationToken;
+        }
+        return started;
+    }
+
+    internal static bool TryTakeInspectionCompletion(
+        long operationToken,
+        out CompanionInspectionCompletion completion)
+    {
+        var controller = _activeController;
+        if (controller == null || operationToken == 0 ||
+            controller._activeInspectionToken != operationToken ||
+            controller._body == null ||
+            !controller._body.IsAlive || !controller._hasSpawnedBot)
+        {
+            completion = new CompanionInspectionCompletion
+            {
+                Result = AgentToolResult.Failure("bot_not_spawned"),
+                Observation = null
+            };
+            return true;
+        }
+
+        if (!controller._actions.TryTakeInspectionCompletion(out completion))
+            return false;
+
+        // Successful captures retain their token through the bounded gaze hold
+        // so the matching assistant-audio event can release it. Failures have
+        // no attention left to own.
+        if (completion == null || completion.Observation == null)
+            controller._activeInspectionToken = 0;
+        return true;
+    }
+
+    internal static void CancelInspection(long operationToken)
+    {
+        var controller = _activeController;
+        if (controller != null && operationToken != 0 &&
+            controller._activeInspectionToken == operationToken)
+        {
+            controller._actions.CancelInspection(Time.realtimeSinceStartup);
+            controller._activeInspectionToken = 0;
+        }
+    }
+
+    internal static void ReleaseInspectionAttention(long operationToken)
+    {
+        var controller = _activeController;
+        if (controller != null && operationToken != 0 &&
+            controller._activeInspectionToken == operationToken)
+        {
+            controller._actions.ReleaseInspectionAttention(Time.realtimeSinceStartup);
+            controller._activeInspectionToken = 0;
+        }
     }
 
     internal static bool TryGetVoiceParticipants(
@@ -145,6 +217,24 @@ internal sealed class CompanionController : MonoBehaviour
         }
     }
 
+    private void LateUpdate()
+    {
+        if (_body == null || !_body.IsAlive)
+            return;
+
+        try
+        {
+            _actions.TickLateFrame(Time.realtimeSinceStartup);
+        }
+        catch (Exception exception)
+        {
+            _actions.FailInspection(
+                "action_execution_failed",
+                Time.realtimeSinceStartup);
+            Plugin.Logger.LogError($"[VISION] Inspection update failed: {exception}");
+        }
+    }
+
     private void TrySpawn(NetworkManager manager, PlayerCharacter localPlayer)
     {
         GameObject spawned = null;
@@ -187,6 +277,9 @@ internal sealed class CompanionController : MonoBehaviour
                 playerNetworking,
                 networkIdentity,
                 networkTransform);
+            // A controller can survive a body replacement. Invalidating the
+            // active token prevents an old deferred call from targeting it.
+            _activeInspectionToken = 0;
             _hasSpawnedBot = true;
             _actions.Bind(_body, localPlayer, now);
 
@@ -217,6 +310,7 @@ internal sealed class CompanionController : MonoBehaviour
         _actions.Release();
         _body = null;
         _hasSpawnedBot = false;
+        _activeInspectionToken = 0;
         _verificationLog.Reset();
         Plugin.Logger.LogInfo("[RAMBLERS] Companion left the scene; controller state reset.");
     }
@@ -225,10 +319,12 @@ internal sealed class CompanionController : MonoBehaviour
     {
         if (_activeController == this)
             _activeController = null;
+        _activeInspectionToken = 0;
 
         try
         {
             _actions.StopQuietly();
+            _actions.Release();
         }
         catch
         {
