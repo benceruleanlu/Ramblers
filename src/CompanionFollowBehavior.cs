@@ -57,6 +57,9 @@ internal sealed class CompanionFollowBehavior
         _attention = attention;
     }
 
+    /// <summary>Whether a follow intent is outstanding, suspended or not.</summary>
+    internal bool IsRequested => _followRequested;
+
     internal void Bind(CompanionBody body, PlayerCharacter human, float now)
     {
         _body = body;
@@ -89,7 +92,7 @@ internal sealed class CompanionFollowBehavior
 
         if (!_followRequested)
         {
-            _attention.ClearFollowTarget();
+            _attention.ClearTarget(GazeChannel.Follow);
             if (_state != FollowState.Idle ||
                 _locomotion.LastMovementIntent.sqrMagnitude > 0f)
             {
@@ -154,7 +157,9 @@ internal sealed class CompanionFollowBehavior
             _nextNavigationTick = now;
             _trail.Clear();
             _trail.Add(human.transform.position);
-            _attention.SetFollowTarget(CompanionBody.HeadPositionOf(human));
+            _attention.SetTarget(
+                GazeChannel.Follow,
+                CompanionBody.HeadPositionOf(human));
             _locomotion.ResetProgressObservation(now);
             var status = movementAllowed ? "started" : "suspended";
             Plugin.Logger.LogInfo(
@@ -165,17 +170,27 @@ internal sealed class CompanionFollowBehavior
                 "follow");
         }
 
-        _followRequested = false;
-        _suspensionReason = null;
-        _followAt = float.PositiveInfinity;
-        _attention.ClearFollowTarget();
-        StopForState(FollowState.Idle, now);
+        Stop(now);
         Plugin.Logger.LogInfo(
             $"[AGENT] TOOL {AgentToolCatalog.SetFollowMode} mode=stay status=stopped.");
         return AgentToolResult.Success(
             AgentToolCatalog.SetFollowMode,
             "stopped",
             "stay");
+    }
+
+    /// <summary>
+    /// Drops the follow intent without reporting a <c>set_follow_mode</c> result,
+    /// so a general cancel can stop navigation without pretending the model
+    /// asked for stay.
+    /// </summary>
+    internal void Stop(float now)
+    {
+        _followRequested = false;
+        _suspensionReason = null;
+        _followAt = float.PositiveInfinity;
+        _attention.ClearTarget(GazeChannel.Follow);
+        StopForState(FollowState.Idle, now);
     }
 
     internal void SetMovementAllowed(bool allowed, float now, string movementBlocker)
@@ -264,7 +279,9 @@ internal sealed class CompanionFollowBehavior
         }
 
         var botPosition = _body.Position;
-        _attention.SetFollowTarget(CompanionBody.HeadPositionOf(human));
+        _attention.SetTarget(
+            GazeChannel.Follow,
+            CompanionBody.HeadPositionOf(human));
         var humanDistance = BreadcrumbTrail.HorizontalDistance(
             botPosition,
             human.transform.position);
@@ -384,7 +401,7 @@ internal sealed class CompanionFollowBehavior
             return;
 
         _state = FollowState.Failed;
-        _attention.ClearFollowTarget();
+        _attention.ClearTarget(GazeChannel.Follow);
         _locomotion.StopQuietly();
         Plugin.Logger.LogError($"[FOLLOW] FAILED {reason}");
     }
@@ -434,6 +451,6 @@ internal sealed class CompanionFollowBehavior
         _state = FollowState.Idle;
         _lastTrailDistance = 0f;
         _trail.Clear();
-        _attention.ClearFollowTarget();
+        _attention.ClearTarget(GazeChannel.Follow);
     }
 }

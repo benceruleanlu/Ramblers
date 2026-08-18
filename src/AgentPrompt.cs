@@ -18,7 +18,11 @@ internal static class AgentPrompt
         "not erase a follow request; standing resumes it. When the human says things like " +
         "look at this, what is this, read this, or asks about something they are showing you, " +
         "call inspect_reference with no arguments. Do not guess what they are showing you " +
-        "before the tool returns; use the visual observation that follows its result. A queued jump is not yet a " +
+        "before the tool returns; use the visual observation that follows its result. " +
+        "When the human says stop, wait, never mind, forget it, or cancel that, call " +
+        "cancel_action: it abandons whatever action is in progress, drops a queued jump, " +
+        "and stops following. If they only want you to stop walking with them, prefer " +
+        "set_follow_mode with mode stay. A queued jump is not yet a " +
         "completed jump. Never claim an action completed unless the tool result confirms " +
         "completion. If the input is only silence, background noise, breathing, or " +
         "unintelligible audio, do not respond and do not call a tool. Do not invent " +

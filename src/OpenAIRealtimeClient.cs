@@ -211,7 +211,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
     internal bool CompleteFunctionCallBatch(
         string responseId,
         RealtimeFunctionOutput[] outputs,
-        CompanionVisionObservation observation)
+        AgentContinuationItem[] continuation)
     {
         if (string.IsNullOrEmpty(responseId) || outputs == null)
             return false;
@@ -241,32 +241,25 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             });
         }
 
-        if (observation?.JpegBytes != null && observation.JpegBytes.Length > 0)
+        if (continuation != null)
         {
-            var provenance =
-                "Bot-eye observation captured for inspect_reference. " +
-                $"human_gaze_raycast_hit={observation.ReferenceRayHit}; " +
-                $"alignment_timed_out={observation.AlignmentTimedOut}.";
-            QueueJson(new
+            for (var index = 0; index < continuation.Length; index++)
             {
-                event_id = NextEventId("vision_input"),
-                type = "conversation.item.create",
-                item = new
+                var content = BuildContinuationContent(continuation[index]);
+                if (content == null)
+                    continue;
+                QueueJson(new
                 {
-                    type = "message",
-                    role = "user",
-                    content = new object[]
+                    event_id = NextEventId("continuation"),
+                    type = "conversation.item.create",
+                    item = new
                     {
-                        new { type = "input_text", text = provenance },
-                        new
-                        {
-                            type = "input_image",
-                            image_url = "data:image/jpeg;base64," +
-                                        Convert.ToBase64String(observation.JpegBytes)
-                        }
+                        type = "message",
+                        role = "user",
+                        content
                     }
-                }
-            });
+                });
+            }
         }
 
         var shouldCreate = false;
@@ -539,6 +532,10 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
 
             if (type == "response.done")
             {
+                // Registering the batch before marking the response done is
+                // load-bearing: TryReserveResponseCreate refuses while a tool
+                // batch is outstanding, which is what stops a queued VAD turn
+                // from starting a response before the outputs are sent.
                 QueueFunctionCallBatch(root);
                 MarkResponseDone();
                 return;
@@ -630,9 +627,12 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             (!string.IsNullOrEmpty(message) &&
              message.IndexOf("active response", StringComparison.OrdinalIgnoreCase) >= 0);
 
-        var eventId = GetString(root, "event_id");
-        if (string.IsNullOrEmpty(eventId))
-            eventId = GetString(error, "event_id");
+        // error.event_id names the client event that caused the failure. The
+        // root event_id is the server's id for the error itself and never
+        // matches a locally minted response.create id, so ignoring the
+        // distinction would strand _responseCreateQueued and stop the agent
+        // from ever creating another response.
+        var eventId = GetString(error, "event_id");
 
         lock (_responseSync)
         {
@@ -766,6 +766,38 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             ResponseId = responseId,
             Calls = calls.ToArray()
         });
+    }
+
+    /// <summary>
+    /// Turns one job-supplied item into Realtime message content. This is the
+    /// only place that knows how an image reaches the model, so a job reports an
+    /// observation without the transport learning what produced it.
+    /// </summary>
+    private static object[] BuildContinuationContent(AgentContinuationItem item)
+    {
+        if (item == null)
+            return null;
+
+        var hasText = !string.IsNullOrWhiteSpace(item.Text);
+        var hasImage = item.ImageJpeg != null && item.ImageJpeg.Length > 0;
+        if (!hasText && !hasImage)
+            return null;
+
+        var content = new object[(hasText ? 1 : 0) + (hasImage ? 1 : 0)];
+        var next = 0;
+        if (hasText)
+            content[next++] = new { type = "input_text", text = item.Text };
+        if (hasImage)
+        {
+            content[next] = new
+            {
+                type = "input_image",
+                image_url = "data:image/jpeg;base64," +
+                            Convert.ToBase64String(item.ImageJpeg)
+            };
+        }
+
+        return content;
     }
 
     private void QueueResponseCreate()

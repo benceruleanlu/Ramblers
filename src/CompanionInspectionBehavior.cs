@@ -2,17 +2,11 @@ using UnityEngine;
 
 namespace Ramblers;
 
-internal sealed class CompanionInspectionCompletion
-{
-    internal AgentToolResult Result;
-    internal CompanionVisionObservation Observation;
-}
-
 /// <summary>
-/// A bounded shared-attention action: acknowledge the human, latch the point
-/// under their gaze, visibly turn toward it, then capture one bot-eye frame.
+/// A bounded shared-attention job: acknowledge the human, latch the point under
+/// their gaze, visibly turn toward it, then capture one bot-eye frame.
 /// </summary>
-internal sealed class CompanionInspectionBehavior
+internal sealed class CompanionInspectionBehavior : ICompanionJob
 {
     private const float MinimumHumanGlanceSeconds = 0.30f;
     private const float MaximumHumanGlanceSeconds = 0.65f;
@@ -25,6 +19,10 @@ internal sealed class CompanionInspectionBehavior
     private const float MaximumReferenceDistance = 40f;
     private const float SelfHitAdvance = 0.02f;
     private const int MaximumRaycastSteps = 8;
+
+    // The gaze work is bounded by the constants above at roughly two seconds,
+    // so this only has to cover a stalled frame loop.
+    private const float InspectionTimeoutSeconds = 5f;
 
     private enum InspectionState
     {
@@ -43,18 +41,43 @@ internal sealed class CompanionInspectionBehavior
     private float _referenceAlignedAt;
     private Vector3 _referencePoint;
     private bool _referenceRayHit;
-    private CompanionInspectionCompletion _completion;
+    private CompanionJobCompletion _completion;
 
     internal CompanionInspectionBehavior(CompanionAttention attention)
     {
         _attention = attention;
     }
 
-    internal bool IsActive => _state != InspectionState.Idle;
+    public string Name => AgentToolCatalog.InspectReference;
 
-    internal bool BlocksMovement => IsActive;
+    public JobResources Requires => JobResources.Locomotion | JobResources.Gaze;
 
-    internal void Bind(CompanionBody body, PlayerCharacter human)
+    /// <summary>
+    /// Locomotion is released the moment the frame is captured. The settle hold
+    /// that follows is a gaze commitment only, so a follow request arriving with
+    /// the model's reply is not answered with a suspension the human cannot see.
+    /// </summary>
+    public JobResources Held
+    {
+        get
+        {
+            switch (_state)
+            {
+                case InspectionState.Idle:
+                    return JobResources.None;
+                case InspectionState.HoldingReference:
+                    return JobResources.Gaze;
+                default:
+                    return JobResources.Locomotion | JobResources.Gaze;
+            }
+        }
+    }
+
+    public bool IsActive => _state != InspectionState.Idle;
+
+    public float TimeoutSeconds => InspectionTimeoutSeconds;
+
+    public void Bind(CompanionBody body, PlayerCharacter human)
     {
         _body = body;
         _humanAtSpawn = human;
@@ -65,7 +88,7 @@ internal sealed class CompanionInspectionBehavior
         _referenceRayHit = false;
     }
 
-    internal bool TryBegin(float now, out AgentToolResult failure)
+    public bool TryBegin(float now, out AgentToolResult failure)
     {
         failure = null;
         if (_body == null || !_body.IsAlive)
@@ -76,7 +99,7 @@ internal sealed class CompanionInspectionBehavior
 
         if (IsActive || _completion != null)
         {
-            failure = AgentToolResult.Failure("inspection_in_progress");
+            failure = AgentToolResult.Failure("inspect_reference_in_progress");
             return false;
         }
 
@@ -90,44 +113,49 @@ internal sealed class CompanionInspectionBehavior
         _state = InspectionState.AcknowledgingHuman;
         _stateStartedAt = now;
         _referenceAlignedAt = -1f;
-        _attention.BeginInspection(CompanionBody.HeadPositionOf(human), now);
+        _attention.SetTarget(
+            GazeChannel.Inspection,
+            CompanionBody.HeadPositionOf(human));
         Plugin.Logger.LogInfo("[VISION] INSPECTION_STARTED phase=look_at_human.");
         return true;
     }
 
-    internal void TickFrame(float now)
+    public void Tick(float now)
     {
         if (_state == InspectionState.Idle)
             return;
 
         if (_state == InspectionState.HoldingReference)
         {
-            _attention.SetInspectionTarget(_referencePoint);
+            _attention.SetTarget(GazeChannel.Inspection, _referencePoint);
             if (now - _stateStartedAt >= ReferenceHoldSeconds)
-                EndAttention(now);
+                EndAttention();
             return;
         }
 
         if (_body == null || !_body.IsAlive)
         {
-            CompleteFailure("bot_not_spawned", now);
+            CompleteFailure("bot_not_spawned");
             return;
         }
 
         var human = GetHumanPlayer();
         if (human == null)
         {
-            CompleteFailure("human_player_unavailable", now);
+            CompleteFailure("human_player_unavailable");
             return;
         }
 
         if (_state == InspectionState.AcknowledgingHuman)
         {
-            _attention.SetInspectionTarget(CompanionBody.HeadPositionOf(human));
+            _attention.SetTarget(
+                GazeChannel.Inspection,
+                CompanionBody.HeadPositionOf(human));
             var glanceSeconds = now - _stateStartedAt;
             if (glanceSeconds < MinimumHumanGlanceSeconds)
                 return;
             if (!_attention.IsAimWithin(
+                    GazeChannel.Inspection,
                     HumanAimToleranceDegrees,
                     HumanAimToleranceDegrees) &&
                 glanceSeconds < MaximumHumanGlanceSeconds)
@@ -141,14 +169,14 @@ internal sealed class CompanionInspectionBehavior
                     out _referencePoint,
                     out _referenceRayHit))
             {
-                CompleteFailure("human_gaze_unavailable", now);
+                CompleteFailure("human_gaze_unavailable");
                 return;
             }
 
             _state = InspectionState.AligningReference;
             _stateStartedAt = now;
             _referenceAlignedAt = -1f;
-            _attention.SetInspectionTarget(_referencePoint);
+            _attention.SetTarget(GazeChannel.Inspection, _referencePoint);
             Plugin.Logger.LogInfo(
                 $"[VISION] REFERENCE_LATCHED source=" +
                 $"{(_referenceRayHit ? "raycast_hit" : "gaze_fallback")}, " +
@@ -157,12 +185,13 @@ internal sealed class CompanionInspectionBehavior
             return;
         }
 
-        _attention.SetInspectionTarget(_referencePoint);
+        _attention.SetTarget(GazeChannel.Inspection, _referencePoint);
         var lookSeconds = now - _stateStartedAt;
         if (lookSeconds < MinimumReferenceLookSeconds)
             return;
 
         if (_attention.IsAimWithin(
+                GazeChannel.Inspection,
                 ReferenceAimToleranceDegrees,
                 ReferenceAimToleranceDegrees))
         {
@@ -183,7 +212,7 @@ internal sealed class CompanionInspectionBehavior
             CaptureReference(human, now, lookSeconds, true);
     }
 
-    internal bool TryTakeCompletion(out CompanionInspectionCompletion completion)
+    public bool TryTakeCompletion(out CompanionJobCompletion completion)
     {
         completion = _completion;
         if (completion == null)
@@ -193,30 +222,30 @@ internal sealed class CompanionInspectionBehavior
         return true;
     }
 
-    internal void Cancel(float now)
-    {
-        _completion = null;
-        EndAttention(now);
-    }
-
-    internal void ReleaseAttention(float now)
+    public void Conclude(float now)
     {
         if (_state == InspectionState.HoldingReference)
-            EndAttention(now);
+            EndAttention();
     }
 
-    internal void FailActive(string error, float now)
+    public void Cancel(float now)
+    {
+        _completion = null;
+        EndAttention();
+    }
+
+    public void Fail(string error, float now)
     {
         if (_completion != null)
         {
-            EndAttention(now);
+            EndAttention();
             return;
         }
         if (IsActive)
-            CompleteFailure(error ?? "action_execution_failed", now);
+            CompleteFailure(error ?? "action_execution_failed");
     }
 
-    internal void Release()
+    public void Release()
     {
         _body = null;
         _humanAtSpawn = null;
@@ -225,6 +254,7 @@ internal sealed class CompanionInspectionBehavior
         _referenceAlignedAt = -1f;
         _referencePoint = Vector3.zero;
         _referenceRayHit = false;
+        _attention.ClearTarget(GazeChannel.Inspection);
     }
 
     private void CaptureReference(
@@ -239,23 +269,28 @@ internal sealed class CompanionInspectionBehavior
                 _body,
                 human,
                 _referencePoint,
-                _attention.LastAimDirection,
+                _attention.AimDirectionFor(GazeChannel.Inspection),
                 _referenceRayHit,
                 alignmentTimedOut,
                 out observation,
                 out error))
         {
-            CompleteFailure(error ?? "image_capture_failed", now);
+            CompleteFailure(error ?? "image_capture_failed");
             return;
         }
 
-        _completion = new CompanionInspectionCompletion
+        _completion = new CompanionJobCompletion
         {
             Result = AgentToolResult.Success(
                 AgentToolCatalog.InspectReference,
                 "captured",
                 "reference_observed"),
-            Observation = observation
+            Continuation = new[]
+            {
+                AgentContinuationItem.FromImage(
+                    DescribeObservation(observation),
+                    observation.JpegBytes)
+            }
         };
         _state = InspectionState.HoldingReference;
         _stateStartedAt = now;
@@ -267,22 +302,25 @@ internal sealed class CompanionInspectionBehavior
             $"alignmentTimedOut={alignmentTimedOut}.");
     }
 
-    private void CompleteFailure(string error, float now)
+    private static string DescribeObservation(CompanionVisionObservation observation)
     {
-        _completion = new CompanionInspectionCompletion
-        {
-            Result = AgentToolResult.Failure(error),
-            Observation = null
-        };
-        Plugin.Logger.LogWarning($"[VISION] INSPECTION_FAILED error={error}.");
-        EndAttention(now);
+        return
+            "Bot-eye observation captured for inspect_reference. " +
+            $"human_gaze_raycast_hit={observation.ReferenceRayHit}; " +
+            $"alignment_timed_out={observation.AlignmentTimedOut}.";
     }
 
-    private void EndAttention(float now)
+    private void CompleteFailure(string error)
     {
-        if (_state != InspectionState.Idle)
-            _attention.EndInspection(now);
+        _completion = CompanionJobCompletion.Failed(error);
+        Plugin.Logger.LogWarning($"[VISION] INSPECTION_FAILED error={error}.");
+        EndAttention();
+    }
+
+    private void EndAttention()
+    {
         _state = InspectionState.Idle;
+        _attention.ClearTarget(GazeChannel.Inspection);
     }
 
     private PlayerCharacter GetHumanPlayer()

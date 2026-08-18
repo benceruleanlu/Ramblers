@@ -10,14 +10,13 @@ namespace Ramblers;
 internal sealed class RealtimeAgentBridge : MonoBehaviour
 {
     private const float ReconnectDelay = 5f;
-    private const float EmbodiedToolTimeout = 5f;
     private const float VoiceResumeDelay = 0.15f;
 
     private sealed class PendingToolCall
     {
         internal RealtimeFunctionCall Call;
         internal string ResultJson;
-        internal bool AwaitsInspection;
+        internal bool AwaitsJob;
     }
 
     private sealed class PendingToolBatch
@@ -25,10 +24,11 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         internal OpenAIRealtimeClient Client;
         internal string ResponseId;
         internal PendingToolCall[] Calls;
-        internal int InspectionIndex = -1;
-        internal long InspectionToken;
+        internal int JobIndex = -1;
+        internal long JobToken;
         internal float StartedAt;
-        internal CompanionVisionObservation Observation;
+        internal float TimeoutSeconds;
+        internal AgentContinuationItem[] Continuation;
     }
 
     private readonly GameVoiceInput _gameVoice = new GameVoiceInput();
@@ -43,8 +43,8 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
     private long _inputEpochBarrier;
     private bool _inputEpochBarrierObserved;
     private long _postToolAudioAppendBaseline;
-    private bool _releaseInspectionOnAssistantAudio;
-    private long _inspectionAttentionToken;
+    private bool _concludeJobOnAssistantAudio;
+    private long _lingeringJobToken;
 
     public RealtimeAgentBridge(IntPtr pointer) : base(pointer)
     {
@@ -185,14 +185,14 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             }
             else if (clientEvent.Type == RealtimeClientEventType.AudioPacket)
             {
-                if (_releaseInspectionOnAssistantAudio &&
+                if (_concludeJobOnAssistantAudio &&
                     clientEvent.AudioPacket?.Pcm16 != null &&
                     clientEvent.AudioPacket.Pcm16.Length > 0)
                 {
-                    CompanionController.ReleaseInspectionAttention(
-                        _inspectionAttentionToken);
-                    _releaseInspectionOnAssistantAudio = false;
-                    _inspectionAttentionToken = 0;
+                    CompanionController.ConcludeJob(
+                        _lingeringJobToken);
+                    _concludeJobOnAssistantAudio = false;
+                    _lingeringJobToken = 0;
                 }
                 _gameVoiceOutput.Accept(clientEvent.AudioPacket);
             }
@@ -233,9 +233,13 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
 
             if (dispatch.IsPending)
             {
-                slot.AwaitsInspection = true;
-                pending.InspectionIndex = index;
-                pending.InspectionToken = dispatch.OperationToken;
+                // One deferred job at a time. The coordinator refuses a second
+                // while one is running, so a batch cannot reach this branch
+                // twice and silently drop the first job's token.
+                slot.AwaitsJob = true;
+                pending.JobIndex = index;
+                pending.JobToken = dispatch.OperationToken;
+                pending.TimeoutSeconds = dispatch.TimeoutSeconds;
                 Plugin.Logger.LogInfo(
                     $"[AGENT] CALL name={functionCall.Name}, " +
                     $"arguments={functionCall.Arguments}, result=pending");
@@ -246,7 +250,7 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             LogToolResult(functionCall, slot.ResultJson);
         }
 
-        if (pending.InspectionIndex < 0)
+        if (pending.JobIndex < 0)
         {
             CompleteToolBatch(pending);
             return;
@@ -271,30 +275,30 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         if (pending == null)
             return;
 
-        CompanionInspectionCompletion completion;
-        if (CompanionController.TryTakeInspectionCompletion(
-                pending.InspectionToken,
+        CompanionJobCompletion completion;
+        if (CompanionController.TryTakeJobCompletion(
+                pending.JobToken,
                 out completion))
         {
             var result = completion?.Result ??
                          AgentToolResult.Failure("action_execution_failed");
-            var slot = pending.Calls[pending.InspectionIndex];
+            var slot = pending.Calls[pending.JobIndex];
             slot.ResultJson = result.ToJson();
-            slot.AwaitsInspection = false;
-            pending.Observation = completion?.Observation;
+            slot.AwaitsJob = false;
+            pending.Continuation = completion?.Continuation;
             LogToolResult(slot.Call, slot.ResultJson);
             CompleteToolBatch(pending);
             return;
         }
 
-        if (Time.realtimeSinceStartup - pending.StartedAt < EmbodiedToolTimeout)
+        if (Time.realtimeSinceStartup - pending.StartedAt < pending.TimeoutSeconds)
             return;
 
-        CompanionController.CancelInspection(pending.InspectionToken);
-        var timedOutSlot = pending.Calls[pending.InspectionIndex];
+        CompanionController.CancelJob(pending.JobToken);
+        var timedOutSlot = pending.Calls[pending.JobIndex];
         timedOutSlot.ResultJson = AgentToolResult.Failure(
-            "inspection_timed_out").ToJson();
-        timedOutSlot.AwaitsInspection = false;
+            "job_timed_out").ToJson();
+        timedOutSlot.AwaitsJob = false;
         LogToolResult(timedOutSlot.Call, timedOutSlot.ResultJson);
         Plugin.Logger.LogWarning(
             $"[AGENT] TOOL_BATCH_TIMEOUT responseId={pending.ResponseId}.");
@@ -320,7 +324,10 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
                    pending.Client.CompleteFunctionCallBatch(
                        pending.ResponseId,
                        outputs,
-                       pending.Observation);
+                       pending.Continuation);
+        var continuationCount = pending.Continuation == null
+            ? 0
+            : pending.Continuation.Length;
         if (!sent)
         {
             Plugin.Logger.LogWarning(
@@ -330,17 +337,18 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         {
             Plugin.Logger.LogInfo(
                 $"[AGENT] TOOL_BATCH_COMPLETED responseId={pending.ResponseId}, " +
-                $"calls={pending.Calls.Length}, image={pending.Observation != null}.");
+                $"calls={pending.Calls.Length}, continuation={continuationCount}.");
         }
 
         if (ReferenceEquals(_pendingToolBatch, pending))
         {
             _pendingToolBatch = null;
             _voiceResumeAt = Time.realtimeSinceStartup + VoiceResumeDelay;
-            _releaseInspectionOnAssistantAudio = pending.Observation != null;
-            _inspectionAttentionToken = pending.Observation != null
-                ? pending.InspectionToken
-                : 0;
+            // A job that reported something keeps whatever it still holds until
+            // the model answers, so the human sees the companion stay engaged
+            // with what it just looked at.
+            _concludeJobOnAssistantAudio = continuationCount > 0;
+            _lingeringJobToken = continuationCount > 0 ? pending.JobToken : 0;
         }
     }
 
@@ -357,7 +365,7 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
     {
         if (_pendingToolBatch == null)
             return;
-        CompanionController.CancelInspection(_pendingToolBatch.InspectionToken);
+        CompanionController.CancelJob(_pendingToolBatch.JobToken);
         Plugin.Logger.LogInfo(
             $"[AGENT] TOOL_BATCH_CANCELLED responseId={_pendingToolBatch.ResponseId}.");
         _pendingToolBatch = null;
@@ -367,8 +375,8 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         _inputEpochBarrier = 0;
         _inputEpochBarrierObserved = false;
         _postToolAudioAppendBaseline = 0;
-        _releaseInspectionOnAssistantAudio = false;
-        _inspectionAttentionToken = 0;
+        _concludeJobOnAssistantAudio = false;
+        _lingeringJobToken = 0;
     }
 
     private void InterruptAssistantSpeech()
@@ -384,15 +392,15 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
     private void StopClient()
     {
         CancelPendingToolBatch();
-        CompanionController.CancelInspection(_inspectionAttentionToken);
-        _inspectionAttentionToken = 0;
+        CompanionController.CancelJob(_lingeringJobToken);
+        _lingeringJobToken = 0;
         _voiceResumeAt = 0f;
         _suppressSpeechStops = false;
         _voiceResumedAfterTool = false;
         _inputEpochBarrier = 0;
         _inputEpochBarrierObserved = false;
         _postToolAudioAppendBaseline = 0;
-        _releaseInspectionOnAssistantAudio = false;
+        _concludeJobOnAssistantAudio = false;
         _gameVoice.Stop(_client);
         _gameVoiceOutput.Stop();
         if (_client == null)

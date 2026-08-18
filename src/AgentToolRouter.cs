@@ -27,7 +27,12 @@ internal static class AgentToolRouter
                 result = ExecuteJump(functionCall.Arguments);
                 break;
             case AgentToolCatalog.InspectReference:
-                return ExecuteInspectReference(functionCall.Arguments);
+                return ExecuteJob(
+                    AgentToolCatalog.InspectReference,
+                    functionCall.Arguments);
+            case AgentToolCatalog.CancelAction:
+                result = ExecuteCancelAction(functionCall.Arguments);
+                break;
             default:
                 result = AgentToolResult.Failure("unknown_tool");
                 break;
@@ -71,16 +76,28 @@ internal static class AgentToolRouter
         return CompanionController.RequestJump();
     }
 
-    private static AgentToolDispatch ExecuteInspectReference(string arguments)
+    /// <summary>
+    /// Starts a multi-frame companion job. The model's turn stays open until the
+    /// job reports a terminal result, so no branch here is specific to what the
+    /// job actually does.
+    /// </summary>
+    private static AgentToolDispatch ExecuteJob(string jobName, string arguments)
     {
         if (!IsEmptyObject(arguments))
             return AgentToolDispatch.Immediate(AgentToolResult.Failure("invalid_arguments"));
 
         AgentToolResult failure;
-        long operationToken;
-        if (!CompanionController.TryBeginInspection(out failure, out operationToken))
+        CompanionJobHandle handle;
+        if (!CompanionController.TryBeginJob(jobName, out handle, out failure))
             return AgentToolDispatch.Immediate(failure);
-        return AgentToolDispatch.Pending(operationToken);
+        return AgentToolDispatch.Pending(handle.Token, handle.TimeoutSeconds);
+    }
+
+    private static AgentToolResult ExecuteCancelAction(string arguments)
+    {
+        if (!IsEmptyObject(arguments))
+            return AgentToolResult.Failure("invalid_arguments");
+        return CompanionController.CancelActiveWork();
     }
 
     private static bool TryReadOnlyStringArgument(

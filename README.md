@@ -15,11 +15,13 @@ Near-field noise reduction, automatic semantic VAD, WebSocket interruption and t
 
 The `0.8.0` baseline also includes runtime-verified standing, crouching, sitting, and one grounded jump as model-selected actions. Sitting suspends locomotion without erasing a follow request; standing resumes it.
 
-The `0.9.0` source adds `inspect_reference()`. After the model selects it, the companion briefly looks toward the local player, follows the player's camera ray to the referenced point, turns toward it, and captures one bot-eye image. Ramblers keeps the snapshot in process memory, does not write it to local disk, sends it to the existing OpenAI Realtime conversation, and does not broadcast it to remote guests. This inspection path is implemented but not yet runtime-verified.
+The `0.9.0` source adds `inspect_reference()`. After the model selects it, the companion briefly looks toward the local player, follows the player's camera ray to the referenced point, turns toward it, and captures one bot-eye image. Ramblers keeps the snapshot in process memory, does not write it to local disk, sends it to the existing OpenAI Realtime conversation, and does not broadcast it to remote guests. The gaze half of that path works; the off-screen capture does not. Hiding the companion's renderers before `Camera.Render()` ended in a fatal `ExecutionEngineException` under Unity 6 IL2CPP, which terminates the game rather than raising a catchable error, so the capture is being reworked and `inspect_reference()` should be treated as unavailable.
+
+The `0.10.0` source turns multi-frame actions into a declared job layer. Each action states which companion capabilities it claims — locomotion, gaze, hands — and the coordinator admits a job only when they are free, so actions no longer need a hand-written exclusion check against every other action. Gaze is arbitrated on priority channels rather than per-behaviour fields. `cancel_action()` is added on top of that layer: it stops any running job, drops a queued jump, and clears any follow intent, without changing posture.
 
 ## Compatibility
 
-Tested against Big Walk `1.4.9` (build `2608141617`) on BepInEx IL2CPP `6.0.0-be.755`. Ramblers `0.7.5` and `0.8.0` are runtime-verified on that combination; `0.8.0` is the current verified baseline. The local `0.9.0` source targets the same bindings, but its new visual inspection path awaits runtime verification. Other game or loader versions are unverified.
+Tested against Big Walk `1.4.9` (build `2608141617`) on BepInEx IL2CPP `6.0.0-be.755`. Ramblers `0.7.5` and `0.8.0` are runtime-verified on that combination; `0.8.0` is the current verified baseline. The local `0.9.0` and `0.10.0` sources target the same bindings. `0.10.0` compiles and preserves the `0.8.0` action set, but its job layer and `cancel_action()` await runtime verification, and its inherited `inspect_reference()` capture is known to crash. Other game or loader versions are unverified.
 
 ## Build
 
@@ -50,6 +52,8 @@ The model never writes movement input and never touches a Unity object. It selec
 
 Big Walk voice state and microphone → a continuous semantic-VAD stream or manual push-to-talk turn → OpenAI Realtime → a validated tool call or model audio → the companion controller, or local 3D playback from the companion's body. Visual inspection takes a separate deferred path: the tool call drives the companion's attention, a bot-eye snapshot is returned to the same Realtime conversation, and only then is one continuation response requested. Synthetic speech is local-only and does not reach remote guests.
 
-The current model-facing surface is `set_follow_mode(follow | stay)`, `set_posture(standing | crouching | sitting)`, `jump()`, and `inspect_reference()`. Typed C# components arbitrate persistent follow intent, posture, transient jump requests, and temporary visual attention. Tool arguments are validated before Unity is touched, and multiple tool outputs are returned before one continuation response is requested.
+The current model-facing surface is `set_follow_mode(follow | stay)`, `set_posture(standing | crouching | sitting)`, `jump()`, `inspect_reference()`, and `cancel_action()`. Tool arguments are validated before Unity is touched, and multiple tool outputs are returned before one continuation response is requested.
+
+Actions that cannot finish inside a single tool call are jobs. A job declares the capabilities it claims and reports a terminal result plus any conversation items it wants delivered — a text report, an image, or both — which is how a bot-eye snapshot reaches the model without the WebSocket transport knowing what produced it. Persistent follow intent and posture stay outside that layer as long-lived state rather than jobs.
 
 Earlier probe experiments and the original host-only feasibility work are in [`docs/archive/`](docs/archive/).

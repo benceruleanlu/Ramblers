@@ -20,10 +20,11 @@ internal sealed class CompanionController : MonoBehaviour
     private float _nextPoll;
     private float _verifyAt;
     private bool _hasSpawnedBot;
-    private long _activeInspectionToken;
+    private long _activeJobToken;
+    private string _activeJobName;
 
     private static CompanionController _activeController;
-    private static long _nextInspectionToken;
+    private static long _nextJobToken;
 
     public CompanionController(IntPtr pointer) : base(pointer)
     {
@@ -61,73 +62,110 @@ internal sealed class CompanionController : MonoBehaviour
         return controller._actions.RequestJump(Time.realtimeSinceStartup);
     }
 
-    internal static bool TryBeginInspection(
-        out AgentToolResult failure,
-        out long operationToken)
+    internal static AgentToolResult CancelActiveWork()
     {
-        operationToken = 0;
+        CompanionController controller;
+        AgentToolResult failure;
+        if (!TryGetCommandTarget(out controller, out failure))
+            return failure;
+        controller._activeJobToken = 0;
+        controller._activeJobName = null;
+        return controller._actions.CancelActiveWork(Time.realtimeSinceStartup);
+    }
+
+    internal static bool TryBeginJob(
+        string jobName,
+        out CompanionJobHandle handle,
+        out AgentToolResult failure)
+    {
+        handle = null;
         CompanionController controller;
         if (!TryGetCommandTarget(out controller, out failure))
             return false;
-        var started = controller._actions.TryBeginInspection(
-            Time.realtimeSinceStartup,
-            out failure);
-        if (started)
-        {
-            operationToken = ++_nextInspectionToken;
-            controller._activeInspectionToken = operationToken;
-        }
-        return started;
-    }
 
-    internal static bool TryTakeInspectionCompletion(
-        long operationToken,
-        out CompanionInspectionCompletion completion)
-    {
-        var controller = _activeController;
-        if (controller == null || operationToken == 0 ||
-            controller._activeInspectionToken != operationToken ||
-            controller._body == null ||
-            !controller._body.IsAlive || !controller._hasSpawnedBot)
+        float timeoutSeconds;
+        if (!controller._actions.TryBeginJob(
+                jobName,
+                Time.realtimeSinceStartup,
+                out timeoutSeconds,
+                out failure))
         {
-            completion = new CompanionInspectionCompletion
-            {
-                Result = AgentToolResult.Failure("bot_not_spawned"),
-                Observation = null
-            };
-            return true;
-        }
-
-        if (!controller._actions.TryTakeInspectionCompletion(out completion))
             return false;
+        }
 
-        // Successful captures retain their token through the bounded gaze hold
-        // so the matching assistant-audio event can release it. Failures have
-        // no attention left to own.
-        if (completion == null || completion.Observation == null)
-            controller._activeInspectionToken = 0;
+        controller._activeJobToken = ++_nextJobToken;
+        controller._activeJobName = jobName;
+        handle = new CompanionJobHandle
+        {
+            Token = controller._activeJobToken,
+            TimeoutSeconds = timeoutSeconds
+        };
         return true;
     }
 
-    internal static void CancelInspection(long operationToken)
+    internal static bool TryTakeJobCompletion(
+        long operationToken,
+        out CompanionJobCompletion completion)
+    {
+        var controller = _activeController;
+        if (controller == null || controller._body == null ||
+            !controller._body.IsAlive || !controller._hasSpawnedBot)
+        {
+            completion = CompanionJobCompletion.Failed("bot_not_spawned");
+            return true;
+        }
+
+        if (operationToken == 0 || controller._activeJobToken != operationToken)
+        {
+            // The job this caller was waiting on was cancelled or replaced.
+            completion = CompanionJobCompletion.Failed("cancelled");
+            return true;
+        }
+
+        if (!controller._actions.TryTakeJobCompletion(
+                controller._activeJobName,
+                Time.realtimeSinceStartup,
+                out completion))
+        {
+            return false;
+        }
+
+        // A job that succeeded may still hold something past completion — an
+        // inspection keeps its gaze — so it keeps its token until the model has
+        // responded. A failed job has nothing left to own.
+        if (completion == null || completion.Result == null || !completion.Result.Ok)
+        {
+            controller._activeJobToken = 0;
+            controller._activeJobName = null;
+        }
+        return true;
+    }
+
+    internal static void CancelJob(long operationToken)
     {
         var controller = _activeController;
         if (controller != null && operationToken != 0 &&
-            controller._activeInspectionToken == operationToken)
+            controller._activeJobToken == operationToken)
         {
-            controller._actions.CancelInspection(Time.realtimeSinceStartup);
-            controller._activeInspectionToken = 0;
+            controller._actions.CancelJob(
+                controller._activeJobName,
+                Time.realtimeSinceStartup);
+            controller._activeJobToken = 0;
+            controller._activeJobName = null;
         }
     }
 
-    internal static void ReleaseInspectionAttention(long operationToken)
+    internal static void ConcludeJob(long operationToken)
     {
         var controller = _activeController;
         if (controller != null && operationToken != 0 &&
-            controller._activeInspectionToken == operationToken)
+            controller._activeJobToken == operationToken)
         {
-            controller._actions.ReleaseInspectionAttention(Time.realtimeSinceStartup);
-            controller._activeInspectionToken = 0;
+            controller._actions.ConcludeJob(
+                controller._activeJobName,
+                Time.realtimeSinceStartup);
+            controller._activeJobToken = 0;
+            controller._activeJobName = null;
         }
     }
 
@@ -228,10 +266,10 @@ internal sealed class CompanionController : MonoBehaviour
         }
         catch (Exception exception)
         {
-            _actions.FailInspection(
+            _actions.FailActiveJobs(
                 "action_execution_failed",
                 Time.realtimeSinceStartup);
-            Plugin.Logger.LogError($"[VISION] Inspection update failed: {exception}");
+            Plugin.Logger.LogError($"[ACTION] Job update failed: {exception}");
         }
     }
 
@@ -279,7 +317,8 @@ internal sealed class CompanionController : MonoBehaviour
                 networkTransform);
             // A controller can survive a body replacement. Invalidating the
             // active token prevents an old deferred call from targeting it.
-            _activeInspectionToken = 0;
+            _activeJobToken = 0;
+            _activeJobName = null;
             _hasSpawnedBot = true;
             _actions.Bind(_body, localPlayer, now);
 
@@ -310,7 +349,8 @@ internal sealed class CompanionController : MonoBehaviour
         _actions.Release();
         _body = null;
         _hasSpawnedBot = false;
-        _activeInspectionToken = 0;
+        _activeJobToken = 0;
+        _activeJobName = null;
         _verificationLog.Reset();
         Plugin.Logger.LogInfo("[RAMBLERS] Companion left the scene; controller state reset.");
     }
@@ -319,7 +359,8 @@ internal sealed class CompanionController : MonoBehaviour
     {
         if (_activeController == this)
             _activeController = null;
-        _activeInspectionToken = 0;
+        _activeJobToken = 0;
+        _activeJobName = null;
 
         try
         {
