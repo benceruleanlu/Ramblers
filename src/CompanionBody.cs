@@ -41,6 +41,18 @@ internal sealed class CompanionBody
     internal Vector3 HeadPosition => HeadPositionOf(Character);
 
     /// <summary>
+    /// Whether a transform belongs to the companion's own hierarchy. Any cast
+    /// that starts at the companion's head needs this to tell a self-hit from a
+    /// real one.
+    /// </summary>
+    internal bool Contains(Transform candidate)
+    {
+        var root = Transform;
+        return candidate != null && root != null &&
+               (candidate == root || candidate.IsChildOf(root));
+    }
+
+    /// <summary>
     /// A player's eye position, falling back to a nominal standing eye height
     /// when the character has no camera transform.
     /// </summary>

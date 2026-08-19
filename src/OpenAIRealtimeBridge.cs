@@ -63,6 +63,12 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             InterruptAssistantSpeech();
         ReleaseHeldContinuation();
         _gameVoiceOutput.Tick();
+
+        // Speech on either side is what the companion's idle attention yields
+        // to. Sampled after the output tick so playback that just stopped is
+        // not reported as still speaking.
+        CompanionController.SetConversationActive(
+            IsHumanSpeaking() || _gameVoiceOutput.IsSpeaking);
     }
 
     /// <summary>

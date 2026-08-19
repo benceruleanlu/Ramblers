@@ -10,9 +10,10 @@ namespace Ramblers;
 internal enum GazeChannel
 {
     Follow = 0,
-    Navigation = 1,
-    Manipulation = 2,
-    Inspection = 3
+    Ambient = 1,
+    Navigation = 2,
+    Manipulation = 3,
+    Inspection = 4
 }
 
 /// <summary>
@@ -22,7 +23,7 @@ internal enum GazeChannel
 /// </summary>
 internal sealed class CompanionAttention
 {
-    private const int ChannelCount = 4;
+    private const int ChannelCount = 5;
     private const int NoChannel = -1;
 
     private readonly CompanionFacing _facing;
@@ -55,6 +56,27 @@ internal sealed class CompanionAttention
         return _activeChannel == (int)channel &&
                _facing.LastAimYawError <= yawDegrees &&
                _facing.LastAimPitchError <= pitchDegrees;
+    }
+
+    /// <summary>
+    /// Whether a higher-priority channel currently owns the gaze. An ambient
+    /// behaviour reads this to hold still while a deliberate action aims,
+    /// rather than running its dwell timers down where nobody can see them.
+    /// </summary>
+    internal bool IsOverridden(GazeChannel channel)
+    {
+        return _activeChannel > (int)channel;
+    }
+
+    /// <summary>
+    /// Whether the companion may absorb head yaw into its body. Stock
+    /// PlayerMover.UpdatePerFrameRotation skips that drain entirely while
+    /// PlayerSitter reports sitting, which is the one state where a player can
+    /// hold a sustained head yaw.
+    /// </summary>
+    internal void SetBodyTurnAllowed(bool allowed)
+    {
+        _facing.SetBodyTurnAllowed(allowed);
     }
 
     /// <summary>
