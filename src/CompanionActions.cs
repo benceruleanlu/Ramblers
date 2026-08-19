@@ -56,7 +56,7 @@ internal sealed class CompanionActionCoordinator
             _jobs[index].Bind(body, human);
         _locomotion.SetPosture(_posture.Current);
         _attention.SetBodyTurnAllowed(BodyTurnAllowed);
-        _follow.Bind(body, human, now);
+        _follow.Bind(body, human, now, MovementAllowed, MovementBlocker);
         _ambientGaze.Bind(body, human, now);
     }
 

@@ -60,7 +60,12 @@ internal sealed class CompanionFollowBehavior
     /// <summary>Whether a follow intent is outstanding, suspended or not.</summary>
     internal bool IsRequested => _followRequested;
 
-    internal void Bind(CompanionBody body, PlayerCharacter human, float now)
+    internal void Bind(
+        CompanionBody body,
+        PlayerCharacter human,
+        float now,
+        bool movementAllowed,
+        string movementBlocker)
     {
         _body = body;
         _humanAtSpawn = human;
@@ -72,8 +77,12 @@ internal sealed class CompanionFollowBehavior
         _nextNavigationTick = _followAt;
         _nextTrailSample = now + TrailSampleInterval;
         _trail.Clear();
-        if (human != null)
-            _trail.Add(human.transform.position);
+        if (human == null)
+            return;
+
+        StartFollowIntent(human, now, movementAllowed, movementBlocker);
+        Plugin.Logger.LogInfo(
+            $"[FOLLOW] DEFAULT mode=follow status={(movementAllowed ? "started" : "suspended")}.");
     }
 
     internal void TickFrame(float now)
@@ -150,17 +159,7 @@ internal sealed class CompanionFollowBehavior
             if (human == null)
                 return AgentToolResult.Failure("human_player_unavailable");
 
-            _followRequested = true;
-            _state = movementAllowed ? FollowState.Waiting : FollowState.Suspended;
-            _suspensionReason = movementAllowed ? null : movementBlocker;
-            _followAt = now;
-            _nextNavigationTick = now;
-            _trail.Clear();
-            _trail.Add(human.transform.position);
-            _attention.SetTarget(
-                GazeChannel.Follow,
-                CompanionBody.HeadPositionOf(human));
-            _locomotion.ResetProgressObservation(now);
+            StartFollowIntent(human, now, movementAllowed, movementBlocker);
             var status = movementAllowed ? "started" : "suspended";
             Plugin.Logger.LogInfo(
                 $"[AGENT] TOOL {AgentToolCatalog.SetFollowMode} mode=follow status={status}.");
@@ -177,6 +176,25 @@ internal sealed class CompanionFollowBehavior
             AgentToolCatalog.SetFollowMode,
             "stopped",
             "stay");
+    }
+
+    private void StartFollowIntent(
+        PlayerCharacter human,
+        float now,
+        bool movementAllowed,
+        string movementBlocker)
+    {
+        _followRequested = true;
+        _state = movementAllowed ? FollowState.Waiting : FollowState.Suspended;
+        _suspensionReason = movementAllowed ? null : movementBlocker;
+        _followAt = now;
+        _nextNavigationTick = now;
+        _trail.Clear();
+        _trail.Add(human.transform.position);
+        _attention.SetTarget(
+            GazeChannel.Follow,
+            CompanionBody.HeadPositionOf(human));
+        _locomotion.ResetProgressObservation(now);
     }
 
     /// <summary>
