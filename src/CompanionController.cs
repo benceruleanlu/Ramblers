@@ -75,6 +75,7 @@ internal sealed class CompanionController : MonoBehaviour
 
     internal static bool TryBeginJob(
         string jobName,
+        CompanionJobRequest request,
         out CompanionJobHandle handle,
         out AgentToolResult failure)
     {
@@ -86,6 +87,7 @@ internal sealed class CompanionController : MonoBehaviour
         float timeoutSeconds;
         if (!controller._actions.TryBeginJob(
                 jobName,
+                request,
                 Time.realtimeSinceStartup,
                 out timeoutSeconds,
                 out failure))
@@ -101,6 +103,40 @@ internal sealed class CompanionController : MonoBehaviour
             TimeoutSeconds = timeoutSeconds
         };
         return true;
+    }
+
+    /// <summary>
+    /// Captures a physical referent on Unity's main thread. The caller binds the
+    /// returned immutable object to one response turn before any model tool is
+    /// allowed to dispatch it.
+    /// </summary>
+    internal static bool TryCaptureInteractionTarget(
+        out CompanionInteractionTarget target,
+        out string error)
+    {
+        target = null;
+        error = null;
+
+        var controller = _activeController;
+        var body = controller == null ? null : controller._body;
+        if (body == null || !body.IsAlive || !controller._hasSpawnedBot)
+        {
+            error = "bot_not_spawned";
+            return false;
+        }
+
+        var human = WorldManager.localPlayerCharacter;
+        if (human == null || human.gameObject == body.GameObject)
+        {
+            error = "human_player_unavailable";
+            return false;
+        }
+
+        return CompanionInteractionTarget.TryResolve(
+            human,
+            body,
+            out target,
+            out error);
     }
 
     internal static bool TryTakeJobCompletion(

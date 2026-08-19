@@ -13,7 +13,7 @@ Ramblers reads `OPENAI_API_KEY` from the process or current Windows user environ
 
 ## Compatibility
 
-Tested against Big Walk `1.4.9` (build `2608141617`) on BepInEx IL2CPP `6.0.0-be.755`, which is Unity `6000.3.17f1` on URP. Ramblers `0.7.5`, `0.8.0`, and `0.12.0` are runtime-verified on that combination. `0.12.0` verification covers follow, posture, jump, the job layer's capability arbitration, deferred tool dispatch with the microphone epoch barrier, and one full `inspect_reference()` producing a described image. `cancel_action()` is still compile-verified only. Other game or loader versions are unverified, and the survey in [Stripped Unity APIs](docs/STRIPPED_UNITY_APIS.md) is specific to this build of the game rather than to Unity 6.
+Tested against Big Walk `1.4.9` (build `2608141617`) on BepInEx IL2CPP `6.0.0-be.755`, which is Unity `6000.3.17f1` on URP. Ramblers `0.7.5`, `0.8.0`, and `0.12.0` are runtime-verified on that combination. `0.12.0` verification covers follow, posture, jump, the job layer's capability arbitration, deferred tool dispatch with the microphone epoch barrier, and one full `inspect_reference()` producing a described image. The current development candidate additionally has user-confirmed visual runtime proof for default follow, grounded exact-target pickup, and exact-target cancellation. Other game or loader versions are unverified, and the survey in [Stripped Unity APIs](docs/STRIPPED_UNITY_APIS.md) is specific to this build of the game rather than to Unity 6.
 
 ## Build
 
@@ -36,7 +36,7 @@ Add `-NoRestore` to keep the build offline and fail if no compiler is already av
 
 The model never writes movement input and never touches a Unity object. It selects from a fixed tool allowlist, and C# does the driving. Arguments are validated into typed commands before anything Unity-side runs, so a malformed call comes back as a tool failure rather than as an exception inside the game loop.
 
-The voice path reuses what Big Walk already has. The game's own voice state and microphone open the turn — a toggle starts a continuous semantic-VAD stream, a hold makes it a manual push-to-talk turn — and the audio goes to OpenAI Realtime. What comes back is either speech, played from a local 3D source on the companion's body, or a tool call. Synthetic speech is local-only and never reaches remote guests. When one turn produces several tool calls, every result is returned before a single continuation response is requested, so one turn stays one reply.
+The voice path reuses what Big Walk already has. The game's own voice state and microphone open the turn — a toggle starts a continuous semantic-VAD stream, a hold makes it a manual push-to-talk turn — and the audio goes to OpenAI Realtime. At the utterance boundary, any physical reference is frozen and bound to that exact response turn. What comes back is either speech, played from a local 3D source on the companion's body, or a tool call. Synthetic speech is local-only and never reaches remote guests. When one turn produces several tool calls, every result is returned before a single continuation response is requested, so one turn stays one reply.
 
 The model-facing surface is deliberately small:
 
@@ -46,10 +46,11 @@ The model-facing surface is deliberately small:
 | `set_posture(standing \| crouching \| sitting)` | Long-lived posture. Sitting suspends locomotion without erasing a follow request; standing resumes it. |
 | `jump()` | Queues one grounded jump for the next physics tick. |
 | `inspect_reference()` | Looks where you are looking, then captures one image from the companion's own point of view. |
+| `pick_up_item(target: human_reference)` | Picks up only the prop frozen under the human's gaze for that response turn. |
 | `cancel_action()` | Stops running work, a queued jump, and follow intent, without changing posture. |
 
 Anything that cannot finish inside a single tool call is a job. A job declares the capabilities it claims — locomotion, gaze, hands — and the coordinator admits it only when those are free, so an action needs no hand-written exclusion check against every other action; gaze in particular is arbitrated on priority channels rather than per-behaviour fields. A job reports a terminal result plus any conversation items it wants delivered alongside it — a text report, an image, or both — which is how a bot-eye snapshot reaches the model without the WebSocket transport knowing what produced it.
 
-`inspect_reference()` is the tool that currently takes that deferred path: the call returns pending, the companion turns and captures over the following frames, the snapshot enters the same Realtime conversation, and only then is one continuation response requested. Persistent follow intent and posture stay outside the job layer as long-lived state rather than jobs.
+`inspect_reference()` returns pending while the companion turns and captures over following frames. `pick_up_item()` likewise revalidates the immutable prop's identity, reachability, hands, and host authority immediately before acting, then succeeds only after the bot holds that same prop. A new utterance invalidates undispatched references, and cancellation after authority begins reconciles only the frozen prop; neither path falls back to a nearby object. Persistent follow intent and posture stay outside the job layer as long-lived state rather than jobs.
 
 Earlier probe experiments and the original host-only feasibility work are in [`docs/archive/`](docs/archive/).

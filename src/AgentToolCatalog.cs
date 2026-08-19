@@ -10,10 +10,11 @@ internal static class AgentToolCatalog
     internal const string SetPosture = "set_posture";
     internal const string Jump = "jump";
     internal const string InspectReference = "inspect_reference";
+    internal const string PickUpItem = "pick_up_item";
     internal const string CancelAction = "cancel_action";
 
     internal const string NamesForLog =
-        "set_follow_mode,set_posture,jump,inspect_reference,cancel_action";
+        "set_follow_mode,set_posture,jump,inspect_reference,pick_up_item,cancel_action";
 
     internal static readonly object[] RealtimeDefinitions =
     {
@@ -93,9 +94,32 @@ internal static class AgentToolCatalog
         new
         {
             type = "function",
+            name = PickUpItem,
+            description =
+                "Pick up the single nearby prop the human was looking at when their current utterance ended. Use only when the human explicitly asks you to pick up, grab, or take that referenced item. Never substitute another or nearest item; an unavailable or ambiguous reference must fail.",
+            parameters = new
+            {
+                type = "object",
+                properties = new
+                {
+                    target = new
+                    {
+                        type = "string",
+                        description =
+                            "The frozen physical referent from this human utterance.",
+                        @enum = new[] { "human_reference" }
+                    }
+                },
+                required = new[] { "target" },
+                additionalProperties = false
+            }
+        },
+        new
+        {
+            type = "function",
             name = CancelAction,
             description =
-                "Immediately stop whatever the companion is doing: any in-progress action, a queued jump, and any active following. Use when the human says stop, never mind, forget it, cancel that, or wait. This does not change posture.",
+                "Stop whatever the companion is doing: any in-progress action, a queued jump, and any active following. A physical action that already crossed host authority is reconciled against its exact target before cancellation is complete. Use when the human says stop, never mind, forget it, cancel that, or wait. This does not change posture.",
             parameters = new
             {
                 type = "object",

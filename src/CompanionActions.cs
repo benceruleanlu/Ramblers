@@ -41,7 +41,8 @@ internal sealed class CompanionActionCoordinator
         _ambientGaze = new CompanionAmbientGaze(_attention);
         _jobs = new ICompanionJob[]
         {
-            new CompanionInspectionBehavior(_attention)
+            new CompanionInspectionBehavior(_attention),
+            new CompanionPickupBehavior(_attention)
         };
     }
 
@@ -152,12 +153,15 @@ internal sealed class CompanionActionCoordinator
     internal AgentToolResult CancelActiveWork(float now)
     {
         var cancelled = 0;
+        var reconciliationPending = false;
         for (var index = 0; index < _jobs.Length; index++)
         {
             if (!_jobs[index].IsActive)
                 continue;
             _jobs[index].Cancel(now);
             cancelled++;
+            if (_jobs[index].IsActive || _jobs[index].Held != JobResources.None)
+                reconciliationPending = true;
         }
 
         if (_jump.IsQueued)
@@ -176,12 +180,17 @@ internal sealed class CompanionActionCoordinator
         Plugin.Logger.LogInfo($"[ACTION] CANCEL_ALL stopped={cancelled}.");
         return AgentToolResult.Success(
             AgentToolCatalog.CancelAction,
-            cancelled > 0 ? "cancelled" : "nothing_to_cancel",
-            "idle");
+            reconciliationPending
+                ? "cancel_requested"
+                : cancelled > 0
+                    ? "cancelled"
+                    : "nothing_to_cancel",
+            reconciliationPending ? "cancelling" : "idle");
     }
 
     internal bool TryBeginJob(
         string jobName,
+        CompanionJobRequest request,
         float now,
         out float timeoutSeconds,
         out AgentToolResult failure)
@@ -208,7 +217,7 @@ internal sealed class CompanionActionCoordinator
 
         if (!TryReserve(job, out failure))
             return false;
-        if (!job.TryBegin(now, out failure))
+        if (!job.TryBegin(now, request, out failure))
             return false;
 
         timeoutSeconds = job.TimeoutSeconds;

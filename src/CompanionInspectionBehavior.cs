@@ -94,7 +94,10 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
         _referenceRayHit = false;
     }
 
-    public bool TryBegin(float now, out AgentToolResult failure)
+    public bool TryBegin(
+        float now,
+        CompanionJobRequest request,
+        out AgentToolResult failure)
     {
         failure = null;
         if (_body == null || !_body.IsAlive)

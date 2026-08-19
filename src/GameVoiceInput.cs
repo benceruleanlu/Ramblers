@@ -10,6 +10,14 @@ internal enum AgentTurnDetectionMode
     ManualPushToTalk
 }
 
+[Flags]
+internal enum GameVoiceTickEvents
+{
+    None = 0,
+    ManualTurnStarted = 1 << 0,
+    ManualTurnSubmitted = 1 << 1
+}
+
 /// <summary>
 /// Adapts Big Walk's voice channel, microphone, and direct attenuation curve
 /// into a continuous Realtime PCM stream. Open-microphone turn boundaries are
@@ -47,15 +55,16 @@ internal sealed class GameVoiceInput
     private AnimationCurve _directVoiceAttenuationCurve;
 
     /// <summary>
-    /// Returns true when a manual push-to-talk press should immediately stop
-    /// any locally queued or playing assistant speech.
+    /// Reports manual push-to-talk edges so the Unity bridge can invalidate an
+    /// older physical reference on press and capture the new one only after a
+    /// successfully committed release.
     /// </summary>
-    internal bool Tick(IAgentAudioSink sink)
+    internal GameVoiceTickEvents Tick(IAgentAudioSink sink)
     {
         if (sink == null || !sink.IsReady)
         {
             StopStreaming(false, sink);
-            return false;
+            return GameVoiceTickEvents.None;
         }
 
         bool channelOpen;
@@ -63,18 +72,26 @@ internal sealed class GameVoiceInput
         AgentTurnDetectionMode turnMode;
         if (!TryGetGameVoiceState(out channelOpen, out source, out turnMode))
         {
-            HandleUnavailableMicrophone(sink);
-            return false;
+            return HandleUnavailableMicrophone(sink)
+                ? GameVoiceTickEvents.ManualTurnSubmitted
+                : GameVoiceTickEvents.None;
         }
 
         ConfigureTurnMode(turnMode, sink);
 
         if (!channelOpen)
         {
+            var submitted = false;
             if (_streaming)
-                StopStreaming(turnMode == AgentTurnDetectionMode.ManualPushToTalk, sink);
+            {
+                submitted = StopStreaming(
+                    turnMode == AgentTurnDetectionMode.ManualPushToTalk,
+                    sink);
+            }
             _voiceIntentWasActive = false;
-            return false;
+            return submitted
+                ? GameVoiceTickEvents.ManualTurnSubmitted
+                : GameVoiceTickEvents.None;
         }
 
         float distance;
@@ -91,16 +108,16 @@ internal sealed class GameVoiceInput
 
             StopStreaming(false, sink);
             _voiceIntentWasActive = true;
-            return false;
+            return GameVoiceTickEvents.None;
         }
 
-        var manualTurnStarted = false;
+        var tickEvents = GameVoiceTickEvents.None;
         if (!_streaming)
         {
             if (turnMode == AgentTurnDetectionMode.ManualPushToTalk)
             {
                 sink.CancelActiveResponse();
-                manualTurnStarted = true;
+                tickEvents |= GameVoiceTickEvents.ManualTurnStarted;
             }
 
             BeginStreaming(source, turnMode, distance, audibility, sink);
@@ -110,7 +127,7 @@ internal sealed class GameVoiceInput
             CaptureMicrophoneSamples(sink);
 
         _voiceIntentWasActive = true;
-        return manualTurnStarted;
+        return tickEvents;
     }
 
     /// <summary>
@@ -202,17 +219,17 @@ internal sealed class GameVoiceInput
         return false;
     }
 
-    private void HandleUnavailableMicrophone(IAgentAudioSink sink)
+    private bool HandleUnavailableMicrophone(IAgentAudioSink sink)
     {
         if (_microphoneUnavailableSince < 0f)
         {
             StopStreaming(false, sink);
-            return;
+            return false;
         }
 
         var unavailableSeconds = Time.realtimeSinceStartup - _microphoneUnavailableSince;
         if (unavailableSeconds < MicrophoneUnavailableGrace)
-            return;
+            return false;
 
         var submitManualTurn =
             _configuredTurnMode == AgentTurnDetectionMode.ManualPushToTalk;
@@ -226,8 +243,9 @@ internal sealed class GameVoiceInput
                     : "stopping the semantic VAD stream."));
         }
 
-        StopStreaming(submitManualTurn, sink);
+        var submitted = StopStreaming(submitManualTurn, sink);
         _voiceIntentWasActive = false;
+        return submitted;
     }
 
     private void ConfigureTurnMode(AgentTurnDetectionMode turnMode, IAgentAudioSink sink)
@@ -376,10 +394,10 @@ internal sealed class GameVoiceInput
             $"distance={distance:F2}, audibility={audibility:F6}");
     }
 
-    private void StopStreaming(bool submitManualTurn, IAgentAudioSink sink)
+    private bool StopStreaming(bool submitManualTurn, IAgentAudioSink sink)
     {
         if (!_streaming)
-            return;
+            return false;
 
         if (submitManualTurn && sink != null && sink.IsReady)
             CaptureMicrophoneSamples(sink);
@@ -391,7 +409,7 @@ internal sealed class GameVoiceInput
         if (submitManualTurn && sink != null && sink.IsReady &&
             _streamedSamples >= MinimumManualTurnSamples)
         {
-            sink.CommitInputAudioAndRespond();
+            sink.CommitInputAudio();
             submitted = true;
         }
         else if (sink != null && sink.IsReady)
@@ -404,6 +422,7 @@ internal sealed class GameVoiceInput
             $"status={(submitted ? "submitted" : "cleared")}, " +
             $"distance={_streamDistance:F2}, audibility={_streamAudibility:F6}, " +
             $"audioSeconds={_streamedSamples / (float)RealtimeSampleRate:F2}");
+        return submitted;
     }
 
     private bool TryBeginMicrophoneRead()
