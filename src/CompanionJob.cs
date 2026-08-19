@@ -51,6 +51,7 @@ internal sealed class CompanionJobHandle
 /// </summary>
 internal sealed class CompanionJobRequest
 {
+    internal string ActionName;
     internal long TurnId;
     internal CompanionInteractionTarget InteractionTarget;
 }
@@ -74,11 +75,17 @@ internal sealed class CompanionTurnReference
 /// </summary>
 internal interface ICompanionJob
 {
-    /// <summary>The model-facing tool name, also used in arbitration errors.</summary>
+    /// <summary>The primary model-facing tool name for this job.</summary>
     string Name { get; }
 
-    /// <summary>What the job must claim to start.</summary>
-    JobResources Requires { get; }
+    /// <summary>The model-facing name of the operation currently in progress.</summary>
+    string ActiveName { get; }
+
+    /// <summary>Whether this job owns the implementation of a tool name.</summary>
+    bool Handles(string actionName);
+
+    /// <summary>What this specific operation must claim to start.</summary>
+    JobResources RequiredFor(CompanionJobRequest request);
 
     /// <summary>
     /// What the job currently holds. This narrows as a job winds down: an

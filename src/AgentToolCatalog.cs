@@ -11,10 +11,11 @@ internal static class AgentToolCatalog
     internal const string Jump = "jump";
     internal const string InspectReference = "inspect_reference";
     internal const string PickUpItem = "pick_up_item";
+    internal const string DropItem = "drop_item";
     internal const string CancelAction = "cancel_action";
 
     internal const string NamesForLog =
-        "set_follow_mode,set_posture,jump,inspect_reference,pick_up_item,cancel_action";
+        "set_follow_mode,set_posture,jump,inspect_reference,pick_up_item,drop_item,cancel_action";
 
     internal static readonly object[] RealtimeDefinitions =
     {
@@ -111,6 +112,20 @@ internal static class AgentToolCatalog
                     }
                 },
                 required = new[] { "target" },
+                additionalProperties = false
+            }
+        },
+        new
+        {
+            type = "function",
+            name = DropItem,
+            description =
+                "Release the exact prop currently held by the companion. Use when the human asks you to drop, put down, or release what you are holding, or when continuing to hold it no longer makes sense. This captures and validates the held prop before issuing the host drop command; it never acts on another object.",
+            parameters = new
+            {
+                type = "object",
+                properties = new { },
+                required = new string[0],
                 additionalProperties = false
             }
         },

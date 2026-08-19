@@ -56,7 +56,20 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
 
     public string Name => AgentToolCatalog.InspectReference;
 
-    public JobResources Requires => JobResources.Locomotion | JobResources.Gaze;
+    public string ActiveName => Name;
+
+    public bool Handles(string actionName)
+    {
+        return string.Equals(
+            actionName,
+            Name,
+            System.StringComparison.Ordinal);
+    }
+
+    public JobResources RequiredFor(CompanionJobRequest request)
+    {
+        return JobResources.Locomotion | JobResources.Gaze;
+    }
 
     /// <summary>
     /// Locomotion is released the moment the frame is captured. The settle hold

@@ -37,6 +37,11 @@ internal static class AgentToolRouter
                 return ExecutePickup(
                     functionCall.Arguments,
                     turnReference);
+            case AgentToolCatalog.DropItem:
+                return ExecuteJob(
+                    AgentToolCatalog.DropItem,
+                    functionCall.Arguments,
+                    null);
             case AgentToolCatalog.CancelAction:
                 result = ExecuteCancelAction(functionCall.Arguments);
                 break;
@@ -95,6 +100,10 @@ internal static class AgentToolRouter
     {
         if (!IsEmptyObject(arguments))
             return AgentToolDispatch.Immediate(AgentToolResult.Failure("invalid_arguments"));
+
+        if (request == null)
+            request = new CompanionJobRequest();
+        request.ActionName = jobName;
 
         AgentToolResult failure;
         CompanionJobHandle handle;
