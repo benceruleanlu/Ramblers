@@ -117,7 +117,7 @@ internal sealed class CompanionInteractionTarget
             if (prop == null || prop.gameObject == null ||
                 !prop.gameObject.activeInHierarchy || prop.isInInventory)
             {
-                error = "human_reference_not_pickup_item";
+                error = "human_reference_not_prop";
                 return false;
             }
 

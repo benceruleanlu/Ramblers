@@ -11,11 +11,12 @@ internal static class AgentToolCatalog
     internal const string Jump = "jump";
     internal const string InspectReference = "inspect_reference";
     internal const string PickUpItem = "pick_up_item";
+    internal const string KickItem = "kick_item";
     internal const string DropItem = "drop_item";
     internal const string CancelAction = "cancel_action";
 
     internal const string NamesForLog =
-        "set_follow_mode,set_posture,jump,inspect_reference,pick_up_item,drop_item,cancel_action";
+        "set_follow_mode,set_posture,jump,inspect_reference,pick_up_item,kick_item,drop_item,cancel_action";
 
     internal static readonly object[] RealtimeDefinitions =
     {
@@ -109,6 +110,43 @@ internal static class AgentToolCatalog
                         description =
                             "The frozen physical referent from this human utterance.",
                         @enum = new[] { "human_reference" }
+                    }
+                },
+                required = new[] { "target" },
+                additionalProperties = false
+            }
+        },
+        new
+        {
+            type = "function",
+            name = KickItem,
+            description =
+                "Execute a requested kick on the single nearby prop the human was looking at when their current utterance ended. Call this tool immediately when the request is clear; do not offer strength or direction choices, ask about optional modifiers, or narrate the automatic grab and charge. Infer strength silently: light only for gentle or short wording, hard only for forceful or far wording, otherwise normal. Infer direction silently: toward_human only when the human asks for the item toward them, otherwise away_from_companion. The tool automatically grabs, charges, and kicks that exact prop. Never substitute another or nearest item.",
+            parameters = new
+            {
+                type = "object",
+                properties = new
+                {
+                    target = new
+                    {
+                        type = "string",
+                        description =
+                            "The frozen physical referent from this human utterance.",
+                        @enum = new[] { "human_reference" }
+                    },
+                    strength = new
+                    {
+                        type = "string",
+                        description =
+                            "Silently inferred charge: light for explicit gentle or short wording, hard for explicit forceful or far wording, otherwise normal. Never ask the human to select it.",
+                        @enum = new[] { "light", "normal", "hard" }
+                    },
+                    direction = new
+                    {
+                        type = "string",
+                        description =
+                            "Silently inferred direction: toward_human only when the human explicitly asks for the item toward them; otherwise away_from_companion. Never ask the human to select it.",
+                        @enum = new[] { "away_from_companion", "toward_human" }
                     }
                 },
                 required = new[] { "target" },

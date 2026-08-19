@@ -34,7 +34,12 @@ internal static class AgentToolRouter
                     functionCall.Arguments,
                     null);
             case AgentToolCatalog.PickUpItem:
-                return ExecutePickup(
+                return ExecuteReferencedItemJob(
+                    AgentToolCatalog.PickUpItem,
+                    functionCall.Arguments,
+                    turnReference);
+            case AgentToolCatalog.KickItem:
+                return ExecuteKickItemJob(
                     functionCall.Arguments,
                     turnReference);
             case AgentToolCatalog.DropItem:
@@ -116,7 +121,8 @@ internal static class AgentToolRouter
         return AgentToolDispatch.Pending(handle.Token, handle.TimeoutSeconds);
     }
 
-    private static AgentToolDispatch ExecutePickup(
+    private static AgentToolDispatch ExecuteReferencedItemJob(
+        string jobName,
         string arguments,
         CompanionTurnReference turnReference)
     {
@@ -147,13 +153,173 @@ internal static class AgentToolRouter
         }
 
         return ExecuteJob(
-            AgentToolCatalog.PickUpItem,
+            jobName,
             "{}",
             new CompanionJobRequest
             {
                 TurnId = turnReference.TurnId,
                 InteractionTarget = turnReference.Target
             });
+    }
+
+    private static AgentToolDispatch ExecuteKickItemJob(
+        string arguments,
+        CompanionTurnReference turnReference)
+    {
+        string target;
+        CompanionKickStrength strength;
+        CompanionKickDirection direction;
+        if (!TryReadKickArguments(
+                arguments,
+                out target,
+                out strength,
+                out direction) ||
+            !string.Equals(
+                target,
+                "human_reference",
+                StringComparison.Ordinal))
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure("invalid_arguments"));
+        }
+
+        if (turnReference == null)
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure("human_reference_not_captured"));
+        }
+
+        if (turnReference.Target == null)
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure(
+                    string.IsNullOrEmpty(turnReference.CaptureError)
+                        ? "human_reference_not_captured"
+                        : turnReference.CaptureError));
+        }
+
+        return ExecuteJob(
+            AgentToolCatalog.KickItem,
+            "{}",
+            new CompanionJobRequest
+            {
+                TurnId = turnReference.TurnId,
+                InteractionTarget = turnReference.Target,
+                KickStrength = strength,
+                KickDirection = direction
+            });
+    }
+
+    private static bool TryReadKickArguments(
+        string arguments,
+        out string target,
+        out CompanionKickStrength strength,
+        out CompanionKickDirection direction)
+    {
+        target = null;
+        strength = CompanionKickStrength.Normal;
+        direction = CompanionKickDirection.AwayFromCompanion;
+        if (string.IsNullOrWhiteSpace(arguments))
+            return false;
+
+        try
+        {
+            using var document = JsonDocument.Parse(arguments);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+                return false;
+
+            var sawTarget = false;
+            var sawStrength = false;
+            var sawDirection = false;
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                if (property.Value.ValueKind != JsonValueKind.String)
+                    return false;
+
+                var value = property.Value.GetString();
+                if (string.Equals(
+                        property.Name,
+                        "target",
+                        StringComparison.Ordinal))
+                {
+                    if (sawTarget || string.IsNullOrWhiteSpace(value))
+                        return false;
+                    sawTarget = true;
+                    target = value;
+                    continue;
+                }
+
+                if (string.Equals(
+                        property.Name,
+                        "strength",
+                        StringComparison.Ordinal))
+                {
+                    if (sawStrength || !TryParseKickStrength(value, out strength))
+                        return false;
+                    sawStrength = true;
+                    continue;
+                }
+
+                if (string.Equals(
+                        property.Name,
+                        "direction",
+                        StringComparison.Ordinal))
+                {
+                    if (sawDirection || !TryParseKickDirection(value, out direction))
+                        return false;
+                    sawDirection = true;
+                    continue;
+                }
+
+                return false;
+            }
+
+            return sawTarget;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryParseKickStrength(
+        string value,
+        out CompanionKickStrength strength)
+    {
+        strength = CompanionKickStrength.Normal;
+        if (string.Equals(value, "light", StringComparison.Ordinal))
+        {
+            strength = CompanionKickStrength.Light;
+            return true;
+        }
+        if (string.Equals(value, "normal", StringComparison.Ordinal))
+            return true;
+        if (string.Equals(value, "hard", StringComparison.Ordinal))
+        {
+            strength = CompanionKickStrength.Hard;
+            return true;
+        }
+        return false;
+    }
+
+    private static bool TryParseKickDirection(
+        string value,
+        out CompanionKickDirection direction)
+    {
+        direction = CompanionKickDirection.AwayFromCompanion;
+        if (string.Equals(
+                value,
+                "away_from_companion",
+                StringComparison.Ordinal))
+        {
+            return true;
+        }
+        if (string.Equals(value, "toward_human", StringComparison.Ordinal))
+        {
+            direction = CompanionKickDirection.TowardHuman;
+            return true;
+        }
+        return false;
     }
 
     private static AgentToolResult ExecuteCancelAction(string arguments)
