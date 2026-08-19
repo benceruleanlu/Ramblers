@@ -13,7 +13,7 @@ Ramblers reads `OPENAI_API_KEY` from the process or current Windows user environ
 
 ## Compatibility
 
-Tested against Big Walk `1.4.9` (build `2608141617`) on BepInEx IL2CPP `6.0.0-be.755`, which is Unity `6000.3.17f1` on URP. Ramblers `0.7.5`, `0.8.0`, and `0.12.0` are runtime-verified on that combination. `0.12.0` verification covers follow, posture, jump, the job layer's capability arbitration, deferred tool dispatch with the microphone epoch barrier, and one full `inspect_reference()` producing a described image. The current development candidate additionally has user-confirmed visual runtime proof for default follow, grounded exact-target pickup, and exact-target cancellation. Other game or loader versions are unverified, and the survey in [Stripped Unity APIs](docs/STRIPPED_UNITY_APIS.md) is specific to this build of the game rather than to Unity 6.
+Tested against Big Walk `1.4.9` (build `2608141617`) on BepInEx IL2CPP `6.0.0-be.755`, which is Unity `6000.3.17f1` on URP. Ramblers `0.7.5`, `0.8.0`, and `0.12.0` are runtime-verified on that combination. `0.12.0` verification covers follow, posture, jump, the job layer's capability arbitration, deferred tool dispatch with the microphone epoch barrier, and one full `inspect_reference()` producing a described image. The current development candidate additionally has user-confirmed visual runtime proof for default follow, grounded exact-target pickup, exact-target cancellation, and explicit held-item drop. Other game or loader versions are unverified, and the survey in [Stripped Unity APIs](docs/STRIPPED_UNITY_APIS.md) is specific to this build of the game rather than to Unity 6.
 
 ## Build
 
@@ -47,10 +47,13 @@ The model-facing surface is deliberately small:
 | `jump()` | Queues one grounded jump for the next physics tick. |
 | `inspect_reference()` | Looks where you are looking, then captures one image from the companion's own point of view. |
 | `pick_up_item(target: human_reference)` | Picks up only the prop frozen under the human's gaze for that response turn. |
+| `drop_item()` | Drops only the exact prop already held by the companion. |
 | `cancel_action()` | Stops running work, a queued jump, and follow intent, without changing posture. |
 
 Anything that cannot finish inside a single tool call is a job. A job declares the capabilities it claims — locomotion, gaze, hands — and the coordinator admits it only when those are free, so an action needs no hand-written exclusion check against every other action; gaze in particular is arbitrated on priority channels rather than per-behaviour fields. A job reports a terminal result plus any conversation items it wants delivered alongside it — a text report, an image, or both — which is how a bot-eye snapshot reaches the model without the WebSocket transport knowing what produced it.
 
-`inspect_reference()` returns pending while the companion turns and captures over following frames. `pick_up_item()` likewise revalidates the immutable prop's identity, reachability, hands, and host authority immediately before acting, then succeeds only after the bot holds that same prop. A new utterance invalidates undispatched references, and cancellation after authority begins reconciles only the frozen prop; neither path falls back to a nearby object. Persistent follow intent and posture stay outside the job layer as long-lived state rather than jobs.
+`inspect_reference()` returns pending while the companion turns and captures over following frames. Persistent follow intent and posture stay outside the job layer as long-lived state rather than jobs.
+
+The current development source adds a deliberately narrow held-item slice. `pick_up_item(target: human_reference)` freezes the single prop under the player's gaze at the end of the utterance and binds it to that exact Realtime response turn. Pickup revalidates the immutable object's identity, reachability, hands, and host authority immediately before acting, and succeeds only after the bot's hands confirm the same prop. A new utterance invalidates any undispatched reference; unavailable, stale, or mismatched targets fail instead of falling back to a nearby prop. `drop_item()` snapshots the exact prop already in the companion's hands, validates it again at the parameterless host drop boundary, and succeeds only after empty hands remain stable. Cancellation after either host command begins reconciles only that exact prop. Pickup, exact-target cancellation, and explicit drop are runtime-verified.
 
 Earlier probe experiments and the original host-only feasibility work are in [`docs/archive/`](docs/archive/).

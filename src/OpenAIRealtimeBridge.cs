@@ -267,10 +267,10 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         var invalidated = _turnReferences.Count;
         _turnReferences.Clear();
 
-        // If the prior turn's pickup already began, a correction must cross
-        // the same exact-target cancellation path. If it is merely queued, its
-        // missing turn reference will make dispatch fail closed below.
-        if (PendingBatchContainsPickup(_pendingToolBatch))
+        // If the prior turn's physical action already began, a correction must
+        // cross its exact-target reconciliation path. If pickup is merely
+        // queued, its missing turn reference makes dispatch fail closed below.
+        if (PendingBatchContainsPhysicalAction(_pendingToolBatch))
         {
             CompanionController.CancelJob(_pendingToolBatch.JobToken);
             Plugin.Logger.LogInfo(
@@ -321,17 +321,22 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             $"referenceId={target.ReferenceId}, netId={target.NetworkId}.");
     }
 
-    private static bool PendingBatchContainsPickup(PendingToolBatch pending)
+    private static bool PendingBatchContainsPhysicalAction(PendingToolBatch pending)
     {
         if (pending?.Calls == null)
             return false;
         for (var index = 0; index < pending.Calls.Length; index++)
         {
+            var name = pending.Calls[index]?.Call?.Name;
             if (pending.Calls[index]?.AwaitsJob == true &&
-                string.Equals(
-                    pending.Calls[index]?.Call?.Name,
-                    AgentToolCatalog.PickUpItem,
-                    StringComparison.Ordinal))
+                (string.Equals(
+                     name,
+                     AgentToolCatalog.PickUpItem,
+                     StringComparison.Ordinal) ||
+                 string.Equals(
+                     name,
+                     AgentToolCatalog.DropItem,
+                     StringComparison.Ordinal)))
             {
                 return true;
             }

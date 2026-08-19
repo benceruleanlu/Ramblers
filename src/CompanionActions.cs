@@ -142,7 +142,7 @@ internal sealed class CompanionActionCoordinator
     {
         var holder = FindHolder(JobResources.Locomotion);
         if (holder != null)
-            return AgentToolResult.Failure(holder.Name + "_in_progress");
+            return AgentToolResult.Failure(holder.ActiveName + "_in_progress");
         return _jump.Request(now, _posture.Current);
     }
 
@@ -211,11 +211,11 @@ internal sealed class CompanionActionCoordinator
         var running = FindActiveJob();
         if (running != null && !ReferenceEquals(running, job))
         {
-            failure = AgentToolResult.Failure(running.Name + "_in_progress");
+            failure = AgentToolResult.Failure(running.ActiveName + "_in_progress");
             return false;
         }
 
-        if (!TryReserve(job, out failure))
+        if (!TryReserve(job, request, out failure))
             return false;
         if (!job.TryBegin(now, request, out failure))
             return false;
@@ -291,7 +291,7 @@ internal sealed class CompanionActionCoordinator
             return null;
         for (var index = 0; index < _jobs.Length; index++)
         {
-            if (string.Equals(_jobs[index].Name, jobName, StringComparison.Ordinal))
+            if (_jobs[index].Handles(jobName))
                 return _jobs[index];
         }
 
@@ -325,9 +325,12 @@ internal sealed class CompanionActionCoordinator
         return null;
     }
 
-    private bool TryReserve(ICompanionJob job, out AgentToolResult failure)
+    private bool TryReserve(
+        ICompanionJob job,
+        CompanionJobRequest request,
+        out AgentToolResult failure)
     {
-        var wanted = job.Requires;
+        var wanted = job.RequiredFor(request);
         if ((wanted & JobResources.Locomotion) != 0 && _jump.IsQueued)
         {
             failure = AgentToolResult.Failure("jump_in_progress");
@@ -339,7 +342,7 @@ internal sealed class CompanionActionCoordinator
             var other = _jobs[index];
             if (ReferenceEquals(other, job) || (other.Held & wanted) == 0)
                 continue;
-            failure = AgentToolResult.Failure(other.Name + "_in_progress");
+            failure = AgentToolResult.Failure(other.ActiveName + "_in_progress");
             return false;
         }
 

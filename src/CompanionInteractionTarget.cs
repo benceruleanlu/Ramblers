@@ -33,6 +33,28 @@ internal sealed class CompanionInteractionTarget
     internal int ReferenceId { get; }
     internal uint NetworkId => _networkId;
 
+    /// <summary>
+    /// Freezes the exact prop already in the companion's hands. Drop has no
+    /// target parameter at the game API boundary, so this snapshot supplies the
+    /// same managed-object and network-identity guard used by pickup.
+    /// </summary>
+    internal static bool TryCaptureHeldProp(
+        Prop prop,
+        out CompanionInteractionTarget target)
+    {
+        target = null;
+        if (prop == null || prop.gameObject == null ||
+            !prop.gameObject.activeInHierarchy)
+        {
+            return false;
+        }
+
+        target = new CompanionInteractionTarget(
+            prop,
+            prop.transform.position);
+        return true;
+    }
+
     internal static bool TryResolve(
         PlayerCharacter human,
         CompanionBody body,
