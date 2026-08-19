@@ -45,6 +45,29 @@ internal sealed class CompanionJobHandle
 }
 
 /// <summary>
+/// Immutable context captured before a model-selected job is dispatched. A
+/// physical job receives the exact turn-scoped target through this boundary;
+/// it never asks the live world to reinterpret the human's reference later.
+/// </summary>
+internal sealed class CompanionJobRequest
+{
+    internal long TurnId;
+    internal CompanionInteractionTarget InteractionTarget;
+}
+
+/// <summary>
+/// The result of freezing the human's physical reference for one utterance.
+/// Failed captures are retained too, so a later physical tool reports the
+/// original boundary error instead of consulting a newer camera direction.
+/// </summary>
+internal sealed class CompanionTurnReference
+{
+    internal long TurnId;
+    internal CompanionInteractionTarget Target;
+    internal string CaptureError;
+}
+
+/// <summary>
 /// A companion action that runs across frames rather than finishing inside the
 /// tool call. The coordinator arbitrates jobs purely through this interface, so
 /// adding an action does not add branches to the coordinator.
@@ -71,7 +94,10 @@ internal interface ICompanionJob
 
     void Bind(CompanionBody body, PlayerCharacter human);
 
-    bool TryBegin(float now, out AgentToolResult failure);
+    bool TryBegin(
+        float now,
+        CompanionJobRequest request,
+        out AgentToolResult failure);
 
     void Tick(float now);
 

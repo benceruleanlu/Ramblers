@@ -24,7 +24,7 @@ internal interface IAgentAudioSink
     void SetTurnDetectionMode(AgentTurnDetectionMode mode);
     void ClearInputAudio();
     void AppendInputAudio(byte[] pcm16);
-    void CommitInputAudioAndRespond();
+    void CommitInputAudio();
     void CancelActiveResponse();
 }
 
@@ -38,6 +38,7 @@ internal sealed class RealtimeFunctionCall
 internal sealed class RealtimeFunctionCallBatch
 {
     internal string ResponseId;
+    internal long TurnId;
     internal RealtimeFunctionCall[] Calls;
 }
 
@@ -59,13 +60,15 @@ internal enum RealtimeClientEventType
 {
     AudioPacket,
     InputSpeechStarted,
-    InputSpeechStopped
+    InputSpeechStopped,
+    ResponseCompleted
 }
 
 internal sealed class RealtimeClientEvent
 {
     internal RealtimeClientEventType Type;
     internal RealtimeAudioPacket AudioPacket;
+    internal long TurnId;
 }
 
 internal sealed class RealtimeAudioTruncation
@@ -93,7 +96,8 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         new ConcurrentQueue<RealtimeClientEvent>();
     private readonly SemaphoreSlim _outboundSignal = new SemaphoreSlim(0);
     private readonly object _responseSync = new object();
-    private readonly HashSet<string> _outstandingToolBatchIds = new HashSet<string>();
+    private readonly Dictionary<string, long> _outstandingToolBatchTurns =
+        new Dictionary<string, long>();
 
     private Task _runTask;
     private volatile bool _ready;
@@ -101,6 +105,9 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
     private bool _responseActive;
     private bool _responseCreateQueued;
     private bool _responseRequested;
+    private long _responseRequestedTurnId;
+    private long _reservedResponseTurnId;
+    private long _activeResponseTurnId;
     private string _responseCreateEventId;
     private long _eventSequence;
     private bool _disposed;
@@ -173,10 +180,9 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         });
     }
 
-    public void CommitInputAudioAndRespond()
+    public void CommitInputAudio()
     {
         QueueJson(new { type = "input_audio_buffer.commit" });
-        RequestResponse();
     }
 
     public void CancelActiveResponse()
@@ -185,6 +191,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         lock (_responseSync)
         {
             _responseRequested = false;
+            _responseRequestedTurnId = 0;
             shouldCancel = _responseActive || _responseCreateQueued;
         }
 
@@ -195,8 +202,8 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
     /// <summary>
     /// Submits a batch's function outputs and continuation items. Pass false for
     /// <paramref name="requestResponse"/> to leave the response uncreated, which
-    /// the caller does while the human is still speaking; a pending request from
-    /// an earlier turn is preserved either way and fires at the next opening.
+    /// the caller does while the human is still speaking. Continuation keeps
+    /// this batch's turn id unless a newer user turn is already pending.
     /// </summary>
     internal bool CompleteFunctionCallBatch(
         string responseId,
@@ -209,7 +216,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
 
         lock (_responseSync)
         {
-            if (!_outstandingToolBatchIds.Contains(responseId))
+            if (!_outstandingToolBatchTurns.ContainsKey(responseId))
                 return false;
         }
 
@@ -256,13 +263,20 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         var shouldCreate = false;
         lock (_responseSync)
         {
-            if (!_outstandingToolBatchIds.Remove(responseId))
+            long batchTurnId;
+            if (!_outstandingToolBatchTurns.TryGetValue(
+                    responseId,
+                    out batchTurnId))
+            {
                 return false;
-            if (requestResponse)
+            }
+            _outstandingToolBatchTurns.Remove(responseId);
+            if (requestResponse && !_responseRequested)
             {
                 _responseRequested = true;
-                shouldCreate = TryReserveResponseCreate();
+                _responseRequestedTurnId = batchTurnId;
             }
+            shouldCreate = TryReserveResponseCreate();
         }
 
         if (shouldCreate)
@@ -518,7 +532,13 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                 // load-bearing: TryReserveResponseCreate refuses while a tool
                 // batch is outstanding, which is what stops a queued VAD turn
                 // from starting a response before the outputs are sent.
-                QueueFunctionCallBatch(root);
+                var completedTurnId = GetActiveResponseTurnId();
+                QueueFunctionCallBatch(root, completedTurnId);
+                _clientEvents.Enqueue(new RealtimeClientEvent
+                {
+                    Type = RealtimeClientEventType.ResponseCompleted,
+                    TurnId = completedTurnId
+                });
                 MarkResponseDone();
                 return;
             }
@@ -546,12 +566,41 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         }
     }
 
-    internal void RequestResponse()
+    /// <summary>
+    /// Requests a response for one captured human turn. A newer utterance may
+    /// replace a request that has not yet reserved a response slot; a response
+    /// already in flight retains the id it reserved.
+    /// </summary>
+    internal void RequestResponse(long turnId)
     {
         var shouldCreate = false;
         lock (_responseSync)
         {
             _responseRequested = true;
+            _responseRequestedTurnId = turnId;
+            shouldCreate = TryReserveResponseCreate();
+        }
+
+        if (shouldCreate)
+            QueueResponseCreate();
+    }
+
+    /// <summary>
+    /// Releases a held tool continuation without replacing a newer human turn
+    /// that may already be waiting for the same response slot.
+    /// </summary>
+    internal void RequestContinuation(long turnId)
+    {
+        var shouldCreate = false;
+        lock (_responseSync)
+        {
+            // A newer response reservation already includes the submitted tool
+            // outputs in conversation state. Do not queue a second response for
+            // the older continuation behind it.
+            if (_responseRequested || _responseActive || _responseCreateQueued)
+                return;
+            _responseRequested = true;
+            _responseRequestedTurnId = turnId;
             shouldCreate = TryReserveResponseCreate();
         }
 
@@ -566,6 +615,8 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             _responseActive = true;
             _responseCreateQueued = false;
             _responseCreateEventId = null;
+            _activeResponseTurnId = _reservedResponseTurnId;
+            _reservedResponseTurnId = 0;
         }
     }
 
@@ -577,6 +628,8 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             _responseActive = false;
             _responseCreateQueued = false;
             _responseCreateEventId = null;
+            _activeResponseTurnId = 0;
+            _reservedResponseTurnId = 0;
             shouldCreate = TryReserveResponseCreate();
         }
 
@@ -587,12 +640,20 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
     private bool TryReserveResponseCreate()
     {
         if (!_responseRequested || _responseActive || _responseCreateQueued ||
-            _outstandingToolBatchIds.Count > 0)
+            _outstandingToolBatchTurns.Count > 0)
             return false;
 
         _responseRequested = false;
         _responseCreateQueued = true;
+        _reservedResponseTurnId = _responseRequestedTurnId;
+        _responseRequestedTurnId = 0;
         return true;
+    }
+
+    private long GetActiveResponseTurnId()
+    {
+        lock (_responseSync)
+            return _activeResponseTurnId;
     }
 
     private void HandleResponseCreateError(
@@ -638,6 +699,13 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                 // only after response.done establishes a free response slot.
                 _responseActive = true;
                 _responseRequested = true;
+                _responseRequestedTurnId = _reservedResponseTurnId;
+                _reservedResponseTurnId = 0;
+                _activeResponseTurnId = 0;
+            }
+            else
+            {
+                _reservedResponseTurnId = 0;
             }
         }
     }
@@ -678,7 +746,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             .Replace("\u00a0", " ");
     }
 
-    private void QueueFunctionCallBatch(JsonElement root)
+    private void QueueFunctionCallBatch(JsonElement root, long turnId)
     {
         JsonElement response;
         JsonElement output;
@@ -742,10 +810,11 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             responseId = "tool_batch_" + calls[0].CallId;
 
         lock (_responseSync)
-            _outstandingToolBatchIds.Add(responseId);
+            _outstandingToolBatchTurns[responseId] = turnId;
         _functionCallBatches.Enqueue(new RealtimeFunctionCallBatch
         {
             ResponseId = responseId,
+            TurnId = turnId,
             Calls = calls.ToArray()
         });
     }
@@ -838,8 +907,11 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         _ready = false;
         lock (_responseSync)
         {
-            _outstandingToolBatchIds.Clear();
+            _outstandingToolBatchTurns.Clear();
             _responseCreateEventId = null;
+            _responseRequestedTurnId = 0;
+            _reservedResponseTurnId = 0;
+            _activeResponseTurnId = 0;
         }
         _cancellation.Cancel();
         try

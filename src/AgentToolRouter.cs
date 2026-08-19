@@ -9,7 +9,9 @@ namespace Ramblers;
 /// </summary>
 internal static class AgentToolRouter
 {
-    internal static AgentToolDispatch Execute(RealtimeFunctionCall functionCall)
+    internal static AgentToolDispatch Execute(
+        RealtimeFunctionCall functionCall,
+        CompanionTurnReference turnReference)
     {
         if (functionCall == null || string.IsNullOrEmpty(functionCall.Name))
             return AgentToolDispatch.Immediate(AgentToolResult.Failure("unknown_tool"));
@@ -29,7 +31,12 @@ internal static class AgentToolRouter
             case AgentToolCatalog.InspectReference:
                 return ExecuteJob(
                     AgentToolCatalog.InspectReference,
-                    functionCall.Arguments);
+                    functionCall.Arguments,
+                    null);
+            case AgentToolCatalog.PickUpItem:
+                return ExecutePickup(
+                    functionCall.Arguments,
+                    turnReference);
             case AgentToolCatalog.CancelAction:
                 result = ExecuteCancelAction(functionCall.Arguments);
                 break;
@@ -81,16 +88,63 @@ internal static class AgentToolRouter
     /// job reports a terminal result, so no branch here is specific to what the
     /// job actually does.
     /// </summary>
-    private static AgentToolDispatch ExecuteJob(string jobName, string arguments)
+    private static AgentToolDispatch ExecuteJob(
+        string jobName,
+        string arguments,
+        CompanionJobRequest request)
     {
         if (!IsEmptyObject(arguments))
             return AgentToolDispatch.Immediate(AgentToolResult.Failure("invalid_arguments"));
 
         AgentToolResult failure;
         CompanionJobHandle handle;
-        if (!CompanionController.TryBeginJob(jobName, out handle, out failure))
+        if (!CompanionController.TryBeginJob(
+                jobName,
+                request,
+                out handle,
+                out failure))
             return AgentToolDispatch.Immediate(failure);
         return AgentToolDispatch.Pending(handle.Token, handle.TimeoutSeconds);
+    }
+
+    private static AgentToolDispatch ExecutePickup(
+        string arguments,
+        CompanionTurnReference turnReference)
+    {
+        string target;
+        if (!TryReadOnlyStringArgument(arguments, "target", out target) ||
+            !string.Equals(
+                target,
+                "human_reference",
+                StringComparison.Ordinal))
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure("invalid_arguments"));
+        }
+
+        if (turnReference == null)
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure("human_reference_not_captured"));
+        }
+
+        if (turnReference.Target == null)
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure(
+                    string.IsNullOrEmpty(turnReference.CaptureError)
+                        ? "human_reference_not_captured"
+                        : turnReference.CaptureError));
+        }
+
+        return ExecuteJob(
+            AgentToolCatalog.PickUpItem,
+            "{}",
+            new CompanionJobRequest
+            {
+                TurnId = turnReference.TurnId,
+                InteractionTarget = turnReference.Target
+            });
     }
 
     private static AgentToolResult ExecuteCancelAction(string arguments)

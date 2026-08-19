@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace Ramblers;
@@ -22,6 +23,7 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
     {
         internal OpenAIRealtimeClient Client;
         internal string ResponseId;
+        internal long TurnId;
         internal PendingToolCall[] Calls;
         internal int JobIndex = -1;
         internal long JobToken;
@@ -33,6 +35,10 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
     private readonly GameVoiceInput _gameVoice = new GameVoiceInput();
     private readonly GameVoiceOutput _gameVoiceOutput = new GameVoiceOutput();
     private readonly LogLatch _missingKeyLog = new LogLatch();
+    private readonly Dictionary<long, CompanionTurnReference> _turnReferences =
+        new Dictionary<long, CompanionTurnReference>();
+    private readonly HashSet<long> _completedTurnIds = new HashSet<long>();
+    private readonly HashSet<long> _toolBatchTurnsThisFrame = new HashSet<long>();
     private OpenAIRealtimeClient _client;
     private PendingToolBatch _pendingToolBatch;
     private float _nextConnectAt;
@@ -40,6 +46,8 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
     private bool _continuationHeld;
     private bool _concludeJobOnAssistantAudio;
     private long _lingeringJobToken;
+    private long _heldContinuationTurnId;
+    private long _nextTurnId;
 
     public RealtimeAgentBridge(IntPtr pointer) : base(pointer)
     {
@@ -55,12 +63,17 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
 
         EnsureClient();
         DrainClientEvents();
+        var voiceEvents = _gameVoice.Tick(_client);
+        if ((voiceEvents & GameVoiceTickEvents.ManualTurnStarted) != 0)
+            HandleHumanSpeechStarted("manual_ptt");
+        if ((voiceEvents & GameVoiceTickEvents.ManualTurnSubmitted) != 0)
+            CaptureTurnAndRequestResponse("manual_ptt");
+        DrainFunctionCallBatches();
+        CleanupCompletedTurnReferences();
         PollPendingToolBatch();
 
         // Listening never stops for a tool call. Response ordering is held by
         // the outstanding-batch guard in the client, not by going deaf.
-        if (_gameVoice.Tick(_client))
-            InterruptAssistantSpeech();
         ReleaseHeldContinuation();
         _gameVoiceOutput.Tick();
 
@@ -92,10 +105,12 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             return;
 
         _continuationHeld = false;
-        // RequestResponse only latches and tries to reserve, so overlapping with
-        // a commit that already asked for one is refused rather than doubled.
-        _client.RequestResponse();
-        Plugin.Logger.LogInfo("[AGENT] CONTINUATION_RELEASED.");
+        // A continuation request is refused when a newer user response already
+        // owns or is waiting for the response slot.
+        _client.RequestContinuation(_heldContinuationTurnId);
+        Plugin.Logger.LogInfo(
+            $"[AGENT] CONTINUATION_RELEASED turnId={_heldContinuationTurnId}.");
+        _heldContinuationTurnId = 0;
     }
 
     private void EnsureClient()
@@ -106,6 +121,9 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         if (_client != null)
         {
             CancelPendingToolBatch();
+            _turnReferences.Clear();
+            _completedTurnIds.Clear();
+            _toolBatchTurnsThisFrame.Clear();
             _gameVoice.Stop(_client);
             _client.Dispose();
             _client = null;
@@ -167,27 +185,25 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         while (_client.TryDequeueLog(out message))
             Plugin.Logger.LogInfo($"[AGENT] {message}");
 
-        RealtimeFunctionCallBatch batch;
-        while (_pendingToolBatch == null &&
-               _client.TryDequeueFunctionCallBatch(out batch))
-        {
-            BeginToolBatch(batch);
-        }
-
         RealtimeClientEvent clientEvent;
         while (_client.TryDequeueClientEvent(out clientEvent))
         {
             if (clientEvent.Type == RealtimeClientEventType.InputSpeechStarted)
             {
                 _userSpeaking = true;
-                InterruptAssistantSpeech();
+                HandleHumanSpeechStarted("semantic_vad");
             }
             else if (clientEvent.Type == RealtimeClientEventType.InputSpeechStopped)
             {
                 _userSpeaking = false;
                 // Refused while a tool batch is outstanding, and latched rather
                 // than lost, so this turn is answered once the outputs land.
-                _client.RequestResponse();
+                CaptureTurnAndRequestResponse("semantic_vad");
+            }
+            else if (clientEvent.Type == RealtimeClientEventType.ResponseCompleted)
+            {
+                if (clientEvent.TurnId > 0)
+                    _completedTurnIds.Add(clientEvent.TurnId);
             }
             else if (clientEvent.Type == RealtimeClientEventType.AudioPacket)
             {
@@ -205,6 +221,124 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// Function calls are drained only after both semantic-VAD events and the
+    /// local push-to-talk edge have been sampled. That ordering makes a queued
+    /// old physical call observe reference invalidation before dispatch.
+    /// </summary>
+    private void DrainFunctionCallBatches()
+    {
+        if (_client == null)
+            return;
+
+        _toolBatchTurnsThisFrame.Clear();
+        RealtimeFunctionCallBatch batch;
+        while (_pendingToolBatch == null &&
+               _client.TryDequeueFunctionCallBatch(out batch))
+        {
+            if (batch != null && batch.TurnId > 0)
+                _toolBatchTurnsThisFrame.Add(batch.TurnId);
+            BeginToolBatch(batch);
+        }
+    }
+
+    private void CleanupCompletedTurnReferences()
+    {
+        if (_completedTurnIds.Count == 0)
+            return;
+
+        var completed = new long[_completedTurnIds.Count];
+        _completedTurnIds.CopyTo(completed);
+        _completedTurnIds.Clear();
+        for (var index = 0; index < completed.Length; index++)
+        {
+            var turnId = completed[index];
+            // A tool continuation is still part of this same user turn. Keep
+            // its frozen referent until a later response completes without a
+            // function-call batch or new speech invalidates it.
+            if (_toolBatchTurnsThisFrame.Contains(turnId))
+                continue;
+            _turnReferences.Remove(turnId);
+        }
+    }
+
+    private void HandleHumanSpeechStarted(string source)
+    {
+        var invalidated = _turnReferences.Count;
+        _turnReferences.Clear();
+
+        // If the prior turn's pickup already began, a correction must cross
+        // the same exact-target cancellation path. If it is merely queued, its
+        // missing turn reference will make dispatch fail closed below.
+        if (PendingBatchContainsPickup(_pendingToolBatch))
+        {
+            CompanionController.CancelJob(_pendingToolBatch.JobToken);
+            Plugin.Logger.LogInfo(
+                $"[AGENT] PHYSICAL_CALL_INTERRUPTED source={source}, " +
+                $"turnId={_pendingToolBatch.TurnId}.");
+        }
+
+        InterruptAssistantSpeech();
+        if (invalidated > 0)
+        {
+            Plugin.Logger.LogInfo(
+                $"[AGENT] TURN_REFERENCE_INVALIDATED source={source}, " +
+                $"count={invalidated}.");
+        }
+    }
+
+    private void CaptureTurnAndRequestResponse(string source)
+    {
+        if (_client == null)
+            return;
+
+        var turnId = ++_nextTurnId;
+        CompanionInteractionTarget target;
+        string captureError;
+        CompanionController.TryCaptureInteractionTarget(
+            out target,
+            out captureError);
+        _turnReferences[turnId] = new CompanionTurnReference
+        {
+            TurnId = turnId,
+            Target = target,
+            CaptureError = captureError
+        };
+        _client.RequestResponse(turnId);
+
+        if (target == null)
+        {
+            Plugin.Logger.LogInfo(
+                $"[AGENT] TURN_REFERENCE_CAPTURED source={source}, " +
+                $"turnId={turnId}, status=unavailable, " +
+                $"reason={captureError ?? "human_reference_not_captured"}.");
+            return;
+        }
+
+        Plugin.Logger.LogInfo(
+            $"[AGENT] TURN_REFERENCE_CAPTURED source={source}, " +
+            $"turnId={turnId}, status=prop, " +
+            $"referenceId={target.ReferenceId}, netId={target.NetworkId}.");
+    }
+
+    private static bool PendingBatchContainsPickup(PendingToolBatch pending)
+    {
+        if (pending?.Calls == null)
+            return false;
+        for (var index = 0; index < pending.Calls.Length; index++)
+        {
+            if (pending.Calls[index]?.AwaitsJob == true &&
+                string.Equals(
+                    pending.Calls[index]?.Call?.Name,
+                    AgentToolCatalog.PickUpItem,
+                    StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void BeginToolBatch(RealtimeFunctionCallBatch batch)
     {
         if (batch?.Calls == null || batch.Calls.Length == 0)
@@ -214,9 +348,13 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         {
             Client = _client,
             ResponseId = batch.ResponseId,
+            TurnId = batch.TurnId,
             Calls = new PendingToolCall[batch.Calls.Length],
             StartedAt = Time.realtimeSinceStartup
         };
+
+        CompanionTurnReference turnReference;
+        _turnReferences.TryGetValue(batch.TurnId, out turnReference);
 
         for (var index = 0; index < batch.Calls.Length; index++)
         {
@@ -227,7 +365,9 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             AgentToolDispatch dispatch;
             try
             {
-                dispatch = AgentToolRouter.Execute(functionCall);
+                dispatch = AgentToolRouter.Execute(
+                    functionCall,
+                    turnReference);
             }
             catch (Exception exception)
             {
@@ -248,7 +388,8 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
                 pending.TimeoutSeconds = dispatch.TimeoutSeconds;
                 Plugin.Logger.LogInfo(
                     $"[AGENT] CALL name={functionCall.Name}, " +
-                    $"arguments={functionCall.Arguments}, result=pending");
+                    $"arguments={functionCall.Arguments}, " +
+                    $"turnId={batch.TurnId}, result=pending");
                 continue;
             }
 
@@ -265,7 +406,7 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         _pendingToolBatch = pending;
         Plugin.Logger.LogInfo(
             $"[AGENT] TOOL_BATCH_DEFERRED responseId={pending.ResponseId}, " +
-            $"calls={pending.Calls.Length}.");
+            $"turnId={pending.TurnId}, calls={pending.Calls.Length}.");
     }
 
     private void PollPendingToolBatch()
@@ -332,7 +473,10 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         if (sent && humanSpeaking)
         {
             _continuationHeld = true;
-            Plugin.Logger.LogInfo("[AGENT] CONTINUATION_HELD reason=human_speaking.");
+            _heldContinuationTurnId = pending.TurnId;
+            Plugin.Logger.LogInfo(
+                $"[AGENT] CONTINUATION_HELD reason=human_speaking, " +
+                $"turnId={pending.TurnId}.");
         }
         var continuationCount = pending.Continuation == null
             ? 0
@@ -346,7 +490,8 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         {
             Plugin.Logger.LogInfo(
                 $"[AGENT] TOOL_BATCH_COMPLETED responseId={pending.ResponseId}, " +
-                $"calls={pending.Calls.Length}, continuation={continuationCount}.");
+                $"turnId={pending.TurnId}, calls={pending.Calls.Length}, " +
+                $"continuation={continuationCount}.");
         }
 
         if (ReferenceEquals(_pendingToolBatch, pending))
@@ -357,6 +502,8 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             // with what it just looked at.
             _concludeJobOnAssistantAudio = continuationCount > 0;
             _lingeringJobToken = continuationCount > 0 ? pending.JobToken : 0;
+            if (continuationCount == 0 && pending.JobToken != 0)
+                CompanionController.ConcludeJob(pending.JobToken);
         }
     }
 
@@ -378,6 +525,7 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             $"[AGENT] TOOL_BATCH_CANCELLED responseId={_pendingToolBatch.ResponseId}.");
         _pendingToolBatch = null;
         _continuationHeld = false;
+        _heldContinuationTurnId = 0;
         _concludeJobOnAssistantAudio = false;
         _lingeringJobToken = 0;
     }
@@ -399,7 +547,11 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         _lingeringJobToken = 0;
         _concludeJobOnAssistantAudio = false;
         _continuationHeld = false;
+        _heldContinuationTurnId = 0;
         _userSpeaking = false;
+        _turnReferences.Clear();
+        _completedTurnIds.Clear();
+        _toolBatchTurnsThisFrame.Clear();
         _gameVoice.Stop(_client);
         _gameVoiceOutput.Stop();
         if (_client == null)
