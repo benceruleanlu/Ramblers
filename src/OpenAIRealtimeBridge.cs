@@ -298,12 +298,38 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         CompanionController.TryCaptureInteractionTarget(
             out target,
             out captureError);
+        CompanionInspectionCandidates inspectionCandidates;
+        string inspectionCaptureError;
+        CompanionController.TryCaptureInspectionCandidates(
+            out inspectionCandidates,
+            out inspectionCaptureError);
+        CompanionAwarenessTurnContext awarenessContext;
+        string awarenessCaptureError;
+        CompanionController.TryTakeAwarenessTurnContext(
+            out awarenessContext,
+            out awarenessCaptureError);
         _turnReferences[turnId] = new CompanionTurnReference
         {
             TurnId = turnId,
             Target = target,
-            CaptureError = captureError
+            CaptureError = captureError,
+            InspectionCandidates = inspectionCandidates,
+            InspectionCaptureError = inspectionCaptureError
         };
+        var awarenessQueued = false;
+        if (awarenessContext != null)
+        {
+            try
+            {
+                awarenessQueued = _client.QueueTurnContext(awarenessContext.Message);
+            }
+            catch (Exception exception)
+            {
+                awarenessCaptureError = "awareness_context_queue_failed";
+                Plugin.Logger.LogWarning(
+                    $"[AWARENESS] TURN_CONTEXT_QUEUE_FAILED error={exception.Message}");
+            }
+        }
         _client.RequestResponse(turnId);
 
         if (target == null)
@@ -312,13 +338,54 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
                 $"[AGENT] TURN_REFERENCE_CAPTURED source={source}, " +
                 $"turnId={turnId}, status=unavailable, " +
                 $"reason={captureError ?? "human_reference_not_captured"}.");
-            return;
+        }
+        else
+        {
+            Plugin.Logger.LogInfo(
+                $"[AGENT] TURN_REFERENCE_CAPTURED source={source}, " +
+                $"turnId={turnId}, status=prop, " +
+                $"referenceId={target.ReferenceId}, netId={target.NetworkId}.");
         }
 
-        Plugin.Logger.LogInfo(
-            $"[AGENT] TURN_REFERENCE_CAPTURED source={source}, " +
-            $"turnId={turnId}, status=prop, " +
-            $"referenceId={target.ReferenceId}, netId={target.NetworkId}.");
+        if (inspectionCandidates == null)
+        {
+            Plugin.Logger.LogInfo(
+                $"[AGENT] TURN_INSPECTION_REFERENCES_CAPTURED source={source}, " +
+                $"turnId={turnId}, status=unavailable, " +
+                $"reason={inspectionCaptureError ?? "inspection_reference_not_captured"}.");
+        }
+        else
+        {
+            Plugin.Logger.LogInfo(
+                $"[AGENT] TURN_INSPECTION_REFERENCES_CAPTURED source={source}, " +
+                $"turnId={turnId}, gazeAvailable={inspectionCandidates.GazeAvailable}, " +
+                $"gazeRayHit={inspectionCandidates.GazeRayHit}, " +
+                $"gazeReason={inspectionCandidates.GazeCaptureError ?? "none"}, " +
+                $"heldItemAvailable={inspectionCandidates.HeldItemAvailable}, " +
+                $"heldItemReason={inspectionCandidates.HeldItemCaptureError ?? "none"}, " +
+                $"heldReferenceId={inspectionCandidates.HeldItemReferenceId}, " +
+                $"heldNetId={inspectionCandidates.HeldItemNetworkId}.");
+        }
+
+        if (!awarenessQueued)
+        {
+            Plugin.Logger.LogInfo(
+                $"[AWARENESS] TURN_CONTEXT_CAPTURED source={source}, " +
+                $"turnId={turnId}, status=unavailable, " +
+                $"reason={awarenessCaptureError ?? "awareness_context_not_captured"}.");
+        }
+        else
+        {
+            Plugin.Logger.LogInfo(
+                $"[AWARENESS] TURN_CONTEXT_CAPTURED source={source}, " +
+                $"turnId={turnId}, status=queued, " +
+                $"textChars={awarenessContext.Message.Text.Length}, " +
+                $"events={awarenessContext.EventCount}, " +
+                $"nearbyProps={awarenessContext.NearbyPropCount}, " +
+                $"nearbyPlayers={awarenessContext.NearbyPlayerCount}, " +
+                $"visualAttached={awarenessContext.HasImage}, " +
+                $"visualAgeSeconds={awarenessContext.VisualAgeSeconds:F1}.");
+        }
     }
 
     private static bool PendingBatchContainsPhysicalAction(PendingToolBatch pending)

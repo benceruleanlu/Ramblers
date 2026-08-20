@@ -75,20 +75,24 @@ internal sealed class CompanionJobRequest
     internal string ActionName;
     internal long TurnId;
     internal CompanionInteractionTarget InteractionTarget;
+    internal CompanionInspectionReferent InspectionReferent;
     internal CompanionKickStrength KickStrength;
     internal CompanionKickDirection KickDirection;
 }
 
 /// <summary>
-/// The result of freezing the human's physical reference for one utterance.
-/// Failed captures are retained too, so a later physical tool reports the
-/// original boundary error instead of consulting a newer camera direction.
+/// The result of freezing the human's physical and visual references for one
+/// utterance. Failed captures are retained too, so a later tool reports the
+/// original boundary error instead of consulting a newer camera direction or
+/// held object.
 /// </summary>
 internal sealed class CompanionTurnReference
 {
     internal long TurnId;
     internal CompanionInteractionTarget Target;
     internal string CaptureError;
+    internal CompanionInspectionCandidates InspectionCandidates;
+    internal string InspectionCaptureError;
 }
 
 /// <summary>

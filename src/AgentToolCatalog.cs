@@ -84,12 +84,21 @@ internal static class AgentToolCatalog
             type = "function",
             name = InspectReference,
             description =
-                "Look where the human is looking and capture one image from the companion's own point of view. Use when the human asks you to look at, inspect, identify, read, or comment on something they are showing you. The visual result arrives after this tool completes.",
+                "Look at one reference the human indicated and capture an image from your own point of view. Infer the target silently: use human_held_item for deictic requests such as 'look at this', 'what am I holding?', or something the human says they are holding or showing you; use human_gaze for a place, direction, scene, or 'over there'. Never ask the human to choose or announce this internal distinction. The visual result arrives after this tool completes.",
             parameters = new
             {
                 type = "object",
-                properties = new { },
-                required = new string[0],
+                properties = new
+                {
+                    target = new
+                    {
+                        type = "string",
+                        description =
+                            "Silently inferred visual referent for this utterance.",
+                        @enum = new[] { "human_held_item", "human_gaze" }
+                    }
+                },
+                required = new[] { "target" },
                 additionalProperties = false
             }
         },

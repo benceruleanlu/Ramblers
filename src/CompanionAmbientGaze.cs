@@ -53,6 +53,8 @@ internal sealed class CompanionAmbientGaze
     private const float OverrideSettleSeconds = 0.7f;
     private const float ConversationSettleSeconds = 0.9f;
     private const float MovingIntentThreshold = 0.01f;
+    private const float VisualMemorySettleSeconds = 0.35f;
+    private const float VisualMemoryAimToleranceDegrees = 6f;
 
     private enum GazeIntent
     {
@@ -73,6 +75,8 @@ internal sealed class CompanionAmbientGaze
     private int _consecutiveGlances;
     private Vector3 _glanceTarget;
     private bool _glanceAnchored;
+    private float _glanceStartedAt;
+    private bool _glanceObservationOffered;
     private bool _conversationActive;
     private float _peakHeadYaw;
 
@@ -90,6 +94,8 @@ internal sealed class CompanionAmbientGaze
         _consecutiveGlances = 0;
         _glanceTarget = Vector3.zero;
         _glanceAnchored = false;
+        _glanceStartedAt = 0f;
+        _glanceObservationOffered = false;
         _conversationActive = false;
     }
 
@@ -148,6 +154,45 @@ internal sealed class CompanionAmbientGaze
             _intent == GazeIntent.Glance ? _glanceTarget : humanHead);
     }
 
+    /// <summary>
+    /// Offers one observation only after the existing visible ambient glance
+    /// owns the gaze and has settled. Taking the candidate does not capture or
+    /// send anything; the awareness layer applies its own novelty and cadence
+    /// gates before retaining a frame.
+    /// </summary>
+    internal bool TryTakeSettledGlance(
+        float now,
+        out CompanionAmbientObservationCandidate candidate)
+    {
+        candidate = null;
+        if (_intent != GazeIntent.Glance || _conversationActive ||
+            _glanceObservationOffered ||
+            now - _glanceStartedAt < VisualMemorySettleSeconds ||
+            _attention.IsOverridden(GazeChannel.Ambient) ||
+            !_attention.IsAimWithin(
+                GazeChannel.Ambient,
+                VisualMemoryAimToleranceDegrees,
+                VisualMemoryAimToleranceDegrees))
+        {
+            return false;
+        }
+
+        var direction = _attention.AimDirectionFor(GazeChannel.Ambient);
+        if (direction.sqrMagnitude < 0.0001f && _body != null)
+            direction = _glanceTarget - _body.HeadPosition;
+        if (direction.sqrMagnitude < 0.0001f)
+            return false;
+
+        _glanceObservationOffered = true;
+        candidate = new CompanionAmbientObservationCandidate
+        {
+            TargetPoint = _glanceTarget,
+            ViewDirection = direction.normalized,
+            Anchored = _glanceAnchored
+        };
+        return true;
+    }
+
     internal void Release()
     {
         _body = null;
@@ -157,6 +202,8 @@ internal sealed class CompanionAmbientGaze
         _consecutiveGlances = 0;
         _glanceTarget = Vector3.zero;
         _glanceAnchored = false;
+        _glanceStartedAt = 0f;
+        _glanceObservationOffered = false;
         _conversationActive = false;
         _peakHeadYaw = 0f;
         _attention.ClearTarget(GazeChannel.Ambient);
@@ -167,6 +214,8 @@ internal sealed class CompanionAmbientGaze
         _intent = GazeIntent.Attend;
         _intentUntil = until;
         _consecutiveGlances = 0;
+        _glanceStartedAt = 0f;
+        _glanceObservationOffered = false;
         // An inspection's own turn is not this habit's residual to report.
         _peakHeadYaw = 0f;
         _attention.SetTarget(GazeChannel.Ambient, humanHead);
@@ -186,6 +235,8 @@ internal sealed class CompanionAmbientGaze
         {
             _intent = GazeIntent.Glance;
             _consecutiveGlances++;
+            _glanceStartedAt = now;
+            _glanceObservationOffered = false;
             var glanceSeconds = NextRange(MinGlanceSeconds, MaxGlanceSeconds);
             _intentUntil = now + glanceSeconds;
             Plugin.Logger.LogInfo(
@@ -199,6 +250,8 @@ internal sealed class CompanionAmbientGaze
 
         _intent = GazeIntent.Attend;
         _consecutiveGlances = 0;
+        _glanceStartedAt = 0f;
+        _glanceObservationOffered = false;
         var attendSeconds = NextRange(MinAttendSeconds, MaxAttendSeconds);
         _intentUntil = now + attendSeconds;
         Plugin.Logger.LogInfo(

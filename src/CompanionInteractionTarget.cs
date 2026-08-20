@@ -164,6 +164,24 @@ internal sealed class CompanionInteractionTarget
         return true;
     }
 
+    /// <summary>
+    /// Resolves the same frozen prop for visual inspection. A human-held prop
+    /// may be flagged as inventory by the game, so unlike pickup navigation the
+    /// visual path permits that state while retaining exact identity.
+    /// </summary>
+    internal bool TryGetCurrentInspectionPoint(out Vector3 point)
+    {
+        point = Vector3.zero;
+        if (!IsStillTheSameProp(Prop) || Prop.gameObject == null ||
+            !Prop.gameObject.activeInHierarchy)
+        {
+            return false;
+        }
+
+        point = Prop.transform.TransformPoint(_localHitPoint);
+        return true;
+    }
+
     private static Transform ResolveHumanViewTransform(PlayerCharacter human)
     {
         if (human != null && human.cameraMinder != null)

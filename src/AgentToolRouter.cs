@@ -29,10 +29,9 @@ internal static class AgentToolRouter
                 result = ExecuteJump(functionCall.Arguments);
                 break;
             case AgentToolCatalog.InspectReference:
-                return ExecuteJob(
-                    AgentToolCatalog.InspectReference,
+                return ExecuteInspectionJob(
                     functionCall.Arguments,
-                    null);
+                    turnReference);
             case AgentToolCatalog.PickUpItem:
                 return ExecuteReferencedItemJob(
                     AgentToolCatalog.PickUpItem,
@@ -159,6 +158,62 @@ internal static class AgentToolRouter
             {
                 TurnId = turnReference.TurnId,
                 InteractionTarget = turnReference.Target
+            });
+    }
+
+    private static AgentToolDispatch ExecuteInspectionJob(
+        string arguments,
+        CompanionTurnReference turnReference)
+    {
+        string target;
+        if (!TryReadOnlyStringArgument(arguments, "target", out target))
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure("invalid_arguments"));
+        }
+
+        CompanionInspectionSource source;
+        if (string.Equals(target, "human_held_item", StringComparison.Ordinal))
+        {
+            source = CompanionInspectionSource.HumanHeldItem;
+        }
+        else if (string.Equals(target, "human_gaze", StringComparison.Ordinal))
+        {
+            source = CompanionInspectionSource.HumanGaze;
+        }
+        else
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure("invalid_arguments"));
+        }
+
+        if (turnReference == null || turnReference.InspectionCandidates == null)
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure(
+                    turnReference?.InspectionCaptureError ??
+                    "inspection_reference_not_captured"));
+        }
+
+        CompanionInspectionReferent referent;
+        string selectionError;
+        if (!turnReference.InspectionCandidates.TrySelect(
+                source,
+                out referent,
+                out selectionError))
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure(
+                    selectionError ?? "inspection_reference_unavailable"));
+        }
+
+        return ExecuteJob(
+            AgentToolCatalog.InspectReference,
+            "{}",
+            new CompanionJobRequest
+            {
+                TurnId = turnReference.TurnId,
+                InspectionReferent = referent
             });
     }
 

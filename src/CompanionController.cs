@@ -14,7 +14,9 @@ namespace Ramblers;
 internal sealed class CompanionController : MonoBehaviour
 {
     private readonly CompanionActionCoordinator _actions = new CompanionActionCoordinator();
+    private readonly CompanionAwareness _awareness = new CompanionAwareness();
     private readonly LogLatch _verificationLog = new LogLatch();
+    private readonly LogLatch _awarenessLateLog = new LogLatch();
 
     private CompanionBody _body;
     private float _nextPoll;
@@ -137,6 +139,73 @@ internal sealed class CompanionController : MonoBehaviour
             body,
             out target,
             out error);
+    }
+
+    /// <summary>
+    /// Freezes both visual meanings available to the current utterance: the
+    /// human's gaze point and the exact prop already in their hands.
+    /// </summary>
+    internal static bool TryCaptureInspectionCandidates(
+        out CompanionInspectionCandidates candidates,
+        out string error)
+    {
+        candidates = null;
+        error = null;
+
+        var controller = _activeController;
+        var body = controller == null ? null : controller._body;
+        if (body == null || !body.IsAlive || !controller._hasSpawnedBot)
+        {
+            error = "bot_not_spawned";
+            return false;
+        }
+
+        var human = WorldManager.localPlayerCharacter;
+        if (human == null || human.gameObject == body.GameObject)
+        {
+            error = "human_player_unavailable";
+            return false;
+        }
+
+        return CompanionInspectionCandidates.TryCapture(
+            human,
+            body,
+            out candidates,
+            out error);
+    }
+
+    /// <summary>
+    /// Freezes one compact nonverbal world snapshot for the current utterance
+    /// and consumes at most one fresh passive visual-memory frame.
+    /// </summary>
+    internal static bool TryTakeAwarenessTurnContext(
+        out CompanionAwarenessTurnContext context,
+        out string error)
+    {
+        context = null;
+        error = null;
+        var controller = _activeController;
+        var body = controller == null ? null : controller._body;
+        if (body == null || !body.IsAlive || !controller._hasSpawnedBot)
+        {
+            error = "bot_not_spawned";
+            return false;
+        }
+
+        try
+        {
+            return controller._awareness.TryTakeTurnContext(
+                Time.realtimeSinceStartup,
+                out context,
+                out error);
+        }
+        catch (Exception exception)
+        {
+            error = "awareness_context_capture_failed";
+            Plugin.Logger.LogWarning(
+                $"[AWARENESS] TURN_CONTEXT_FAILED error={exception.Message}");
+            return false;
+        }
     }
 
     internal static bool TryTakeJobCompletion(
@@ -271,6 +340,7 @@ internal sealed class CompanionController : MonoBehaviour
             if (now >= _verifyAt && _verificationLog.ShouldLog())
                 LogVerification();
             _actions.TickFrame(now);
+            _awareness.Tick(now);
             return;
         }
 
@@ -313,9 +383,10 @@ internal sealed class CompanionController : MonoBehaviour
         if (_body == null || !_body.IsAlive)
             return;
 
+        var now = Time.realtimeSinceStartup;
         try
         {
-            _actions.TickLateFrame(Time.realtimeSinceStartup);
+            _actions.TickLateFrame(now);
         }
         catch (Exception exception)
         {
@@ -323,6 +394,23 @@ internal sealed class CompanionController : MonoBehaviour
                 "action_execution_failed",
                 Time.realtimeSinceStartup);
             Plugin.Logger.LogError($"[ACTION] Job update failed: {exception}");
+            return;
+        }
+
+        try
+        {
+            CompanionAmbientObservationCandidate candidate;
+            if (_actions.TryTakeAmbientObservation(now, out candidate))
+                _awareness.TryRememberPassiveView(now, candidate);
+            _awarenessLateLog.Reset();
+        }
+        catch (Exception exception)
+        {
+            if (_awarenessLateLog.ShouldLog())
+            {
+                Plugin.Logger.LogWarning(
+                    $"[AWARENESS] PASSIVE_VIEW_UPDATE_FAILED error={exception.Message}");
+            }
         }
     }
 
@@ -374,6 +462,16 @@ internal sealed class CompanionController : MonoBehaviour
             _activeJobName = null;
             _hasSpawnedBot = true;
             _actions.Bind(_body, localPlayer, now);
+            try
+            {
+                _awareness.Bind(_body, localPlayer, _actions, now);
+            }
+            catch (Exception exception)
+            {
+                _awareness.Release();
+                Plugin.Logger.LogWarning(
+                    $"[AWARENESS] BIND_FAILED error={exception.Message}");
+            }
 
             _verifyAt = now + 2f;
             Plugin.Logger.LogInfo(
@@ -393,18 +491,21 @@ internal sealed class CompanionController : MonoBehaviour
             }
             _body = null;
             _hasSpawnedBot = false;
+            _awareness.Release();
             _actions.Release();
         }
     }
 
     private void ResetAfterBotDestroyed()
     {
+        _awareness.Release();
         _actions.Release();
         _body = null;
         _hasSpawnedBot = false;
         _activeJobToken = 0;
         _activeJobName = null;
         _verificationLog.Reset();
+        _awarenessLateLog.Reset();
         Plugin.Logger.LogInfo("[RAMBLERS] Companion left the scene; controller state reset.");
     }
 
@@ -418,6 +519,7 @@ internal sealed class CompanionController : MonoBehaviour
         try
         {
             _actions.StopQuietly();
+            _awareness.Release();
             _actions.Release();
         }
         catch

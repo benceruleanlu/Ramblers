@@ -284,6 +284,30 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         return true;
     }
 
+    /// <summary>
+    /// Adds private nonverbal game perception to the default conversation
+    /// without creating a response. The bridge queues this immediately before
+    /// the response.create for the corresponding human utterance.
+    /// </summary>
+    internal bool QueueTurnContext(AgentContinuationItem item)
+    {
+        var content = BuildContinuationContent(item);
+        if (content == null)
+            return false;
+        QueueJson(new
+        {
+            event_id = NextEventId("game_context"),
+            type = "conversation.item.create",
+            item = new
+            {
+                type = "message",
+                role = "user",
+                content
+            }
+        });
+        return true;
+    }
+
     internal void TruncateAudio(RealtimeAudioTruncation truncation)
     {
         if (truncation == null || string.IsNullOrEmpty(truncation.ItemId))

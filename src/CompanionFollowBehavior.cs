@@ -89,6 +89,8 @@ internal sealed class CompanionFollowBehavior
 
     /// <summary>Whether a follow intent is outstanding, suspended or not.</summary>
     internal bool IsRequested => _followRequested;
+    internal bool IsCarried => _bodyIsCarried;
+    internal string StateLabel => _state.ToString().ToLowerInvariant();
 
     internal void Bind(
         CompanionBody body,

@@ -3,8 +3,8 @@ using UnityEngine;
 namespace Ramblers;
 
 /// <summary>
-/// A bounded shared-attention job: acknowledge the human, latch the point under
-/// their gaze, visibly turn toward it, then capture one bot-eye frame.
+/// A bounded shared-attention job: acknowledge the human, visibly turn toward
+/// the turn-bound referent the model selected, then capture one bot-eye frame.
 /// </summary>
 internal sealed class CompanionInspectionBehavior : ICompanionJob
 {
@@ -22,9 +22,6 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
     private const float ReferenceSettleSeconds = 0.10f;
     private const float ReferenceHoldSeconds = 3.00f;
     private const float ReferenceAimToleranceDegrees = 4f;
-    private const float MaximumReferenceDistance = 40f;
-    private const float SelfHitAdvance = 0.02f;
-    private const int MaximumRaycastSteps = 8;
 
     // The gaze work is bounded by the constants above at roughly two seconds,
     // so this only has to cover a stalled frame loop.
@@ -47,6 +44,7 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
     private float _referenceAlignedAt;
     private Vector3 _referencePoint;
     private bool _referenceRayHit;
+    private CompanionInspectionReferent _inspectionReferent;
     private CompanionJobCompletion _completion;
 
     internal CompanionInspectionBehavior(CompanionAttention attention)
@@ -105,6 +103,7 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
         _referenceAlignedAt = -1f;
         _referencePoint = Vector3.zero;
         _referenceRayHit = false;
+        _inspectionReferent = null;
     }
 
     public bool TryBegin(
@@ -132,13 +131,29 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
             return false;
         }
 
+        var referent = request == null ? null : request.InspectionReferent;
+        Vector3 referencePoint;
+        if (referent == null || !referent.TryGetCurrentPoint(out referencePoint))
+        {
+            failure = AgentToolResult.Failure(
+                referent == null
+                    ? "inspection_reference_unavailable"
+                    : referent.UnavailableError);
+            return false;
+        }
+
+        _inspectionReferent = referent;
+        _referencePoint = referencePoint;
+        _referenceRayHit = referent.GazeRayHit;
         _state = InspectionState.AcknowledgingHuman;
         _stateStartedAt = now;
         _referenceAlignedAt = -1f;
         _attention.SetTarget(
             GazeChannel.Inspection,
             CompanionBody.HeadPositionOf(human));
-        Plugin.Logger.LogInfo("[VISION] INSPECTION_STARTED phase=look_at_human.");
+        Plugin.Logger.LogInfo(
+            $"[VISION] INSPECTION_STARTED phase=look_at_human, " +
+            $"referenceSource={_inspectionReferent.SourceLabel}.");
         return true;
     }
 
@@ -149,6 +164,12 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
 
         if (_state == InspectionState.HoldingReference)
         {
+            Vector3 heldPoint;
+            if (_inspectionReferent != null &&
+                _inspectionReferent.TryGetCurrentPoint(out heldPoint))
+            {
+                _referencePoint = heldPoint;
+            }
             _attention.SetTarget(GazeChannel.Inspection, _referencePoint);
             if (now - _stateStartedAt >= ReferenceHoldSeconds)
                 EndAttention();
@@ -185,13 +206,10 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
                 return;
             }
 
-            if (!TryResolveReference(
-                    human,
-                    _body,
-                    out _referencePoint,
-                    out _referenceRayHit))
+            string referenceError;
+            if (!TryRefreshReferencePoint(out referenceError))
             {
-                CompleteFailure("human_gaze_unavailable");
+                CompleteFailure(referenceError);
                 return;
             }
 
@@ -200,13 +218,18 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
             _referenceAlignedAt = -1f;
             _attention.SetTarget(GazeChannel.Inspection, _referencePoint);
             Plugin.Logger.LogInfo(
-                $"[VISION] REFERENCE_LATCHED source=" +
-                $"{(_referenceRayHit ? "raycast_hit" : "gaze_fallback")}, " +
+                $"[VISION] REFERENCE_LATCHED source={_inspectionReferent.SourceLabel}, " +
                 $"target={_referencePoint}, glanceSeconds={glanceSeconds:F2}, " +
                 $"glanceTimedOut={glanceSeconds >= MaximumHumanGlanceSeconds}.");
             return;
         }
 
+        string refreshError;
+        if (!TryRefreshReferencePoint(out refreshError))
+        {
+            CompleteFailure(refreshError);
+            return;
+        }
         _attention.SetTarget(GazeChannel.Inspection, _referencePoint);
         var lookSeconds = now - _stateStartedAt;
         if (lookSeconds < MinimumReferenceLookSeconds)
@@ -276,6 +299,7 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
         _referenceAlignedAt = -1f;
         _referencePoint = Vector3.zero;
         _referenceRayHit = false;
+        _inspectionReferent = null;
         _attention.ClearTarget(GazeChannel.Inspection);
     }
 
@@ -285,6 +309,13 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
         float lookSeconds,
         bool alignmentTimedOut)
     {
+        string refreshError;
+        if (!TryRefreshReferencePoint(out refreshError))
+        {
+            CompleteFailure(refreshError);
+            return;
+        }
+
         CompanionVisionObservation observation;
         string error;
         if (!CompanionVisionCapture.TryCapture(
@@ -310,7 +341,9 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
             Continuation = new[]
             {
                 AgentContinuationItem.FromImage(
-                    DescribeObservation(observation),
+                    DescribeObservation(
+                        observation,
+                        _inspectionReferent.SourceLabel),
                     observation.ImageBytes,
                     observation.MediaType)
             }
@@ -322,6 +355,7 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
             $"imageBytes={observation.ImageBytes.Length}, " +
             $"base64Bytes={((observation.ImageBytes.Length + 2) / 3) * 4}, " +
             $"mediaType={observation.MediaType}, lookSeconds={lookSeconds:F2}, " +
+            $"referenceSource={_inspectionReferent.SourceLabel}, " +
             $"encodingQuality={observation.EncodingQuality}, " +
             $"fieldOfViewMatched={observation.FieldOfViewMatched}, " +
             $"sourceFieldOfView={observation.SourceFieldOfView:F2}, " +
@@ -331,10 +365,13 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
             $"alignmentTimedOut={alignmentTimedOut}.");
     }
 
-    private static string DescribeObservation(CompanionVisionObservation observation)
+    private static string DescribeObservation(
+        CompanionVisionObservation observation,
+        string referenceSource)
     {
         return
             "Bot-eye observation captured for inspect_reference. " +
+            $"reference_source={referenceSource}; " +
             $"human_gaze_raycast_hit={observation.ReferenceRayHit}; " +
             $"alignment_timed_out={observation.AlignmentTimedOut}.";
     }
@@ -349,7 +386,25 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
     private void EndAttention()
     {
         _state = InspectionState.Idle;
+        _inspectionReferent = null;
         _attention.ClearTarget(GazeChannel.Inspection);
+    }
+
+    private bool TryRefreshReferencePoint(out string error)
+    {
+        error = null;
+        Vector3 point;
+        if (_inspectionReferent == null ||
+            !_inspectionReferent.TryGetCurrentPoint(out point))
+        {
+            error = _inspectionReferent == null
+                ? "inspection_reference_unavailable"
+                : _inspectionReferent.UnavailableError;
+            return false;
+        }
+
+        _referencePoint = point;
+        return true;
     }
 
     private PlayerCharacter GetHumanPlayer()
@@ -360,80 +415,5 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
         if (human == null || (_body != null && human.gameObject == _body.GameObject))
             return null;
         return human;
-    }
-
-    private static bool TryResolveReference(
-        PlayerCharacter human,
-        CompanionBody body,
-        out Vector3 referencePoint,
-        out bool rayHit)
-    {
-        referencePoint = Vector3.zero;
-        rayHit = false;
-        var viewTransform = ResolveHumanViewTransform(human);
-        if (viewTransform == null || viewTransform.forward.sqrMagnitude < 0.0001f)
-            return false;
-
-        var origin = viewTransform.position;
-        var direction = viewTransform.forward.normalized;
-        var rayOrigin = origin;
-        var remainingDistance = MaximumReferenceDistance;
-        var layerMask = Physics.DefaultRaycastLayers;
-        if (human.caster != null && human.caster.layerMask.value != 0)
-            layerMask = human.caster.layerMask.value;
-        for (var step = 0;
-             step < MaximumRaycastSteps && remainingDistance > 0f;
-             step++)
-        {
-            RaycastHit hit;
-            if (!Physics.Raycast(
-                    rayOrigin,
-                    direction,
-                    out hit,
-                    remainingDistance,
-                    layerMask,
-                    QueryTriggerInteraction.Ignore))
-            {
-                break;
-            }
-
-            var hitTransform = hit.collider == null ? null : hit.collider.transform;
-            if (!IsHumanBodyCollider(hit.collider, human) &&
-                !body.Contains(hitTransform))
-            {
-                referencePoint = hit.point;
-                rayHit = true;
-                return true;
-            }
-
-            var advance = Mathf.Max(SelfHitAdvance, hit.distance + SelfHitAdvance);
-            rayOrigin += direction * advance;
-            remainingDistance -= advance;
-        }
-
-        referencePoint = origin + direction * MaximumReferenceDistance;
-        return true;
-    }
-
-    private static Transform ResolveHumanViewTransform(PlayerCharacter human)
-    {
-        if (human != null && human.cameraMinder != null)
-        {
-            var references = human.cameraMinder.playerCameraReferences;
-            if (references != null && references.playerCamera != null)
-                return references.playerCamera.transform;
-        }
-
-        if (Camera.main != null)
-            return Camera.main.transform;
-        return human == null ? null : human.cameraTransform;
-    }
-
-    private static bool IsHumanBodyCollider(
-        Collider candidate,
-        PlayerCharacter human)
-    {
-        return candidate != null && human != null && human.collision != null &&
-               candidate == human.collision.bodyCollider;
     }
 }

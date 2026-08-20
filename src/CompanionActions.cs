@@ -47,6 +47,15 @@ internal sealed class CompanionActionCoordinator
         };
     }
 
+    internal bool FollowRequested => _follow.IsRequested;
+    internal string FollowStateLabel => _follow.StateLabel;
+    internal bool IsCarried => _follow.IsCarried;
+    internal CompanionPosture Posture => _posture.Current;
+    internal bool JumpQueued => _jump.IsQueued;
+    internal bool IsMoving =>
+        _locomotion.LastMovementIntent.sqrMagnitude > 0.01f;
+    internal string ActiveJobName => FindActiveJob()?.ActiveName;
+
     internal void Bind(CompanionBody body, PlayerCharacter human, float now)
     {
         _locomotion.ResolveGaitSpeeds(body.Character);
@@ -79,6 +88,13 @@ internal sealed class CompanionActionCoordinator
         // navigation gate is re-evaluated every frame rather than only when a
         // tool call happens to run.
         RefreshMovementGate(now);
+    }
+
+    internal bool TryTakeAmbientObservation(
+        float now,
+        out CompanionAmbientObservationCandidate candidate)
+    {
+        return _ambientGaze.TryTakeSettledGlance(now, out candidate);
     }
 
     internal void TickFixed(float now)
