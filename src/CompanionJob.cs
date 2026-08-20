@@ -17,6 +17,27 @@ internal enum JobResources
 }
 
 /// <summary>
+/// Bounded points on Big Walk's native normalized kick-charge curve. The
+/// corresponding hold time is resolved from PlayerTunings at runtime.
+/// </summary>
+internal enum CompanionKickStrength
+{
+    Normal,
+    Light,
+    Hard
+}
+
+/// <summary>
+/// The deliberate horizontal launch intent selected for a kick. The target
+/// prop remains the immutable response-turn referent regardless of direction.
+/// </summary>
+internal enum CompanionKickDirection
+{
+    AwayFromCompanion,
+    TowardHuman
+}
+
+/// <summary>
 /// A terminal job outcome: the tool result the model receives, plus any extra
 /// conversation items the job wants delivered alongside it.
 /// </summary>
@@ -54,6 +75,8 @@ internal sealed class CompanionJobRequest
     internal string ActionName;
     internal long TurnId;
     internal CompanionInteractionTarget InteractionTarget;
+    internal CompanionKickStrength KickStrength;
+    internal CompanionKickDirection KickDirection;
 }
 
 /// <summary>

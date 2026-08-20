@@ -268,8 +268,8 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         _turnReferences.Clear();
 
         // If the prior turn's physical action already began, a correction must
-        // cross its exact-target reconciliation path. If pickup is merely
-        // queued, its missing turn reference makes dispatch fail closed below.
+        // cross its exact-target reconciliation path. If a reference-based
+        // action is merely queued, invalidation makes dispatch fail closed.
         if (PendingBatchContainsPhysicalAction(_pendingToolBatch))
         {
             CompanionController.CancelJob(_pendingToolBatch.JobToken);
@@ -332,6 +332,10 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
                 (string.Equals(
                      name,
                      AgentToolCatalog.PickUpItem,
+                     StringComparison.Ordinal) ||
+                 string.Equals(
+                     name,
+                     AgentToolCatalog.KickItem,
                      StringComparison.Ordinal) ||
                  string.Equals(
                      name,
