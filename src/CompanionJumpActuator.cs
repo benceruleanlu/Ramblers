@@ -15,6 +15,8 @@ internal sealed class CompanionJumpActuator
     private CompanionBody _body;
     private bool _queued;
     private float _nextRequestAt;
+    private string _queuedSource;
+    private string _queuedReason;
 
     internal bool IsQueued => _queued;
 
@@ -23,6 +25,8 @@ internal sealed class CompanionJumpActuator
         _body = body;
         _queued = false;
         _nextRequestAt = 0f;
+        _queuedSource = null;
+        _queuedReason = null;
     }
 
     internal AgentToolResult Request(float now, CompanionPosture posture)
@@ -35,10 +39,37 @@ internal sealed class CompanionJumpActuator
         if (now < _nextRequestAt)
             return AgentToolResult.Failure("jump_cooldown");
 
-        _queued = true;
-        _nextRequestAt = now + RequestCooldown;
+        Queue(now, "tool", null);
         Plugin.Logger.LogInfo("[ACTION] JUMP queued.");
         return AgentToolResult.Success(AgentToolCatalog.Jump, "queued");
+    }
+
+    /// <summary>
+    /// Internal route-replay entry point. The model does not decide when a
+    /// recorded jump is needed; deterministic follow code may queue the same
+    /// stock jump path after validating live ground and posture state.
+    /// </summary>
+    internal bool TryRequestTraversal(
+        float now,
+        CompanionPosture posture,
+        string reason,
+        out string error)
+    {
+        error = null;
+        if (_queued)
+            return true;
+        if (now < _nextRequestAt)
+        {
+            error = "jump_cooldown";
+            return false;
+        }
+        if (!CanJump(posture, out error))
+            return false;
+
+        Queue(now, "follow", reason);
+        Plugin.Logger.LogInfo(
+            $"[FOLLOW] JUMP_QUEUED reason={reason ?? "route"}.");
+        return true;
     }
 
     internal void TickFixed(float now, CompanionPosture posture)
@@ -46,11 +77,15 @@ internal sealed class CompanionJumpActuator
         if (!_queued)
             return;
 
-        _queued = false;
+        var source = _queuedSource;
+        var reason = _queuedReason;
+        ClearQueue();
         string error;
         if (!CanJump(posture, out error))
         {
-            Plugin.Logger.LogWarning($"[ACTION] JUMP cancelled error={error}.");
+            Plugin.Logger.LogWarning(
+                $"[{(source == "follow" ? "FOLLOW" : "ACTION")}] " +
+                $"JUMP_CANCELLED error={error}, reason={reason ?? source ?? "unknown"}.");
             return;
         }
 
@@ -64,7 +99,8 @@ internal sealed class CompanionJumpActuator
         rigidbody.linearVelocity = velocity;
 
         Plugin.Logger.LogInfo(
-            "[ACTION] JUMP executed " +
+            $"[{(source == "follow" ? "FOLLOW" : "ACTION")}] JUMP_EXECUTED " +
+            $"reason={reason ?? source ?? "request"}, " +
             $"beforeVelocity={before}, afterVelocity={velocity}, " +
             $"jumpForce={_body.Character.tunings?.jumpForce}, " +
             $"justJumped={jumper.justJumped}, at={now:F2}.");
@@ -73,15 +109,34 @@ internal sealed class CompanionJumpActuator
     internal void Cancel(string reason)
     {
         if (_queued)
-            Plugin.Logger.LogWarning($"[ACTION] JUMP cancelled reason={reason}.");
-        _queued = false;
+        {
+            Plugin.Logger.LogWarning(
+                $"[{(_queuedSource == "follow" ? "FOLLOW" : "ACTION")}] " +
+                $"JUMP_CANCELLED reason={reason}.");
+        }
+        ClearQueue();
     }
 
     internal void Release()
     {
         _body = null;
-        _queued = false;
+        ClearQueue();
         _nextRequestAt = 0f;
+    }
+
+    private void Queue(float now, string source, string reason)
+    {
+        _queued = true;
+        _queuedSource = source;
+        _queuedReason = reason;
+        _nextRequestAt = now + RequestCooldown;
+    }
+
+    private void ClearQueue()
+    {
+        _queued = false;
+        _queuedSource = null;
+        _queuedReason = null;
     }
 
     private bool CanJump(CompanionPosture posture, out string error)

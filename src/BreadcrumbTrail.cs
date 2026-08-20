@@ -3,21 +3,50 @@ using UnityEngine;
 namespace Ramblers;
 
 /// <summary>
+/// One recorded point on the human's proven route. A jump hint belongs to the
+/// segment ending at this point, so the follower can replay the takeoff instead
+/// of treating every pair of breadcrumbs as flat walking geometry.
+/// </summary>
+internal readonly struct BreadcrumbPoint
+{
+    internal BreadcrumbPoint(
+        int sequence,
+        Vector3 position,
+        bool requiresJump,
+        bool requiresDrop,
+        Vector3 travelDirection)
+    {
+        Sequence = sequence;
+        Position = position;
+        RequiresJump = requiresJump;
+        RequiresDrop = requiresDrop;
+        TravelDirection = travelDirection;
+    }
+
+    internal int Sequence { get; }
+    internal Vector3 Position { get; }
+    internal bool RequiresJump { get; }
+    internal bool RequiresDrop { get; }
+    internal Vector3 TravelDirection { get; }
+}
+
+/// <summary>
 /// A bounded FIFO of world positions describing a walked route. This is pure
 /// storage and geometry: when to sample a new point, and what to log when the
 /// route is discarded, belong to the behaviour that owns the trail.
 /// </summary>
 internal sealed class BreadcrumbTrail
 {
-    private readonly Vector3[] _points;
+    private readonly BreadcrumbPoint[] _points;
     private int _head;
     private int _count;
-    private Vector3 _lastAdded;
+    private int _nextSequence;
+    private BreadcrumbPoint _lastAdded;
     private bool _hasLastAdded;
 
     internal BreadcrumbTrail(int capacity)
     {
-        _points = new Vector3[capacity];
+        _points = new BreadcrumbPoint[capacity];
     }
 
     internal int Count => _count;
@@ -32,7 +61,10 @@ internal sealed class BreadcrumbTrail
     /// <summary>
     /// Appends a point, evicting the oldest once the trail is full.
     /// </summary>
-    internal void Add(Vector3 position)
+    internal BreadcrumbPoint Add(
+        Vector3 position,
+        bool requiresJump,
+        bool requiresDrop)
     {
         if (_count == _points.Length)
         {
@@ -40,59 +72,172 @@ internal sealed class BreadcrumbTrail
             _count--;
         }
 
-        _points[(_head + _count) % _points.Length] = position;
+        var travelDirection = Vector3.zero;
+        if (_hasLastAdded)
+        {
+            travelDirection = position - _lastAdded.Position;
+            travelDirection.y = 0f;
+            if (travelDirection.sqrMagnitude >= 0.0025f)
+                travelDirection.Normalize();
+            else
+                travelDirection = _lastAdded.TravelDirection;
+        }
+
+        var point = new BreadcrumbPoint(
+            ++_nextSequence,
+            position,
+            requiresJump,
+            requiresDrop,
+            travelDirection);
+        _points[(_head + _count) % _points.Length] = point;
         _count++;
-        _lastAdded = position;
+        _lastAdded = point;
         _hasLastAdded = true;
+        return point;
     }
 
     /// <summary>
     /// The oldest remaining point, which is the next one to walk toward.
     /// </summary>
-    internal Vector3 Peek()
+    internal BreadcrumbPoint Peek()
     {
         return _points[_head];
+    }
+
+    internal bool TryPeek(int offset, out BreadcrumbPoint point)
+    {
+        point = default(BreadcrumbPoint);
+        if (offset < 0 || offset >= _count)
+            return false;
+
+        point = _points[(_head + offset) % _points.Length];
+        return true;
+    }
+
+    internal bool TryRemoveFirst(out BreadcrumbPoint point)
+    {
+        point = default(BreadcrumbPoint);
+        if (_count == 0)
+            return false;
+
+        point = Peek();
+        _head = (_head + 1) % _points.Length;
+        _count--;
+        return true;
     }
 
     /// <summary>
     /// The most recently appended point, used to decide whether the next sample
     /// is far enough along to be worth recording. Cleared with the trail.
     /// </summary>
-    internal bool TryGetLastAdded(out Vector3 position)
+    internal bool TryGetLastAdded(out BreadcrumbPoint point)
     {
-        position = _lastAdded;
+        point = _lastAdded;
         return _hasLastAdded;
     }
 
-    internal void RemoveReached(Vector3 from, float tolerance)
+    /// <summary>
+    /// Removes points reached in both the horizontal and vertical axes. A point
+    /// can also be retired after the body crosses its route-normal plane while
+    /// still inside the route corridor. That second condition prevents a fast
+    /// body from orbiting a waypoint it has already passed without allowing a
+    /// point on another floor to disappear merely because its X/Z projection
+    /// happens to be nearby.
+    ///
+    /// An uncommitted jump marker can pin the head even when its horizontal
+    /// coordinate is already close, preventing the route from deleting its own
+    /// takeoff instruction.
+    /// </summary>
+    internal int RemoveReached(
+        Vector3 from,
+        float horizontalTolerance,
+        float verticalTolerance,
+        float passLateralTolerance,
+        bool preserveTraversalHints,
+        int committedJumpSequence,
+        int committedDropSequence,
+        out BreadcrumbPoint lastRemoved,
+        out bool crossedPointPlane)
     {
-        while (_count > 0 && HorizontalDistance(from, Peek()) <= tolerance)
+        var removed = 0;
+        lastRemoved = default(BreadcrumbPoint);
+        crossedPointPlane = false;
+        while (_count > 0)
         {
+            var point = Peek();
+            if (preserveTraversalHints &&
+                ((point.RequiresJump &&
+                  point.Sequence != committedJumpSequence) ||
+                 (point.RequiresDrop &&
+                  point.Sequence != committedDropSequence)))
+            {
+                return removed;
+            }
+
+            var verticallyNear = Mathf.Abs(from.y - point.Position.y) <= verticalTolerance;
+            var reached = verticallyNear &&
+                          HorizontalDistance(from, point.Position) <= horizontalTolerance;
+            var passed = !reached &&
+                         _count > 1 &&
+                         verticallyNear &&
+                         HasCrossedPointPlane(from, point, passLateralTolerance);
+            if (!reached && !passed)
+            {
+                return removed;
+            }
+
+            lastRemoved = point;
+            crossedPointPlane |= passed;
             _head = (_head + 1) % _points.Length;
             _count--;
+            removed++;
         }
+
+        return removed;
+    }
+
+    private static bool HasCrossedPointPlane(
+        Vector3 from,
+        BreadcrumbPoint point,
+        float lateralTolerance)
+    {
+        var direction = point.TravelDirection;
+        direction.y = 0f;
+        if (direction.sqrMagnitude < 0.0001f)
+            return false;
+
+        direction.Normalize();
+        var delta = from - point.Position;
+        delta.y = 0f;
+        var forwardDistance = Vector3.Dot(delta, direction);
+        if (forwardDistance < 0f)
+            return false;
+
+        var lateralOffset = delta - direction * forwardDistance;
+        return lateralOffset.magnitude <= lateralTolerance;
     }
 
     /// <summary>
-    /// Horizontal length of the route <paramref name="from"/> -> every remaining
-    /// breadcrumb -> <paramref name="to"/>. With no breadcrumbs left this is the
-    /// straight-line horizontal distance.
+    /// Three-dimensional length of the route <paramref name="from"/> -> every
+    /// remaining breadcrumb -> <paramref name="to"/>. Vertical separation is
+    /// intentionally retained so stacked floors and ledges cannot collapse into
+    /// the same apparent position.
     /// </summary>
     internal float MeasureDistance(Vector3 from, Vector3 to)
     {
         if (_count == 0)
-            return HorizontalDistance(from, to);
+            return Vector3.Distance(from, to);
 
-        var previous = Peek();
-        var total = HorizontalDistance(from, previous);
-        for (var offset = 1; offset < _count; offset++)
+        var previous = from;
+        var total = 0f;
+        for (var offset = 0; offset < _count; offset++)
         {
-            var current = _points[(_head + offset) % _points.Length];
-            total += HorizontalDistance(previous, current);
+            var current = _points[(_head + offset) % _points.Length].Position;
+            total += Vector3.Distance(previous, current);
             previous = current;
         }
 
-        return total + HorizontalDistance(previous, to);
+        return total + Vector3.Distance(previous, to);
     }
 
     internal static float HorizontalDistance(Vector3 from, Vector3 to)
