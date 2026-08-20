@@ -1,3 +1,4 @@
+using System.Text;
 using UnityEngine;
 
 namespace Ramblers;
@@ -19,6 +20,9 @@ internal struct SteeringStatus
     internal float SteeringAngle;
     internal float Clearance;
     internal bool DirectPathBlocked;
+    internal bool DirectGroundLimited;
+    internal float GroundResponse;
+    internal float SteepScalar;
 }
 
 /// <summary>
@@ -44,7 +48,9 @@ internal sealed class CompanionLocomotion
     private const float BrakingLookahead = 0.45f;
     private const float ObstacleProbeDistance = 1.5f;
     internal const float MinimumClearance = 0.7f;
-    private const float AvoidanceSideHold = 0.6f;
+    private const float MinimumGroundResponse = 0.08f;
+    private const float WalkableSweepNormalY = 0.7f;
+    private const float AvoidanceSideHold = 1.5f;
     private const float StuckObservationWindow = 2.5f;
     private const float StuckMovementThreshold = 0.15f;
 
@@ -58,7 +64,12 @@ internal sealed class CompanionLocomotion
         75f,
         -75f,
         95f,
-        -95f
+        -95f,
+        125f,
+        -125f,
+        155f,
+        -155f,
+        180f
     };
 
     private readonly LogLatch _stuckWarningLog = new LogLatch();
@@ -79,6 +90,11 @@ internal sealed class CompanionLocomotion
     private float _lastSteeringAngle;
     private float _lastClearance;
     private bool _lastDirectPathBlocked;
+    private bool _lastDirectGroundLimited;
+    private float _lastGroundResponse;
+    private float _lastSteepScalar;
+    private string _lastDirectHit = "clear";
+    private string _lastProbeSummary = "not_sampled";
     private Vector3 _progressAnchor;
     private float _progressWindowStartedAt;
 
@@ -97,6 +113,11 @@ internal sealed class CompanionLocomotion
     internal float LastSteeringAngle => _lastSteeringAngle;
     internal float LastClearance => _lastClearance;
     internal bool LastDirectPathBlocked => _lastDirectPathBlocked;
+    internal bool LastDirectGroundLimited => _lastDirectGroundLimited;
+    internal float LastGroundResponse => _lastGroundResponse;
+    internal float LastSteepScalar => _lastSteepScalar;
+    internal string LastDirectHit => _lastDirectHit;
+    internal string LastProbeSummary => _lastProbeSummary;
 
     internal string DescribeGait()
     {
@@ -141,6 +162,11 @@ internal sealed class CompanionLocomotion
         _lastSteeringAngle = 0f;
         _lastClearance = ObstacleProbeDistance;
         _lastDirectPathBlocked = false;
+        _lastDirectGroundLimited = false;
+        _lastGroundResponse = 1f;
+        _lastSteepScalar = 1f;
+        _lastDirectHit = "clear";
+        _lastProbeSummary = "not_sampled";
         _posture = CompanionPosture.Standing;
         _gait = MovementGait.Stopped;
         _lastCommandedSpeed = 0f;
@@ -177,7 +203,8 @@ internal sealed class CompanionLocomotion
     {
         status = default(SteeringStatus);
 
-        var gaitSpeed = ResolveMovementSpeed(pathDistance);
+        MovementGait requestedGait;
+        var gaitSpeed = PreviewMovementSpeed(pathDistance, out requestedGait);
 
         // Look far enough ahead to stop from the gait being requested. The sweep never
         // shortens below the walking probe, so obstacle detection is unchanged at walk.
@@ -187,6 +214,9 @@ internal sealed class CompanionLocomotion
         float steeringAngle;
         float clearance;
         bool directBlocked;
+        bool directGroundLimited;
+        float groundResponse;
+        float steepScalar;
         if (!TryChooseSteering(
                 desiredDirection,
                 now,
@@ -194,18 +224,31 @@ internal sealed class CompanionLocomotion
                 out steeringDirection,
                 out steeringAngle,
                 out clearance,
-                out directBlocked))
+                out directBlocked,
+                out directGroundLimited,
+                out groundResponse,
+                out steepScalar))
         {
             _lastDirectPathBlocked = true;
+            _lastDirectGroundLimited = directGroundLimited;
             _lastClearance = clearance;
+            _lastGroundResponse = groundResponse;
+            _lastSteepScalar = steepScalar;
             status.Clearance = clearance;
             status.DirectPathBlocked = true;
+            status.DirectGroundLimited = directGroundLimited;
+            status.GroundResponse = groundResponse;
+            status.SteepScalar = steepScalar;
             return false;
         }
 
         _lastDirectPathBlocked = directBlocked;
+        _lastDirectGroundLimited = directGroundLimited;
         _lastSteeringAngle = steeringAngle;
         _lastClearance = clearance;
+        _lastGroundResponse = groundResponse;
+        _lastSteepScalar = steepScalar;
+        CommitMovementGait(requestedGait, pathDistance);
 
         // Use the exact stock walk or run speed. Only immediate obstacle clearance
         // may cap it for collision safety; distance to the target never creates a
@@ -219,7 +262,64 @@ internal sealed class CompanionLocomotion
         status.SteeringAngle = steeringAngle;
         status.Clearance = clearance;
         status.DirectPathBlocked = directBlocked;
+        status.DirectGroundLimited = directGroundLimited;
+        status.GroundResponse = groundResponse;
+        status.SteepScalar = steepScalar;
         return true;
+    }
+
+    /// <summary>
+    /// Keeps forward intent through a route-proven jump or ledge transition.
+    /// Ordinary steering remains clearance-gated; this narrow path is entered
+    /// only after follow code has committed to replaying a human traversal
+    /// breadcrumb, where braking at the edge or obstacle would defeat it.
+    /// </summary>
+    internal SteeringStatus CommitTraversalDirection(
+        Vector3 desiredDirection,
+        float pathDistance)
+    {
+        var status = default(SteeringStatus);
+        desiredDirection.y = 0f;
+        if (desiredDirection.sqrMagnitude < 0.0001f)
+            return status;
+
+        desiredDirection.Normalize();
+        MovementGait requestedGait;
+        var gaitSpeed = PreviewMovementSpeed(pathDistance, out requestedGait);
+        var probeDistance = Mathf.Max(
+            ObstacleProbeDistance,
+            gaitSpeed * BrakingLookahead);
+        string directHit;
+        var clearance = MeasureClearance(
+            desiredDirection,
+            probeDistance,
+            out directHit);
+        var directBlocked = clearance < MinimumClearance;
+        float steepScalar;
+        var groundResponse = MeasureGroundResponse(desiredDirection, out steepScalar);
+        var directGroundLimited = groundResponse < MinimumGroundResponse;
+
+        _lastDirectPathBlocked = directBlocked || directGroundLimited;
+        _lastDirectGroundLimited = directGroundLimited;
+        _lastSteeringAngle = 0f;
+        _lastClearance = clearance;
+        _lastGroundResponse = groundResponse;
+        _lastSteepScalar = steepScalar;
+        _lastDirectHit = directHit;
+        _lastProbeSummary = FormatProbe(0f, clearance, groundResponse, directHit);
+        CommitMovementGait(requestedGait, pathDistance);
+        _lastCommandedSpeed = gaitSpeed;
+        SetMovementIntent(desiredDirection * gaitSpeed);
+
+        status.Moving = true;
+        status.CommandedSpeed = gaitSpeed;
+        status.SteeringAngle = 0f;
+        status.Clearance = clearance;
+        status.DirectPathBlocked = directBlocked || directGroundLimited;
+        status.DirectGroundLimited = directGroundLimited;
+        status.GroundResponse = groundResponse;
+        status.SteepScalar = steepScalar;
+        return status;
     }
 
     /// <summary>
@@ -256,23 +356,33 @@ internal sealed class CompanionLocomotion
         _posture = posture;
     }
 
-    private float ResolveMovementSpeed(float pathDistance)
+    private float PreviewMovementSpeed(
+        float pathDistance,
+        out MovementGait requestedGait)
     {
-        if (_gait != MovementGait.Run && pathDistance >= RunStartDistance)
+        requestedGait = _gait == MovementGait.Run || pathDistance >= RunStartDistance
+            ? MovementGait.Run
+            : MovementGait.Walk;
+        return requestedGait == MovementGait.Run ? RunSpeed : WalkSpeed;
+    }
+
+    private void CommitMovementGait(MovementGait requestedGait, float pathDistance)
+    {
+        if (_gait == requestedGait)
+            return;
+
+        SetMovementGait(requestedGait);
+        if (requestedGait == MovementGait.Run)
         {
-            SetMovementGait(MovementGait.Run);
             Plugin.Logger.LogInfo(
                 "[FOLLOW] GAIT run " +
                 $"trailDistance={pathDistance:F2}; latched until the next complete stop.");
         }
-        else if (_gait == MovementGait.Stopped)
+        else
         {
-            SetMovementGait(MovementGait.Walk);
             Plugin.Logger.LogInfo(
                 $"[FOLLOW] GAIT walk trailDistance={pathDistance:F2}.");
         }
-
-        return _gait == MovementGait.Run ? RunSpeed : WalkSpeed;
     }
 
     private void SetMovementGait(MovementGait gait)
@@ -299,32 +409,78 @@ internal sealed class CompanionLocomotion
         out Vector3 steeringDirection,
         out float steeringAngle,
         out float clearance,
-        out bool directBlocked)
+        out bool directBlocked,
+        out bool directGroundLimited,
+        out float groundResponse,
+        out float steepScalar)
     {
         steeringDirection = Vector3.zero;
         steeringAngle = 0f;
         clearance = 0f;
 
-        var directClearance = MeasureClearance(desiredDirection, probeDistance);
-        directBlocked = directClearance < MinimumClearance;
+        string directHit;
+        var directClearance = MeasureClearance(
+            desiredDirection,
+            probeDistance,
+            out directHit);
+        float directSteepScalar;
+        var directGroundResponse = MeasureGroundResponse(
+            desiredDirection,
+            out directSteepScalar);
+        directGroundLimited = directGroundResponse < MinimumGroundResponse;
+        directBlocked = directClearance < MinimumClearance || directGroundLimited;
+        groundResponse = directGroundResponse;
+        steepScalar = directSteepScalar;
+        _lastDirectHit = directHit;
         if (!directBlocked)
         {
             steeringDirection = desiredDirection;
             clearance = directClearance;
-            _avoidanceSign = 0;
+            _lastProbeSummary = FormatProbe(
+                0f,
+                directClearance,
+                directGroundResponse,
+                directHit);
+            if (now >= _avoidanceSignUntil)
+                _avoidanceSign = 0;
             return true;
         }
 
+        var probeSummary = new StringBuilder(384);
+        AppendProbe(
+            probeSummary,
+            0f,
+            directClearance,
+            directGroundResponse,
+            directHit);
         var bestScore = float.NegativeInfinity;
         for (var index = 1; index < SteeringAngles.Length; index++)
         {
             var angle = SteeringAngles[index];
             var candidate = Quaternion.AngleAxis(angle, Vector3.up) * desiredDirection;
-            var candidateClearance = MeasureClearance(candidate, probeDistance);
+            string candidateHit;
+            var candidateClearance = MeasureClearance(
+                candidate,
+                probeDistance,
+                out candidateHit);
+            float candidateSteepScalar;
+            var candidateGroundResponse = MeasureGroundResponse(
+                candidate,
+                out candidateSteepScalar);
+            AppendProbe(
+                probeSummary,
+                angle,
+                candidateClearance,
+                candidateGroundResponse,
+                candidateHit);
             if (candidateClearance < MinimumClearance)
                 continue;
+            if (candidateGroundResponse < MinimumGroundResponse)
+                continue;
 
-            var candidateSign = angle > 0f ? 1 : -1;
+            var candidateSign = Mathf.Abs(angle) >= 179f
+                ? 0
+                : angle > 0f ? 1 : -1;
             var turnPenalty = Mathf.Abs(angle) * 0.004f;
             var sideBonus = now < _avoidanceSignUntil && candidateSign == _avoidanceSign
                 ? 0.35f
@@ -334,6 +490,7 @@ internal sealed class CompanionLocomotion
             // cannot outweigh the turn penalty and change which detour is chosen.
             var score = Mathf.Min(candidateClearance, ObstacleProbeDistance)
                       - turnPenalty
+                      + Mathf.Min(candidateGroundResponse, 1f) * 0.25f
                       + sideBonus;
             if (score <= bestScore)
                 continue;
@@ -342,54 +499,166 @@ internal sealed class CompanionLocomotion
             steeringDirection = candidate;
             steeringAngle = angle;
             clearance = candidateClearance;
+            groundResponse = candidateGroundResponse;
+            steepScalar = candidateSteepScalar;
         }
 
         if (bestScore == float.NegativeInfinity)
         {
             clearance = directClearance;
+            _lastProbeSummary = probeSummary.ToString();
             return false;
         }
 
-        _avoidanceSign = steeringAngle > 0f ? 1 : -1;
-        _avoidanceSignUntil = now + AvoidanceSideHold;
+        _lastProbeSummary = probeSummary.ToString();
+        if (Mathf.Abs(steeringAngle) < 179f)
+        {
+            _avoidanceSign = steeringAngle > 0f ? 1 : -1;
+            _avoidanceSignUntil = now + AvoidanceSideHold;
+        }
         return true;
     }
 
-    private float MeasureClearance(Vector3 direction, float probeDistance)
+    /// <summary>
+    /// Asks the stock ground solver how much of a candidate heading it would
+    /// actually pass to the rigidbody. Clearance alone cannot identify a steep
+    /// grassy face whose slope limiter reduces an otherwise clear command to
+    /// zero, which is the runtime failure this check is intended to expose.
+    /// </summary>
+    private float MeasureGroundResponse(
+        Vector3 direction,
+        out float steepScalar)
     {
-        if (_body.Character.rb == null)
-            return probeDistance;
+        steepScalar = 1f;
+        var ground = _body?.Character?.ground;
+        if (ground == null || !ground.isGrounded)
+            return 1f;
 
-        RaycastHit hit;
-        if (!_body.Character.rb.SweepTest(
-            direction,
-            out hit,
-            probeDistance,
-            QueryTriggerInteraction.Ignore))
+        direction.y = 0f;
+        if (direction.sqrMagnitude < 0.0001f)
+            return 0f;
+
+        direction.Normalize();
+        var response = ground.GetSlopedMoveForce(direction, out steepScalar);
+        return response.magnitude;
+    }
+
+    private float MeasureClearance(
+        Vector3 direction,
+        float probeDistance,
+        out string hitDescription)
+    {
+        var rigidbody = _body.Character.rb;
+        if (rigidbody == null)
         {
+            hitDescription = "no_rigidbody";
             return probeDistance;
         }
 
+        RaycastHit hit;
+        if (!rigidbody.SweepTest(
+                direction,
+                out hit,
+                probeDistance,
+                QueryTriggerInteraction.Ignore))
+        {
+            hitDescription = "clear";
+            return probeDistance;
+        }
+
+        var hitTransform = hit.collider == null ? null : hit.collider.transform;
+        if (_body != null && _body.Contains(hitTransform))
+        {
+            hitDescription = "ignored_self:" + DescribeHit(hit);
+            return probeDistance;
+        }
+
+        // Big Walk meshes can expose tiny seams between otherwise continuous
+        // floor pieces. The closest capsule sweep contact at those seams points
+        // upward and is safe to cross; treating it as a wall makes follow pace
+        // in place. Keep this on SweepTest, which is available in this IL2CPP
+        // build, rather than SweepTestAll, which is stripped at runtime.
+        if (hit.normal.y >= WalkableSweepNormalY)
+        {
+            hitDescription = "ignored_walkable:" + DescribeHit(hit);
+            return probeDistance;
+        }
+
+        hitDescription = DescribeHit(hit);
         return hit.distance;
     }
 
+    private string DescribeHit(RaycastHit hit)
+    {
+        var collider = hit.collider;
+        if (collider == null)
+            return "unknown_collider";
+
+        var hitTransform = collider.transform;
+        var hitName = hitTransform == null
+            ? "unnamed"
+            : SanitizeProbeText(hitTransform.name);
+        var layer = collider.gameObject == null ? -1 : collider.gameObject.layer;
+        var self = _body != null && _body.Contains(hitTransform);
+        return $"{hitName}@layer{layer}:self={self}:normal={hit.normal}";
+    }
+
+    private static string SanitizeProbeText(string value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return "unnamed";
+
+        return value.Replace(',', '_').Replace(';', '_').Replace(' ', '_');
+    }
+
+    private static string FormatProbe(
+        float angle,
+        float clearance,
+        float groundResponse,
+        string hitDescription)
+    {
+        var builder = new StringBuilder(96);
+        AppendProbe(builder, angle, clearance, groundResponse, hitDescription);
+        return builder.ToString();
+    }
+
+    private static void AppendProbe(
+        StringBuilder builder,
+        float angle,
+        float clearance,
+        float groundResponse,
+        string hitDescription)
+    {
+        if (builder.Length > 0)
+            builder.Append(';');
+        builder.Append(angle.ToString("+0;-0;0"));
+        builder.Append(':');
+        builder.Append(clearance.ToString("F2"));
+        builder.Append("/g");
+        builder.Append(groundResponse.ToString("F2"));
+        builder.Append('/');
+        builder.Append(hitDescription);
+    }
+
     /// <summary>
-    /// Reports a body that is being commanded to move but is not making ground.
-    /// Detection only; no recovery is attempted.
+    /// Reports whether a body commanded to move failed to make spatial progress
+    /// over the observation window. Vertical motion counts, so a deliberate
+    /// jump or fall cannot be mislabeled as a horizontal stall.
     /// </summary>
-    internal void ObserveProgress(float now)
+    internal bool ObserveProgress(float now)
     {
         if (_lastCommandedSpeed <= 0.01f)
         {
             ResetProgressObservation(now);
-            return;
+            return false;
         }
 
         if (now - _progressWindowStartedAt < StuckObservationWindow)
-            return;
+            return false;
 
-        var movement = BreadcrumbTrail.HorizontalDistance(_progressAnchor, _body.Position);
-        if (movement < StuckMovementThreshold)
+        var movement = Vector3.Distance(_progressAnchor, _body.Position);
+        var stuck = movement < StuckMovementThreshold;
+        if (stuck)
         {
             if (_stuckWarningLog.ShouldLog())
             {
@@ -397,7 +666,8 @@ internal sealed class CompanionLocomotion
                     "[FOLLOW] POSSIBLY_STUCK " +
                     $"moved={movement:F2}m in {StuckObservationWindow:F1}s while commanded " +
                     $"speed={_lastCommandedSpeed:F2} m/s ({DescribeGait()}). " +
-                    "Detection only; no recovery attempted.");
+                    "Follow may attempt one bounded grounded traversal jump; " +
+                    "teleport recovery remains disabled.");
             }
         }
         else
@@ -407,6 +677,7 @@ internal sealed class CompanionLocomotion
 
         _progressAnchor = _body.Position;
         _progressWindowStartedAt = now;
+        return stuck;
     }
 
     internal void ResetProgressObservation(float now)

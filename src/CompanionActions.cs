@@ -37,7 +37,7 @@ internal sealed class CompanionActionCoordinator
     internal CompanionActionCoordinator()
     {
         _attention = new CompanionAttention(_facing);
-        _follow = new CompanionFollowBehavior(_locomotion, _attention);
+        _follow = new CompanionFollowBehavior(_locomotion, _attention, _jump);
         _ambientGaze = new CompanionAmbientGaze(_attention);
         _jobs = new ICompanionJob[]
         {
