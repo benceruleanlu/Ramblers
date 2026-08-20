@@ -19,6 +19,10 @@ $compilerPackageUrl =
     "microsoft.net.compilers.toolset.$compilerVersion.nupkg"
 $compilerToolRoot = Join-Path $repositoryRoot ".tools\roslyn-$compilerVersion"
 $defaultCompilerPath = Join-Path $compilerToolRoot "expanded\tasks\net472\csc.exe"
+$jpegEncoderVersion = "1.16.7"
+$jpegEncoderHash = "70921000BEB9CA762A8ACDB93AC6F6C39DB8A351A6FA12ACA3EDDBC652855F04"
+$jpegEncoderPath = Join-Path $repositoryRoot (
+    "vendor\StbImageWriteSharp\$jpegEncoderVersion\StbImageWriteSharp.dll")
 
 function Resolve-FullPath {
     param(
@@ -232,6 +236,19 @@ if ($sourcePaths.Count -eq 0) {
     throw "No C# sources were found under: $sourceRoot"
 }
 
+if (-not (Test-Path -LiteralPath $jpegEncoderPath -PathType Leaf)) {
+    throw "The pinned managed JPEG encoder is missing: $jpegEncoderPath"
+}
+
+$actualJpegEncoderHash =
+    (Get-FileHash -LiteralPath $jpegEncoderPath -Algorithm SHA256).Hash
+if ($actualJpegEncoderHash -ne $jpegEncoderHash) {
+    throw (
+        "The managed JPEG encoder failed verification: $jpegEncoderPath`n" +
+        "Expected SHA-256 $jpegEncoderHash but found $actualJpegEncoderHash."
+    )
+}
+
 $referenceSpecs = @(
     @{ Path = "dotnet\System.Private.CoreLib.dll" },
     @{ Path = "dotnet\System.Runtime.dll" },
@@ -244,7 +261,6 @@ $referenceSpecs = @(
     @{ Path = "dotnet\System.Net.WebSockets.Client.dll"; Alias = "websocketclient" },
     @{ Path = "dotnet\System.Private.Uri.dll"; Alias = "privateuri" },
     @{ Path = "dotnet\System.Text.Json.dll" },
-    @{ Path = "dotnet\System.IO.Compression.dll" },
     @{ Path = "BepInEx\core\BepInEx.Core.dll" },
     @{ Path = "BepInEx\core\BepInEx.Unity.Common.dll" },
     @{ Path = "BepInEx\core\BepInEx.Unity.IL2CPP.dll" },
@@ -304,6 +320,8 @@ foreach ($referenceSpec in $referenceSpecs) {
     }
 }
 
+$compilerArguments += "/reference:$jpegEncoderPath"
+
 $compilerArguments += $sourcePaths
 
 Write-Host "Building Ramblers"
@@ -316,6 +334,14 @@ if ($LASTEXITCODE -ne 0) {
     throw "C# compilation failed with exit code $LASTEXITCODE."
 }
 
+$jpegEncoderOutputPath = Join-Path $outputDirectory "StbImageWriteSharp.dll"
+if (-not [System.IO.Path]::GetFullPath($jpegEncoderOutputPath).Equals(
+        [System.IO.Path]::GetFullPath($jpegEncoderPath),
+        [System.StringComparison]::OrdinalIgnoreCase)) {
+    Copy-Item -LiteralPath $jpegEncoderPath -Destination $jpegEncoderOutputPath -Force
+}
+
 $outputHash = (Get-FileHash -LiteralPath $OutputPath -Algorithm SHA256).Hash
 Write-Host "Build succeeded."
 Write-Host "  SHA-256:  $outputHash"
+Write-Host "  JPEG DLL: $jpegEncoderOutputPath"

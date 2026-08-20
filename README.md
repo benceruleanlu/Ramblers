@@ -7,7 +7,7 @@ An experimental host-side companion mod for [Big Walk](https://store.steampowere
 
 ## Install
 
-With Big Walk closed, copy `dist/Ramblers.dll` into `BepInEx/plugins/Ramblers` under the game directory. Rename the deployed file to `Ramblers.dll.disabled` to stop it loading.
+With Big Walk closed, copy `dist/Ramblers.dll` and `dist/StbImageWriteSharp.dll` into `BepInEx/plugins/Ramblers` under the game directory. Rename the deployed `Ramblers.dll` to `Ramblers.dll.disabled` to stop it loading.
 
 Ramblers reads `OPENAI_API_KEY` from the process or current Windows user environment. No key is stored in this repository or in the BepInEx configuration. This local-key path is for development only.
 
@@ -23,7 +23,7 @@ Requires Windows PowerShell 5.1 or newer and a BepInEx IL2CPP install that has b
 .\build.ps1
 ```
 
-The build locates Big Walk through your registered Steam libraries and downloads a pinned Roslyn compiler into `.tools/` on first use. It installs nothing system-wide and leaves `PATH`, the registry, and system files alone. Override either path with a flag or an environment variable:
+The build locates Big Walk through your registered Steam libraries, verifies the vendored managed JPEG encoder by hash, and downloads a pinned Roslyn compiler into `.tools/` on first use. It installs nothing system-wide and leaves `PATH`, the registry, and system files alone. Override either path with a flag or an environment variable:
 
 | Flag | Environment variable |
 | --- | --- |

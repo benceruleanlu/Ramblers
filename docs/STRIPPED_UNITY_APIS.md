@@ -11,9 +11,11 @@ This is what killed `0.9.0`: a single line setting `Camera.stereoTargetEye`, who
 | `Camera.stereoTargetEye` setter | the `0.9.0` crash |
 | `RenderPipeline.SupportsRenderRequest` | the natural guard for the render call would crash identically |
 | `ImageConversion.EncodeToJPG` / `EncodeToPNG` / `LoadImage` | capture would die at encode after a successful render |
-| `Camera.CopyFrom` | silently does nothing, so the capture camera keeps Unity's defaults |
+| `Camera.CopyFrom` | silently does nothing, so each needed camera property requires its own guarded fallback |
 
-The capture therefore uses none of them: no stereo settings, an unguarded `RenderPipeline.SubmitRenderRequest` in place of `Camera.Render()` (a built-in-pipeline entry point, unsupported under URP), a managed PNG encoder over `System.IO.Compression`, and Unity's default camera configuration instead of `CopyFrom`.
+The capture therefore uses none of them: no stereo settings, an unguarded `RenderPipeline.SubmitRenderRequest` in place of `Camera.Render()` (a built-in-pipeline entry point, unsupported under URP), and a pinned managed JPEG encoder that requires no native binaries. When `CopyFrom` is unavailable, the capture separately probes both `Camera.get_fieldOfView` and `Camera.set_fieldOfView` before matching the player's framing; other unconfigured camera properties retain Unity's defaults.
+
+The bot-eye transport stays at `640x360`, matching the game's widescreen framing without paying to send pixels that this scene-description tool does not need. OpenAI does not prescribe one Realtime capture resolution; its [image guidance](https://developers.openai.com/api/docs/guides/images-vision#image-input-requirements) instead requires a human-readable input and defines processing through `detail`. Ramblers explicitly sends `detail: "high"`, encodes at JPEG quality 82, and logs both encoded and base64 byte counts. The [Realtime item schema](https://platform.openai.com/docs/api-reference/realtime-client-events) accepts JPEG and PNG; JPEG XL is not in its image-input contract.
 
 `UnityApiProbe` asks the IL2CPP runtime whether each dependency exists. Only four are treated as required — `SubmitRenderRequest`, `Camera.set_targetTexture`, `Texture2D.ReadPixels`, and `GetRawTextureData` — so a missing optional API degrades the image and logs `[VISION] DEGRADED` rather than disabling the capability. Any future capability reaching for an uncommon Unity API should probe it the same way.
 

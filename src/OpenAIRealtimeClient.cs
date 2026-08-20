@@ -844,6 +844,10 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             content[next] = new
             {
                 type = "input_image",
+                // Realtime currently maps omitted/auto detail to high. Pin the
+                // intended fidelity so an encoding change cannot also change
+                // how the observation is interpreted.
+                detail = "high",
                 image_url = "data:" + item.ImageMediaType + ";base64," +
                             Convert.ToBase64String(item.ImageBytes)
             };

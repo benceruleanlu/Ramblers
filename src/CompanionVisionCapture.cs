@@ -14,6 +14,10 @@ internal sealed class CompanionVisionObservation
     internal string MediaType;
     internal int Width;
     internal int Height;
+    internal int EncodingQuality;
+    internal bool FieldOfViewMatched;
+    internal float SourceFieldOfView;
+    internal float CaptureFieldOfView;
     internal Vector3 TargetPoint;
     internal bool ReferenceRayHit;
     internal bool AlignmentTimedOut;
@@ -41,6 +45,7 @@ internal static class CompanionVisionCapture
     private static bool _probed;
     private static bool _captureSupported;
     private static bool _canCopyFrom;
+    private static bool _canCopyFieldOfView;
     private static bool _canSetAspect;
     private static bool _canSetNearClip;
     private static bool _canHideRenderers;
@@ -92,6 +97,9 @@ internal static class CompanionVisionCapture
         var captureCamera = default(Camera);
         var renderTexture = default(RenderTexture);
         var texture = default(Texture2D);
+        var fieldOfViewMatched = false;
+        var sourceFieldOfView = -1f;
+        var captureFieldOfView = -1f;
         var previousActive = RenderTexture.active;
 
         try
@@ -104,12 +112,22 @@ internal static class CompanionVisionCapture
             cameraObject = new GameObject("Ramblers Vision Camera");
             cameraObject.hideFlags = HideFlags.HideAndDontSave;
             captureCamera = cameraObject.AddComponent<Camera>();
-            // CopyFrom keeps the companion's view in step with the player's
-            // current field of view, clip planes, and culling mask. Where it is
-            // unavailable the fresh camera's defaults are used instead, which
-            // still produces a usable frame.
+            // CopyFrom is optional and stripped from the tested game build.
+            // Field of view has its own independently probed fallback so one
+            // missing bulk-copy API does not force the capture to 60 degrees.
             if (_canCopyFrom)
                 captureCamera.CopyFrom(sourceCamera);
+            if (_canCopyFieldOfView)
+            {
+                sourceFieldOfView = sourceCamera.fieldOfView;
+                if (sourceFieldOfView > 0f && sourceFieldOfView < 180f)
+                {
+                    captureCamera.fieldOfView = sourceFieldOfView;
+                    captureFieldOfView = captureCamera.fieldOfView;
+                    fieldOfViewMatched = Mathf.Abs(
+                        captureFieldOfView - sourceFieldOfView) <= 0.01f;
+                }
+            }
             captureCamera.enabled = false;
             captureCamera.targetTexture = null;
             captureCamera.transform.position = eyePosition + forward * EyeForwardOffset;
@@ -156,7 +174,7 @@ internal static class CompanionVisionCapture
                 rgb[index] = raw[index];
 
             // Unity reads back with the first row at the bottom of the image.
-            var encoded = PngEncoder.EncodeRgb24(
+            var encoded = JpegEncoder.EncodeRgb24(
                 rgb,
                 CaptureWidth,
                 CaptureHeight,
@@ -170,9 +188,13 @@ internal static class CompanionVisionCapture
             observation = new CompanionVisionObservation
             {
                 ImageBytes = encoded,
-                MediaType = PngEncoder.MediaType,
+                MediaType = JpegEncoder.MediaType,
                 Width = CaptureWidth,
                 Height = CaptureHeight,
+                EncodingQuality = JpegEncoder.DefaultQuality,
+                FieldOfViewMatched = fieldOfViewMatched,
+                SourceFieldOfView = sourceFieldOfView,
+                CaptureFieldOfView = captureFieldOfView,
                 TargetPoint = targetPoint,
                 ReferenceRayHit = referenceRayHit,
                 AlignmentTimedOut = alignmentTimedOut
@@ -220,7 +242,15 @@ internal static class CompanionVisionCapture
             UnityApiProbe.CoreModule,
             "UnityEngine",
             "Camera",
-            new[] { "CopyFrom", "targetTexture", "aspect", "ClipPlane", "stereo" });
+            new[]
+            {
+                "CopyFrom",
+                "fieldOfView",
+                "targetTexture",
+                "aspect",
+                "ClipPlane",
+                "stereo"
+            });
 
         var canSubmitRender = Probe("UnityEngine.Rendering", "RenderPipeline", "SubmitRenderRequest", 2);
         var canSetTargetTexture = Probe("UnityEngine", "Camera", "set_targetTexture", 1);
@@ -228,6 +258,17 @@ internal static class CompanionVisionCapture
         var canReadRaw = Probe("UnityEngine", "Texture2D", "GetRawTextureData", 0);
 
         _canCopyFrom = Probe("UnityEngine", "Camera", "CopyFrom", 1);
+        var canGetFieldOfView = Probe(
+            "UnityEngine",
+            "Camera",
+            "get_fieldOfView",
+            0);
+        var canSetFieldOfView = Probe(
+            "UnityEngine",
+            "Camera",
+            "set_fieldOfView",
+            1);
+        _canCopyFieldOfView = canGetFieldOfView && canSetFieldOfView;
         _canSetAspect = Probe("UnityEngine", "Camera", "set_aspect", 1);
         _canSetNearClip = Probe("UnityEngine", "Camera", "set_nearClipPlane", 1);
         _canHideRenderers = Probe("UnityEngine", "Renderer", "set_forceRenderingOff", 1);
@@ -245,8 +286,9 @@ internal static class CompanionVisionCapture
         {
             Plugin.Logger.LogWarning(
                 $"[VISION] DEGRADED copyFrom={_canCopyFrom}, " +
-                $"hideCompanion={_canHideRenderers}; capturing with Unity's " +
-                "default camera configuration where a setter is unavailable.");
+                $"fieldOfViewParity={_canCopyFieldOfView}, " +
+                $"hideCompanion={_canHideRenderers}; using individually " +
+                "guarded fallbacks where available and Unity defaults otherwise.");
         }
 
         return _captureSupported;

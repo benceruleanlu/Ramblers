@@ -320,7 +320,12 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
         Plugin.Logger.LogInfo(
             $"[VISION] CAPTURED width={observation.Width}, height={observation.Height}, " +
             $"imageBytes={observation.ImageBytes.Length}, " +
+            $"base64Bytes={((observation.ImageBytes.Length + 2) / 3) * 4}, " +
             $"mediaType={observation.MediaType}, lookSeconds={lookSeconds:F2}, " +
+            $"encodingQuality={observation.EncodingQuality}, " +
+            $"fieldOfViewMatched={observation.FieldOfViewMatched}, " +
+            $"sourceFieldOfView={observation.SourceFieldOfView:F2}, " +
+            $"captureFieldOfView={observation.CaptureFieldOfView:F2}, " +
             $"aimYawError={_attention.LastAimYawError:F1}, " +
             $"aimPitchError={_attention.LastAimPitchError:F1}, " +
             $"alignmentTimedOut={alignmentTimedOut}.");
