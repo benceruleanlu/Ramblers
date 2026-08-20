@@ -30,6 +30,7 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         internal float StartedAt;
         internal float TimeoutSeconds;
         internal AgentContinuationItem[] Continuation;
+        internal bool RetainJobUntilAssistantAudio;
     }
 
     private readonly GameVoiceInput _gameVoice = new GameVoiceInput();
@@ -303,6 +304,11 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         CompanionController.TryCaptureInspectionCandidates(
             out inspectionCandidates,
             out inspectionCaptureError);
+        CompanionPeckCandidates peckCandidates;
+        string peckCaptureError;
+        CompanionController.TryCapturePeckCandidates(
+            out peckCandidates,
+            out peckCaptureError);
         CompanionAwarenessTurnContext awarenessContext;
         string awarenessCaptureError;
         CompanionController.TryTakeAwarenessTurnContext(
@@ -314,7 +320,9 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             Target = target,
             CaptureError = captureError,
             InspectionCandidates = inspectionCandidates,
-            InspectionCaptureError = inspectionCaptureError
+            InspectionCaptureError = inspectionCaptureError,
+            PeckCandidates = peckCandidates,
+            PeckCaptureError = peckCaptureError
         };
         var awarenessQueued = false;
         if (awarenessContext != null)
@@ -367,6 +375,28 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
                 $"heldNetId={inspectionCandidates.HeldItemNetworkId}.");
         }
 
+        if (peckCandidates == null)
+        {
+            Plugin.Logger.LogInfo(
+                $"[AGENT] TURN_INTERACTION_REFERENCE_CAPTURED source={source}, " +
+                $"turnId={turnId}, status=unavailable, " +
+                $"reason={peckCaptureError ?? "interaction_reference_not_captured"}.");
+        }
+        else
+        {
+            Plugin.Logger.LogInfo(
+                $"[AGENT] TURN_INTERACTION_REFERENCES_CAPTURED source={source}, " +
+                $"turnId={turnId}, " +
+                $"humanAvailable={peckCandidates.HumanReferenceAvailable}, " +
+                $"humanReason={peckCandidates.HumanReferenceError ?? "none"}, " +
+                $"humanReferenceId={peckCandidates.HumanReferenceId}, " +
+                $"humanNetId={peckCandidates.HumanReferenceNetworkId}, " +
+                $"heldItemAvailable={peckCandidates.CompanionHeldItemAvailable}, " +
+                $"heldItemReason={peckCandidates.CompanionHeldItemError ?? "none"}, " +
+                $"heldReferenceId={peckCandidates.CompanionHeldItemReferenceId}, " +
+                $"heldNetId={peckCandidates.CompanionHeldItemNetworkId}.");
+        }
+
         if (!awarenessQueued)
         {
             Plugin.Logger.LogInfo(
@@ -397,6 +427,10 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             var name = pending.Calls[index]?.Call?.Name;
             if (pending.Calls[index]?.AwaitsJob == true &&
                 (string.Equals(
+                     name,
+                     AgentToolCatalog.InteractWithObject,
+                     StringComparison.Ordinal) ||
+                 string.Equals(
                      name,
                      AgentToolCatalog.PickUpItem,
                      StringComparison.Ordinal) ||
@@ -502,6 +536,8 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             slot.ResultJson = result.ToJson();
             slot.AwaitsJob = false;
             pending.Continuation = completion?.Continuation;
+            pending.RetainJobUntilAssistantAudio =
+                completion?.RetainUntilAssistantAudio == true;
             LogToolResult(slot.Call, slot.ResultJson);
             CompleteToolBatch(pending);
             return;
@@ -573,12 +609,14 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         if (ReferenceEquals(_pendingToolBatch, pending))
         {
             _pendingToolBatch = null;
-            // A job that reported something keeps whatever it still holds until
-            // the model answers, so the human sees the companion stay engaged
-            // with what it just looked at.
-            _concludeJobOnAssistantAudio = continuationCount > 0;
-            _lingeringJobToken = continuationCount > 0 ? pending.JobToken : 0;
-            if (continuationCount == 0 && pending.JobToken != 0)
+            // Only a completion that explicitly retained a presentation hold
+            // may survive until audio. Physical actions are already concluded
+            // before their output continuation, including tool-only chains.
+            var retainForAudio = pending.RetainJobUntilAssistantAudio &&
+                                 continuationCount > 0;
+            _concludeJobOnAssistantAudio = retainForAudio;
+            _lingeringJobToken = retainForAudio ? pending.JobToken : 0;
+            if (!retainForAudio && pending.JobToken != 0)
                 CompanionController.ConcludeJob(pending.JobToken);
         }
     }

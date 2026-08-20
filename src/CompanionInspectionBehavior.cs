@@ -346,7 +346,10 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
                         _inspectionReferent.SourceLabel),
                     observation.ImageBytes,
                     observation.MediaType)
-            }
+            },
+            // Inspection intentionally keeps looking at the referent while the
+            // model begins describing the captured image.
+            RetainUntilAssistantAudio = true
         };
         _state = InspectionState.HoldingReference;
         _stateStartedAt = now;

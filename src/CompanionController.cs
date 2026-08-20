@@ -175,6 +175,49 @@ internal sealed class CompanionController : MonoBehaviour
     }
 
     /// <summary>
+    /// Freezes the exact game-owned primary-interaction candidates available
+    /// for the current utterance: the human's world reference and the prop
+    /// already in the companion's hands.
+    /// </summary>
+    internal static bool TryCapturePeckCandidates(
+        out CompanionPeckCandidates candidates,
+        out string error)
+    {
+        candidates = null;
+        error = null;
+        var controller = _activeController;
+        var body = controller == null ? null : controller._body;
+        if (body == null || !body.IsAlive || !controller._hasSpawnedBot)
+        {
+            error = "bot_not_spawned";
+            return false;
+        }
+
+        var human = WorldManager.localPlayerCharacter;
+        if (human == null || human.gameObject == body.GameObject)
+        {
+            error = "human_player_unavailable";
+            return false;
+        }
+
+        try
+        {
+            return CompanionPeckCandidates.TryCapture(
+                human,
+                body,
+                out candidates,
+                out error);
+        }
+        catch (Exception exception)
+        {
+            error = "interaction_reference_capture_failed";
+            Plugin.Logger.LogWarning(
+                $"[INTERACT] REFERENCE_CAPTURE_FAILED error={exception.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Freezes one compact nonverbal world snapshot for the current utterance
     /// and consumes at most one fresh passive visual-memory frame.
     /// </summary>
@@ -235,11 +278,23 @@ internal sealed class CompanionController : MonoBehaviour
             return false;
         }
 
-        // A job that succeeded may still hold something past completion — an
-        // inspection keeps its gaze — so it keeps its token until the model has
-        // responded. A failed job has nothing left to own.
-        if (completion == null || completion.Result == null || !completion.Result.Ok)
+        // Retention is an explicit part of the completion contract. Inspection
+        // keeps its gaze while the model begins describing the image; physical
+        // actions release immediately so a tool-only continuation can start the
+        // next action before any assistant audio exists.
+        var retainUntilAssistantAudio = completion != null &&
+                                        completion.Result != null &&
+                                        completion.Result.Ok &&
+                                        completion.RetainUntilAssistantAudio;
+        if (!retainUntilAssistantAudio)
         {
+            if (completion != null && completion.Result != null &&
+                completion.Result.Ok)
+            {
+                controller._actions.ConcludeJob(
+                    controller._activeJobName,
+                    Time.realtimeSinceStartup);
+            }
             controller._activeJobToken = 0;
             controller._activeJobName = null;
         }

@@ -42,6 +42,7 @@ internal sealed class CompanionActionCoordinator
         _jobs = new ICompanionJob[]
         {
             new CompanionInspectionBehavior(_attention),
+            new CompanionInteractBehavior(_attention),
             new CompanionPickupBehavior(_attention),
             new CompanionKickBehavior(_attention)
         };

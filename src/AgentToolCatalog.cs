@@ -10,13 +10,14 @@ internal static class AgentToolCatalog
     internal const string SetPosture = "set_posture";
     internal const string Jump = "jump";
     internal const string InspectReference = "inspect_reference";
+    internal const string InteractWithObject = "interact_with_object";
     internal const string PickUpItem = "pick_up_item";
     internal const string KickItem = "kick_item";
     internal const string DropItem = "drop_item";
     internal const string CancelAction = "cancel_action";
 
     internal const string NamesForLog =
-        "set_follow_mode,set_posture,jump,inspect_reference,pick_up_item,kick_item,drop_item,cancel_action";
+        "set_follow_mode,set_posture,jump,inspect_reference,interact_with_object,pick_up_item,kick_item,drop_item,cancel_action";
 
     internal static readonly object[] RealtimeDefinitions =
     {
@@ -96,6 +97,29 @@ internal static class AgentToolCatalog
                         description =
                             "Silently inferred visual referent for this utterance.",
                         @enum = new[] { "human_held_item", "human_gaze" }
+                    }
+                },
+                required = new[] { "target" },
+                additionalProperties = false
+            }
+        },
+        new
+        {
+            type = "function",
+            name = InteractWithObject,
+            description =
+                "Perform one primary interaction on an exact usable object frozen when the current utterance ended. Infer the target silently: use companion_held_item when the request refers to the prop you are already holding, such as 'turn it on' after you grabbed it; use human_reference for a world switch the human is indicating. Never ask the human to choose or announce this distinction. Use directly for requests such as turn that on or off, press that, activate that, or use that. This is the same kind of interaction as a player's primary click; do not use it for pickup, kick, or drop, and never substitute another object.",
+            parameters = new
+            {
+                type = "object",
+                properties = new
+                {
+                    target = new
+                    {
+                        type = "string",
+                        description =
+                            "Silently inferred frozen usable reference for this utterance.",
+                        @enum = new[] { "human_reference", "companion_held_item" }
                     }
                 },
                 required = new[] { "target" },

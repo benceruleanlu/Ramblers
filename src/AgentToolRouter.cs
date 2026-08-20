@@ -32,6 +32,10 @@ internal static class AgentToolRouter
                 return ExecuteInspectionJob(
                     functionCall.Arguments,
                     turnReference);
+            case AgentToolCatalog.InteractWithObject:
+                return ExecuteInteractionJob(
+                    functionCall.Arguments,
+                    turnReference);
             case AgentToolCatalog.PickUpItem:
                 return ExecuteReferencedItemJob(
                     AgentToolCatalog.PickUpItem,
@@ -214,6 +218,65 @@ internal static class AgentToolRouter
             {
                 TurnId = turnReference.TurnId,
                 InspectionReferent = referent
+            });
+    }
+
+    private static AgentToolDispatch ExecuteInteractionJob(
+        string arguments,
+        CompanionTurnReference turnReference)
+    {
+        string target;
+        if (!TryReadOnlyStringArgument(arguments, "target", out target))
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure("invalid_arguments"));
+        }
+
+        CompanionPeckSource source;
+        if (string.Equals(target, "human_reference", StringComparison.Ordinal))
+        {
+            source = CompanionPeckSource.HumanReference;
+        }
+        else if (string.Equals(
+                     target,
+                     "companion_held_item",
+                     StringComparison.Ordinal))
+        {
+            source = CompanionPeckSource.CompanionHeldItem;
+        }
+        else
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure("invalid_arguments"));
+        }
+
+        if (turnReference == null || turnReference.PeckCandidates == null)
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure(
+                    turnReference?.PeckCaptureError ??
+                    "interaction_reference_not_captured"));
+        }
+
+        CompanionPeckTarget peckTarget;
+        string selectionError;
+        if (!turnReference.PeckCandidates.TrySelect(
+                source,
+                out peckTarget,
+                out selectionError))
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure(
+                    selectionError ?? "interaction_reference_unavailable"));
+        }
+
+        return ExecuteJob(
+            AgentToolCatalog.InteractWithObject,
+            "{}",
+            new CompanionJobRequest
+            {
+                TurnId = turnReference.TurnId,
+                PeckTarget = peckTarget
             });
     }
 

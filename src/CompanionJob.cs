@@ -45,13 +45,15 @@ internal sealed class CompanionJobCompletion
 {
     internal AgentToolResult Result;
     internal AgentContinuationItem[] Continuation;
+    internal bool RetainUntilAssistantAudio;
 
     internal static CompanionJobCompletion Failed(string error)
     {
         return new CompanionJobCompletion
         {
             Result = AgentToolResult.Failure(error),
-            Continuation = null
+            Continuation = null,
+            RetainUntilAssistantAudio = false
         };
     }
 }
@@ -76,6 +78,7 @@ internal sealed class CompanionJobRequest
     internal long TurnId;
     internal CompanionInteractionTarget InteractionTarget;
     internal CompanionInspectionReferent InspectionReferent;
+    internal CompanionPeckTarget PeckTarget;
     internal CompanionKickStrength KickStrength;
     internal CompanionKickDirection KickDirection;
 }
@@ -93,6 +96,8 @@ internal sealed class CompanionTurnReference
     internal string CaptureError;
     internal CompanionInspectionCandidates InspectionCandidates;
     internal string InspectionCaptureError;
+    internal CompanionPeckCandidates PeckCandidates;
+    internal string PeckCaptureError;
 }
 
 /// <summary>

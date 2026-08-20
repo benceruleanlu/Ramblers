@@ -321,8 +321,14 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
         if (_state != PickupState.HoldingItem)
             return;
 
-        _holdGaze = false;
-        _attention.ClearTarget(GazeChannel.Manipulation);
+        var referenceId = ReferenceIdForLog;
+        var hands = GetHands();
+        var stillHeld = hands != null && _target != null &&
+                        _target.IsStillTheSameProp(hands.heldProp);
+        EndAction();
+        Plugin.Logger.LogInfo(
+            $"[ACTION] PICKUP_JOB_CONCLUDED referenceId={referenceId}, " +
+            $"stillHeld={stillHeld}.");
     }
 
     public void Cancel(float now)
@@ -855,6 +861,7 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
     {
         _state = PickupState.Idle;
         _target = null;
+        _stateStartedAt = 0f;
         _activeActionName = null;
         _holdGaze = false;
         ResetDropTracking();

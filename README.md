@@ -46,6 +46,7 @@ The model-facing surface is deliberately small:
 | `set_posture(standing \| crouching \| sitting)` | Long-lived posture. Sitting suspends locomotion without erasing a follow request; standing resumes it. |
 | `jump()` | Queues one grounded jump for the next physics tick. |
 | `inspect_reference()` | Looks at the exact item you are showing it or the place you indicated, then captures one image from the companion's own point of view. |
+| `interact_with_object(target: human_reference \| companion_held_item)` | Performs one primary click on the exact world switch indicated by the human or the exact prop already in the companion's hands. |
 | `pick_up_item(target: human_reference)` | Picks up only the prop frozen under the human's gaze for that response turn. |
 | `kick_item(target: human_reference, strength?, direction?)` | Grabs only the frozen prop, holds it through a game-tuned light/normal/hard charge, then kicks it away or toward the human. |
 | `drop_item()` | Drops only the exact prop already held by the companion. |
@@ -53,7 +54,11 @@ The model-facing surface is deliberately small:
 
 Anything that cannot finish inside a single tool call is a job. A job declares the capabilities it claims — locomotion, gaze, hands — and the coordinator admits it only when those are free, so an action needs no hand-written exclusion check against every other action; gaze in particular is arbitrated on priority channels rather than per-behaviour fields. A job reports a terminal result plus any conversation items it wants delivered alongside it — a text report, an image, or both — which is how a bot-eye snapshot reaches the model without the WebSocket transport knowing what produced it.
 
+A completed pickup releases its job and capability reservations while the prop remains held in Big Walk's authoritative hands state. Later held-item interactions and drops recapture that exact prop and network identity at their own turn/action boundaries, so ordinary possession cannot masquerade as `pick_up_item_in_progress` or silently carry an obsolete job target forward.
+
 Each human utterance also receives a bounded nonverbal game-context packet. It reports current human/companion relationship and action state, up to six nearby props and three other players with stable IDs and coarse spatial/interaction facts, and only the significant events not already reported from an eight-entry journal. Rambler's existing natural ambient glances can populate one local visual-memory slot after the gaze visibly settles; novelty, a 30-second capture interval, 45-second freshness and one-shot delivery prevent that from becoming continuous surveillance or an accumulating local photo stream. Context never creates a response by itself, so awareness improves ordinary conversation without making the companion narrate every scene.
+
+`interact_with_object(target: human_reference | companion_held_item)` freezes both kinds of Big Walk primary interaction available at the utterance boundary: a world `CastableTarget`, and the `useHeldSwitch` on the exact prop already in Rambler's hands. The model silently resolves natural wording such as “turn that on” versus “turn it on” after a pickup. Rambler visibly aims, revalidates the same world switch or held prop, checks blockers plus the relevant reach/held condition and host authority, then uses the server-owned switch-state path and waits for that exact state to change. It never invokes a client command or searches for a replacement. Live compatibility with the referenced light and other puzzle switches remains a runtime QA question.
 
 `inspect_reference()` returns pending while the companion turns and captures over following frames. Persistent follow intent and posture stay outside the job layer as long-lived state rather than jobs.
 

@@ -79,6 +79,10 @@ $router = Read-Source "src\AgentToolRouter.cs"
 $catalog = Read-Source "src\AgentToolCatalog.cs"
 $target = Read-Source "src\CompanionInteractionTarget.cs"
 $pickup = Read-Source "src\CompanionPickupBehavior.cs"
+$jobContract = Read-Source "src\CompanionJob.cs"
+$controller = Read-Source "src\CompanionController.cs"
+$inspection = Read-Source "src\CompanionInspectionBehavior.cs"
+$bridge = Read-Source "src\OpenAIRealtimeBridge.cs"
 
 Assert-Contains $catalog 'internal const string PickUpItem = "pick_up_item";' `
     "the allowlist must expose the bounded pickup tool"
@@ -111,6 +115,23 @@ Assert-NotContains $target 'castProp' `
 
 Assert-Contains $pickup 'ServerPickUpPropAutomatic(_target.Prop)' `
     "host pickup must receive the exact frozen prop"
+Assert-Contains $pickup '[ACTION] PICKUP_JOB_CONCLUDED' `
+    "a completed pickup must log release of its job lifecycle"
+Assert-Order $pickup 'public void Conclude(float now)' `
+    '[ACTION] PICKUP_JOB_CONCLUDED' `
+    "pickup conclusion must release the completed job while leaving possession in game state"
+Assert-Contains $jobContract 'internal bool RetainUntilAssistantAudio;' `
+    "completion retention must be explicit rather than inferred from success"
+Assert-Contains $inspection 'RetainUntilAssistantAudio = true' `
+    "only the visual presentation hold should opt into assistant-audio retention"
+Assert-Contains $controller '!retainUntilAssistantAudio' `
+    "ordinary successful jobs must conclude as soon as their result is consumed"
+Assert-Contains $controller 'controller._actions.ConcludeJob(' `
+    "completion consumption must release the job before a tool-only continuation"
+Assert-Contains $bridge 'pending.RetainJobUntilAssistantAudio &&' `
+    "the agent bridge must retain only jobs that explicitly requested it"
+Assert-NotContains $pickup 'RetainUntilAssistantAudio = true' `
+    "pickup must never wait for assistant audio before releasing its job"
 Assert-Contains $pickup '_target.IsStillTheSameProp(hands.heldProp)' `
     "compensating drop must be gated by exact held-prop identity"
 Assert-Contains $pickup 'ServerDropPropAutomatic(false)' `
