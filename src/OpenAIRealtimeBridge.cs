@@ -331,6 +331,11 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             try
             {
                 awarenessQueued = _client.QueueTurnContext(awarenessContext.Message);
+                if (awarenessQueued)
+                {
+                    CompanionController.ConfirmAwarenessTurnContextDelivered(
+                        awarenessContext);
+                }
             }
             catch (Exception exception)
             {
@@ -413,6 +418,7 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
                 $"textChars={awarenessContext.Message.Text.Length}, " +
                 $"events={awarenessContext.EventCount}, " +
                 $"nearbyProps={awarenessContext.NearbyPropCount}, " +
+                $"nearbyInteractables={awarenessContext.NearbyInteractableCount}, " +
                 $"rememberedProps={awarenessContext.RememberedPropCount}, " +
                 $"actionableEntities={awarenessContext.EntityReferences?.Count ?? 0}, " +
                 $"nearbyPlayers={awarenessContext.NearbyPlayerCount}, " +

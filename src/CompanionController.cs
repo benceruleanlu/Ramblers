@@ -251,6 +251,15 @@ internal sealed class CompanionController : MonoBehaviour
         }
     }
 
+    internal static void ConfirmAwarenessTurnContextDelivered(
+        CompanionAwarenessTurnContext context)
+    {
+        var controller = _activeController;
+        if (controller == null || context == null)
+            return;
+        controller._awareness.ConfirmTurnContextDelivered(context);
+    }
+
     internal static bool TryTakeJobCompletion(
         long operationToken,
         out CompanionJobCompletion completion)

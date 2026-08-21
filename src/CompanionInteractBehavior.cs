@@ -3,9 +3,9 @@ using UnityEngine;
 namespace Ramblers;
 
 /// <summary>
-/// One bounded primary interaction with the exact switch frozen under the
-/// human's gaze. This deliberately stops at already-reachable switches; travel
-/// to a remote object belongs to a later navigation/action composition slice.
+/// One bounded primary interaction with an exact switch frozen from gaze,
+/// held state, or private game context. World targets are approached before
+/// the same game-owned reach and authority checks are crossed.
 /// </summary>
 internal sealed class CompanionInteractBehavior : ICompanionJob
 {
@@ -14,16 +14,22 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
     private const float AimSettleSeconds = 0.10f;
     private const float AimToleranceDegrees = 5f;
     private const float ConfirmationSeconds = 1f;
-    private const float InteractionTimeoutSeconds = 4f;
+    private const float InteractionTimeoutSeconds = 25f;
+    private const int MaximumApproachRecoveries = 2;
+    private const float ApproachCommitSeconds = 0.45f;
+    private const float ApproachNavigationInterval = 0.1f;
 
     private enum InteractionState
     {
         Idle,
+        Approaching,
         Aligning,
         AwaitingConfirmation
     }
 
     private readonly CompanionAttention _attention;
+    private readonly CompanionLocomotion _locomotion;
+    private readonly CompanionJumpActuator _jump;
 
     private CompanionBody _body;
     private InteractionState _state;
@@ -35,10 +41,19 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
     private float _alignedAt;
     private bool _authorityCrossed;
     private bool _cancelRequested;
+    private int _approachRecoveries;
+    private float _approachCommitUntil;
+    private Vector3 _approachCommitDirection;
+    private float _nextApproachTick;
 
-    internal CompanionInteractBehavior(CompanionAttention attention)
+    internal CompanionInteractBehavior(
+        CompanionLocomotion locomotion,
+        CompanionAttention attention,
+        CompanionJumpActuator jump)
     {
+        _locomotion = locomotion;
         _attention = attention;
+        _jump = jump;
     }
 
     public string Name => AgentToolCatalog.InteractWithObject;
@@ -55,14 +70,16 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
 
     public JobResources RequiredFor(CompanionJobRequest request)
     {
-        return JobResources.Locomotion |
-               JobResources.Gaze |
-               JobResources.Hands;
+        return request?.PeckTarget?.IsWorldTarget == true
+            ? JobResources.Locomotion | JobResources.Gaze | JobResources.Hands
+            : JobResources.Gaze | JobResources.Hands;
     }
 
-    public JobResources Held => IsActive
-        ? JobResources.Locomotion | JobResources.Gaze | JobResources.Hands
-        : JobResources.None;
+    public JobResources Held => !IsActive
+        ? JobResources.None
+        : _target?.IsWorldTarget == true
+            ? JobResources.Locomotion | JobResources.Gaze | JobResources.Hands
+            : JobResources.Gaze | JobResources.Hands;
 
     public bool IsActive => _state != InteractionState.Idle;
 
@@ -102,16 +119,50 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
             return false;
         }
 
-        _state = InteractionState.Aligning;
+        var canActivateNow = false;
+        if (_target.IsWorldTarget)
+        {
+            CompanionPeckActivation ignoredActivation;
+            string prepareError;
+            canActivateNow = _target.TryPrepare(
+                _body,
+                out ignoredActivation,
+                out prepareError);
+            if (!canActivateNow && !string.Equals(
+                    prepareError,
+                    "interaction_out_of_reach",
+                    System.StringComparison.Ordinal))
+            {
+                _target = null;
+                failure = AgentToolResult.Failure(
+                    prepareError ?? "interaction_unavailable");
+                return false;
+            }
+        }
+        else
+        {
+            canActivateNow = true;
+        }
+
+        _state = canActivateNow
+            ? InteractionState.Aligning
+            : InteractionState.Approaching;
         _stateStartedAt = now;
         _alignedAt = -1f;
         _authorityCrossed = false;
         _cancelRequested = false;
+        _approachRecoveries = 0;
+        _approachCommitUntil = 0f;
+        _approachCommitDirection = Vector3.zero;
+        if (_target.IsWorldTarget)
+            _locomotion.ResetProgressObservation(now);
         _attention.SetTarget(GazeChannel.Inspection, _targetPoint);
         Plugin.Logger.LogInfo(
             $"[INTERACT] STARTED source={_target.SourceLabel}, " +
             $"referenceId={_target.ReferenceId}, " +
-            $"netId={_target.NetworkId}, target={_targetPoint}.");
+            $"netId={_target.NetworkId}, target={_targetPoint}, " +
+            $"distance={Vector3.Distance(_body.Position, _targetPoint):F2}, " +
+            $"phase={(_state == InteractionState.Approaching ? "approach" : "align")}.");
         return true;
     }
 
@@ -133,6 +184,11 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
         }
         _attention.SetTarget(GazeChannel.Inspection, _targetPoint);
 
+        if (_state == InteractionState.Approaching)
+        {
+            TickApproach(now);
+            return;
+        }
         if (_state == InteractionState.Aligning)
         {
             TickAlignment(now);
@@ -219,6 +275,124 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
             CompleteFailure("interaction_alignment_failed");
     }
 
+    private void TickApproach(float now)
+    {
+        if (now < _nextApproachTick)
+            return;
+        _nextApproachTick = now + ApproachNavigationInterval;
+
+        CompanionPeckActivation ignoredActivation;
+        string prepareError;
+        if (_target.TryPrepare(_body, out ignoredActivation, out prepareError))
+        {
+            _locomotion.Stop(now);
+            _state = InteractionState.Aligning;
+            _stateStartedAt = now;
+            _alignedAt = -1f;
+            Plugin.Logger.LogInfo(
+                $"[INTERACT] APPROACH_REACHED referenceId={_target.ReferenceId}, " +
+                $"distance={Vector3.Distance(_body.Position, _targetPoint):F2}.");
+            return;
+        }
+        if (!string.Equals(
+                prepareError,
+                "interaction_out_of_reach",
+                System.StringComparison.Ordinal))
+        {
+            CompleteFailure(prepareError ?? "interaction_unavailable");
+            return;
+        }
+
+        var toTarget = _targetPoint - _body.Position;
+        var horizontalDistance = new Vector3(toTarget.x, 0f, toTarget.z).magnitude;
+        if (horizontalDistance < 0.05f)
+        {
+            _locomotion.Stop(now);
+            CompleteFailure("interaction_path_blocked");
+            return;
+        }
+
+        var direction = new Vector3(toTarget.x, 0f, toTarget.z) /
+                        horizontalDistance;
+        SteeringStatus status;
+        var directGroundLimited = false;
+        if (now < _approachCommitUntil)
+        {
+            _locomotion.CommitTraversalDirection(
+                _approachCommitDirection,
+                horizontalDistance);
+        }
+        else if (!_locomotion.TrySteerToward(
+                     direction,
+                     horizontalDistance,
+                     now,
+                     out status))
+        {
+            directGroundLimited = status.DirectGroundLimited;
+            _locomotion.Stop(now);
+            if (directGroundLimited ||
+                !TryRecoverApproach(now, direction, horizontalDistance, "blocked_path"))
+                CompleteFailure("interaction_path_blocked");
+            return;
+        }
+        else
+        {
+            directGroundLimited = status.DirectGroundLimited;
+        }
+
+        if (_locomotion.ObserveProgress(now) &&
+            (directGroundLimited ||
+             !TryRecoverApproach(now, direction, horizontalDistance, "stuck")))
+        {
+            CompleteFailure("interaction_path_blocked");
+        }
+    }
+
+    private bool TryRecoverApproach(
+        float now,
+        Vector3 direction,
+        float distance,
+        string reason)
+    {
+        if (_approachRecoveries >= MaximumApproachRecoveries)
+            return false;
+        var committedDistance = Mathf.Min(
+            distance,
+            _locomotion.RunSpeed *
+            (ApproachCommitSeconds + ApproachNavigationInterval));
+        if (!_locomotion.HasGroundSupportAhead(direction, committedDistance))
+        {
+            Plugin.Logger.LogWarning(
+                $"[INTERACT] APPROACH_BLOCKED referenceId={_target.ReferenceId}, " +
+                "reason=unsupported_ground.");
+            return false;
+        }
+
+        string jumpError;
+        if (!_jump.TryRequestActionRecovery(
+                now,
+                _locomotion.Posture,
+                AgentToolCatalog.InteractWithObject,
+                reason,
+                out jumpError))
+        {
+            Plugin.Logger.LogWarning(
+                $"[INTERACT] APPROACH_BLOCKED referenceId={_target.ReferenceId}, " +
+                $"reason={reason}, recovery={jumpError ?? "unavailable"}.");
+            return false;
+        }
+
+        _approachRecoveries++;
+        _approachCommitUntil = now + ApproachCommitSeconds;
+        _approachCommitDirection = direction;
+        _locomotion.CommitTraversalDirection(direction, distance);
+        _locomotion.ResetProgressObservation(now);
+        Plugin.Logger.LogInfo(
+            $"[INTERACT] APPROACH_RECOVERY referenceId={_target.ReferenceId}, " +
+            $"reason={reason}, attempt={_approachRecoveries}.");
+        return true;
+    }
+
     private void Activate(float now, float lookSeconds)
     {
         string error;
@@ -302,6 +476,9 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
 
     private void EndInteraction()
     {
+        _jump.CancelActionRecovery(AgentToolCatalog.InteractWithObject);
+        if (_target?.IsWorldTarget == true)
+            _locomotion.Stop(Time.realtimeSinceStartup);
         _state = InteractionState.Idle;
         _target = null;
         _activation = null;
@@ -310,6 +487,10 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
         _alignedAt = -1f;
         _authorityCrossed = false;
         _cancelRequested = false;
+        _approachRecoveries = 0;
+        _approachCommitUntil = 0f;
+        _approachCommitDirection = Vector3.zero;
+        _nextApproachTick = 0f;
         _attention.ClearTarget(GazeChannel.Inspection);
     }
 
@@ -324,5 +505,9 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
         _alignedAt = -1f;
         _authorityCrossed = false;
         _cancelRequested = false;
+        _approachRecoveries = 0;
+        _approachCommitUntil = 0f;
+        _approachCommitDirection = Vector3.zero;
+        _nextApproachTick = 0f;
     }
 }

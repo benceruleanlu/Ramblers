@@ -108,7 +108,7 @@ internal static class AgentToolCatalog
             type = "function",
             name = InteractWithObject,
             description =
-                "Perform one primary interaction on an exact usable object frozen when the current utterance ended. Infer the target silently: use companion_held_item when the request refers to the prop you are already holding, such as 'turn it on' after you grabbed it; use human_reference for a world switch the human is indicating. Never ask the human to choose or announce this distinction. Use directly for requests such as turn that on or off, press that, activate that, or use that. This is the same kind of interaction as a player's primary click; do not use it for pickup, kick, or drop, and never substitute another object.",
+                "Go to and perform one primary interaction on an exact usable object. Silently use its switch ID from nearby_interactables when the human names a nearby button, switch, or light control; use companion_held_item for the prop you are holding; use human_reference when current gaze is the only grounding. Never say IDs aloud, ask the human to choose an internal target type, or substitute another object. Use directly to press, activate, toggle, use, or operate a light control; do not use it for pickup, kick, or drop. This performs the object's primary interaction rather than setting a guaranteed named on/off state, so do not claim a final state unless it was actually observed.",
             parameters = new
             {
                 type = "object",
@@ -118,8 +118,7 @@ internal static class AgentToolCatalog
                     {
                         type = "string",
                         description =
-                            "Silently inferred frozen usable reference for this utterance.",
-                        @enum = new[] { "human_reference", "companion_held_item" }
+                            "Either companion_held_item, human_reference, or the exact switch: ID from private nearby_interactables context."
                     }
                 },
                 required = new[] { "target" },

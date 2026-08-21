@@ -294,7 +294,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         var content = BuildContinuationContent(item);
         if (content == null)
             return false;
-        QueueJson(new
+        return QueueJson(new
         {
             event_id = NextEventId("game_context"),
             type = "conversation.item.create",
@@ -305,7 +305,6 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                 content
             }
         });
-        return true;
     }
 
     internal void TruncateAudio(RealtimeAudioTruncation truncation)
@@ -903,17 +902,18 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                Interlocked.Increment(ref _eventSequence).ToString();
     }
 
-    private void QueueJson(object payload)
+    private bool QueueJson(object payload)
     {
-        QueueRaw(JsonSerializer.Serialize(payload));
+        return QueueRaw(JsonSerializer.Serialize(payload));
     }
 
-    private void QueueRaw(string json)
+    private bool QueueRaw(string json)
     {
         if (_disposed || _cancellation.IsCancellationRequested)
-            return;
+            return false;
         _outbound.Enqueue(json);
         _outboundSignal.Release();
+        return true;
     }
 
     private static async Task IgnoreCancellation(Task task)

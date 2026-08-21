@@ -6,7 +6,8 @@ namespace Ramblers;
 internal enum CompanionPeckSource
 {
     HumanReference,
-    CompanionHeldItem
+    CompanionHeldItem,
+    ContextEntity
 }
 
 /// <summary>
@@ -164,10 +165,17 @@ internal sealed class CompanionPeckTarget
 
     internal uint NetworkId => _networkId;
 
+    internal PeckSwitch PeckSwitch => _peckSwitch;
+
     internal string SourceLabel =>
         _source == CompanionPeckSource.CompanionHeldItem
             ? "companion_held_item"
-            : "human_reference";
+            : _source == CompanionPeckSource.ContextEntity
+                ? "context_entity"
+                : "human_reference";
+
+    internal bool IsWorldTarget =>
+        _source != CompanionPeckSource.CompanionHeldItem;
 
     private int TargetInstanceId => _heldProp == null
         ? _switchInstanceId
@@ -198,7 +206,8 @@ internal sealed class CompanionPeckTarget
         }
 
         var castableTarget = human.caster.castableTarget;
-        if (castableTarget == null || castableTarget.gameObject == null ||
+        if (castableTarget == null || !castableTarget.enabled ||
+            castableTarget.gameObject == null ||
             !castableTarget.gameObject.activeInHierarchy)
         {
             error = "human_reference_not_interactable";
@@ -215,7 +224,7 @@ internal sealed class CompanionPeckTarget
 
         var peckSwitch = outcome.peckSwitch;
         var trackedState = peckSwitch.trackedStateSystem;
-        if (peckSwitch.gameObject == null ||
+        if (!peckSwitch.enabled || peckSwitch.gameObject == null ||
             !peckSwitch.gameObject.activeInHierarchy || trackedState == null)
         {
             error = "interaction_target_unavailable";
@@ -265,7 +274,7 @@ internal sealed class CompanionPeckTarget
         }
 
         var trackedState = peckSwitch.trackedStateSystem;
-        if (peckSwitch.gameObject == null ||
+        if (!peckSwitch.enabled || peckSwitch.gameObject == null ||
             !peckSwitch.gameObject.activeInHierarchy || trackedState == null)
         {
             error = "interaction_target_unavailable";
@@ -278,6 +287,58 @@ internal sealed class CompanionPeckTarget
             peckSwitch,
             trackedState,
             CompanionPeckSource.CompanionHeldItem);
+        return true;
+    }
+
+    /// <summary>
+    /// Captures one exact world interaction already selected into bounded game
+    /// context. Companion-specific outcome rules are checked now and again at
+    /// activation; reach is intentionally deferred so the action may approach.
+    /// </summary>
+    internal static bool TryCaptureContextEntity(
+        CastableTarget castableTarget,
+        CompanionBody body,
+        out CompanionPeckTarget target,
+        out string error)
+    {
+        target = null;
+        error = null;
+        if (castableTarget == null || !castableTarget.enabled ||
+            castableTarget.gameObject == null ||
+            !castableTarget.gameObject.activeInHierarchy)
+        {
+            error = "interaction_target_unavailable";
+            return false;
+        }
+        if (body == null || !body.IsAlive)
+        {
+            error = "bot_not_spawned";
+            return false;
+        }
+
+        CastableOutcome outcome;
+        if (!castableTarget.GetCastableOutcome(body.Character, out outcome) ||
+            outcome == null || outcome.peckSwitch == null)
+        {
+            error = "interaction_conditions_unmet";
+            return false;
+        }
+
+        var peckSwitch = outcome.peckSwitch;
+        var trackedState = peckSwitch.trackedStateSystem;
+        if (!peckSwitch.enabled || peckSwitch.gameObject == null ||
+            !peckSwitch.gameObject.activeInHierarchy || trackedState == null)
+        {
+            error = "interaction_target_unavailable";
+            return false;
+        }
+
+        target = new CompanionPeckTarget(
+            castableTarget,
+            null,
+            peckSwitch,
+            trackedState,
+            CompanionPeckSource.ContextEntity);
         return true;
     }
 
@@ -326,7 +387,7 @@ internal sealed class CompanionPeckTarget
         if (!TryValidateExactComponents(out error))
             return false;
 
-        if (_source == CompanionPeckSource.HumanReference)
+        if (IsWorldTarget)
         {
             CastableOutcome outcome;
             if (!_castableTarget.GetCastableOutcome(body.Character, out outcome) ||
@@ -431,7 +492,7 @@ internal sealed class CompanionPeckTarget
         currentState = 0;
         currentActionNumber = -1;
         error = null;
-        if (activation == null || !TryValidateExactComponents(out error))
+        if (activation == null || !TryValidateObservedState(out error))
             return false;
 
         var currentContext = _trackedState.currentPeckContext;
@@ -449,10 +510,35 @@ internal sealed class CompanionPeckTarget
         return true;
     }
 
+    private bool TryValidateObservedState(out string error)
+    {
+        error = null;
+        if (_trackedState == null ||
+            _trackedState.GetInstanceID() != _stateInstanceId)
+        {
+            error = "interaction_target_changed";
+            return false;
+        }
+
+        // A successful one-shot interaction may disable or hide its switch as
+        // its visible effect. Confirmation therefore observes only the frozen
+        // authoritative state identity; continued interactability is a
+        // precondition for activation, not a postcondition of success.
+        if (_networkId != 0u &&
+            (_networkIdentity == null || _networkIdentity.netId != _networkId))
+        {
+            error = "interaction_target_changed";
+            return false;
+        }
+
+        return true;
+    }
+
     private bool TryValidateExactComponents(out string error)
     {
         error = null;
-        if (_peckSwitch == null || _trackedState == null ||
+        if (_peckSwitch == null || !_peckSwitch.enabled ||
+            _trackedState == null ||
             _peckSwitch.gameObject == null || _trackedState.gameObject == null ||
             !_peckSwitch.gameObject.activeInHierarchy ||
             !_trackedState.gameObject.activeInHierarchy)
@@ -469,9 +555,10 @@ internal sealed class CompanionPeckTarget
             return false;
         }
 
-        if (_source == CompanionPeckSource.HumanReference)
+        if (IsWorldTarget)
         {
-            if (_castableTarget == null || _castableTarget.gameObject == null ||
+            if (_castableTarget == null || !_castableTarget.enabled ||
+                _castableTarget.gameObject == null ||
                 !_castableTarget.gameObject.activeInHierarchy ||
                 _castableTarget.GetInstanceID() != _castableInstanceId)
             {

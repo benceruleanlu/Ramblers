@@ -45,11 +45,18 @@ internal sealed class CompanionLocomotion
     internal const float RunStartDistance = 6.75f;
     private const float FallbackWalkSpeed = 3f;
     private const float FallbackRunSpeed = 5.5f;
-    private const float BrakingLookahead = 0.45f;
+    // Movement intent is refreshed on the 10 Hz navigation cadence. Include one
+    // full cadence interval beyond the 0.45s commit window so the support and
+    // obstacle proof still covers motion until the first tick after expiry.
+    private const float BrakingLookahead = 0.55f;
     private const float ObstacleProbeDistance = 1.5f;
     internal const float MinimumClearance = 0.7f;
     private const float MinimumGroundResponse = 0.08f;
     private const float WalkableSweepNormalY = 0.7f;
+    private const float GroundSupportProbeStep = 0.2f;
+    private const float MaximumGroundGrade = 1f;
+    private const float GroundHeightTolerance = 0.2f;
+    private const int MaximumUnsupportedProbeRun = 1;
     private const float AvoidanceSideHold = 1.5f;
     private const float StuckObservationWindow = 2.5f;
     private const float StuckMovementThreshold = 0.15f;
@@ -427,6 +434,8 @@ internal sealed class CompanionLocomotion
         var directGroundResponse = MeasureGroundResponse(
             desiredDirection,
             out directSteepScalar);
+        if (!HasGroundSupportAhead(desiredDirection, probeDistance))
+            directGroundResponse = 0f;
         directGroundLimited = directGroundResponse < MinimumGroundResponse;
         directBlocked = directClearance < MinimumClearance || directGroundLimited;
         groundResponse = directGroundResponse;
@@ -467,6 +476,12 @@ internal sealed class CompanionLocomotion
             var candidateGroundResponse = MeasureGroundResponse(
                 candidate,
                 out candidateSteepScalar);
+            if (candidateClearance >= MinimumClearance &&
+                candidateGroundResponse >= MinimumGroundResponse &&
+                !HasGroundSupportAhead(candidate, probeDistance))
+            {
+                candidateGroundResponse = 0f;
+            }
             AppendProbe(
                 probeSummary,
                 angle,
@@ -541,6 +556,180 @@ internal sealed class CompanionLocomotion
         direction.Normalize();
         var response = ground.GetSlopedMoveForce(direction, out steepScalar);
         return response.magnitude;
+    }
+
+    /// <summary>
+    /// Verifies that an ordinary grounded move has floor beneath the body's
+    /// forward corridor. A single unsupported sample is tolerated so the
+    /// companion crosses tiny mesh seams, but a real gap cannot look like an
+    /// unobstructed path merely because the head ray and current slope are clear.
+    /// Recorded jump/drop traversal uses CommitTraversalDirection and remains
+    /// the only path allowed to cross unsupported ground intentionally.
+    /// </summary>
+    internal bool HasGroundSupportAhead(Vector3 direction, float distance)
+    {
+        if (_body == null || !_body.IsAlive)
+        {
+            return false;
+        }
+        if (_body.Character?.ground == null ||
+            !_body.Character.ground.isGrounded)
+        {
+            // Ordinary mid-air steering preserves the previous movement path.
+            // Only a grounded body can prove or disprove forward floor support.
+            return true;
+        }
+
+        direction.y = 0f;
+        if (direction.sqrMagnitude < 0.0001f)
+            return true;
+        direction.Normalize();
+
+        var probeDistance = Mathf.Max(distance, GroundSupportProbeStep);
+        var unsupportedRun = 0;
+        var lastAlong = 0f;
+        var lastSupportedAlong = 0f;
+        var lastSupportedHeight = _body.Position.y;
+        for (var along = GroundSupportProbeStep;
+             along <= probeDistance + 0.01f;
+             along += GroundSupportProbeStep)
+        {
+            lastAlong = along;
+            var center = _body.Position + direction * along;
+            float groundHeight;
+            var continuityFrom = unsupportedRun > 0
+                ? along - GroundSupportProbeStep
+                : lastSupportedAlong;
+            var supported = TryMeasureGroundHeight(
+                center,
+                along,
+                lastSupportedHeight,
+                continuityFrom,
+                out groundHeight);
+            if (supported)
+            {
+                unsupportedRun = 0;
+                lastSupportedAlong = along;
+                lastSupportedHeight = groundHeight;
+                continue;
+            }
+
+            unsupportedRun++;
+            if (unsupportedRun > MaximumUnsupportedProbeRun)
+                return false;
+        }
+
+        // Always prove the destination of a short segment. A missing sample is
+        // seam tolerance only when later support brackets it; an unsupported
+        // trailing edge is a ledge, not a seam.
+        if (probeDistance - lastAlong > 0.05f)
+        {
+            float groundHeight;
+            var continuityFrom = unsupportedRun > 0
+                ? probeDistance - GroundSupportProbeStep
+                : lastSupportedAlong;
+            var supported = TryMeasureGroundHeight(
+                    _body.Position + direction * probeDistance,
+                    probeDistance,
+                    lastSupportedHeight,
+                    continuityFrom,
+                    out groundHeight);
+            if (supported)
+            {
+                unsupportedRun = 0;
+            }
+            else
+            {
+                unsupportedRun++;
+            }
+        }
+
+        return unsupportedRun == 0;
+    }
+
+    /// <summary>
+    /// Conservative proof used before deleting a breadcrumb route prefix.
+    /// The destination must be reachable by the body without a wall or an
+    /// unsupported corridor; human-recorded traversal markers remain intact.
+    /// </summary>
+    internal bool CanTraverseGroundedSegment(Vector3 destination)
+    {
+        if (_body == null || !_body.IsAlive)
+            return false;
+
+        var delta = destination - _body.Position;
+        delta.y = 0f;
+        var distance = delta.magnitude;
+        if (distance < 0.05f)
+            return true;
+
+        var direction = delta / distance;
+        string ignoredHit;
+        return HasClearShortcutRay(direction, distance, 0.45f) &&
+               HasClearShortcutRay(direction, distance, 1.1f) &&
+               MeasureClearance(direction, distance, out ignoredHit) >=
+                   distance - 0.02f &&
+               HasGroundSupportAhead(direction, distance);
+    }
+
+    private bool HasClearShortcutRay(
+        Vector3 direction,
+        float distance,
+        float height)
+    {
+        var bodyCollider = _body.Character?.collision?.bodyCollider;
+        var bodyRadius = bodyCollider == null ? 0.25f : bodyCollider.radius;
+        var startOffset = Mathf.Min(distance, bodyRadius + 0.05f);
+        var remaining = distance - startOffset;
+        if (remaining <= 0.02f)
+            return true;
+
+        RaycastHit hit;
+        return !Physics.Raycast(
+            _body.Position + direction * startOffset + Vector3.up * height,
+            direction,
+            out hit,
+            remaining,
+            GetObstacleMask(_body.Character),
+            QueryTriggerInteraction.Ignore);
+    }
+
+    private bool TryMeasureGroundHeight(
+        Vector3 point,
+        float along,
+        float previousHeight,
+        float previousAlong,
+        out float height)
+    {
+        height = 0f;
+        var allowedChange =
+            (along - previousAlong) * MaximumGroundGrade +
+            GroundHeightTolerance;
+        var originHeight = previousHeight + allowedChange + 0.05f;
+        var castDepth = allowedChange * 2f + 0.1f;
+        var layerMask = GetObstacleMask(_body.Character);
+        var bodyCollider = _body.Character?.collision?.bodyCollider;
+        if (bodyCollider?.gameObject != null)
+            layerMask &= ~(1 << bodyCollider.gameObject.layer);
+        if (_body.GameObject != null)
+            layerMask &= ~(1 << _body.GameObject.layer);
+
+        RaycastHit hit;
+        if (!Physics.Raycast(
+            new Vector3(point.x, originHeight, point.z),
+            Vector3.down,
+            out hit,
+            castDepth,
+            layerMask,
+            QueryTriggerInteraction.Ignore))
+        {
+            return false;
+        }
+
+        if (hit.normal.y < WalkableSweepNormalY)
+            return false;
+        height = hit.point.y;
+        return Mathf.Abs(height - previousHeight) <= allowedChange;
     }
 
     private float MeasureClearance(

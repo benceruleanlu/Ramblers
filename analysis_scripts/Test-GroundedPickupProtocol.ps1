@@ -130,12 +130,24 @@ Assert-Contains $pickup 'PickupState.ApproachingTarget' `
     "out-of-reach pickup must enter a bounded approach phase"
 Assert-Contains $pickup '_locomotion.TrySteerToward(' `
     "pickup approach must reuse obstacle-aware steering"
+Assert-Contains $pickup 'private const float ApproachNavigationInterval = 0.1f;' `
+    "pickup terrain probes must run at navigation cadence rather than every frame"
 Assert-Contains $follow 'any live movement intent belongs to the action holding that' `
     "suspended follow must not clear pickup's locomotion intent"
 Assert-Contains $follow 'Yield before idle-follow cleanup can clear that job' `
     "stay mode must also yield locomotion to pickup"
 Assert-Contains $pickup '_jump.TryRequestActionRecovery(' `
     "a stalled pickup approach must have bounded grounded jump recovery"
+Assert-Contains $pickup '_locomotion.HasGroundSupportAhead(direction, committedDistance)' `
+    "pickup recovery must not commit across unsupported ground"
+Assert-Contains $pickup '(ApproachCommitSeconds + ApproachNavigationInterval)' `
+    "pickup recovery proof must cover the first navigation tick after commit expiry"
+Assert-Contains $pickup '_approachCommitDirection = direction;' `
+    "pickup recovery must freeze the direction that its support proof covered"
+Assert-Contains $pickup '_approachCommitDirection,' `
+    "a moving prop must not redirect an active recovery commitment"
+Assert-Contains $pickup '_jump.CancelActionRecovery(AgentToolCatalog.PickUpItem)' `
+    "cancelled pickup work must remove its queued recovery jump"
 Assert-Contains $pickup '[ACTION] PICKUP_APPROACH_REACHED' `
     "runtime evidence must distinguish successful navigation from pickup"
 Assert-Contains $pickup '[ACTION] PICKUP_JOB_CONCLUDED' `

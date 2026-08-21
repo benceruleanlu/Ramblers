@@ -20,8 +20,10 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
     private const float DropAbsentSettlementSeconds = 0.25f;
     private const float DropRetrySeconds = 0.50f;
     private const float PickupTimeoutSecondsValue = 25f;
+    private const float DropTimeoutSecondsValue = 5f;
     private const int MaximumApproachRecoveries = 2;
-    private const float ApproachCommitSeconds = 0.75f;
+    private const float ApproachCommitSeconds = 0.45f;
+    private const float ApproachNavigationInterval = 0.1f;
 
     private enum PickupState
     {
@@ -52,6 +54,8 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
     private CompanionJobCompletion _completion;
     private int _approachRecoveries;
     private float _approachCommitUntil;
+    private Vector3 _approachCommitDirection;
+    private float _nextApproachTick;
 
     internal CompanionPickupBehavior(
         CompanionLocomotion locomotion,
@@ -116,7 +120,9 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
 
     public bool IsActive => _state != PickupState.Idle;
 
-    public float TimeoutSeconds => PickupTimeoutSecondsValue;
+    public float TimeoutSeconds => IsExplicitDrop
+        ? DropTimeoutSecondsValue
+        : PickupTimeoutSecondsValue;
 
     public void Bind(CompanionBody body, PlayerCharacter human)
     {
@@ -209,6 +215,7 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
         ResetDropTracking();
         _approachRecoveries = 0;
         _approachCommitUntil = 0f;
+        _approachCommitDirection = Vector3.zero;
         _locomotion.ResetProgressObservation(now);
         _attention.SetTarget(GazeChannel.Manipulation, targetPoint);
         Plugin.Logger.LogInfo(
@@ -476,6 +483,10 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
 
     private void TickApproach(float now)
     {
+        if (now < _nextApproachTick)
+            return;
+        _nextApproachTick = now + ApproachNavigationInterval;
+
         if (_body == null || !_body.IsAlive)
         {
             CompleteFailure("bot_not_spawned");
@@ -529,9 +540,12 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
 
         var direction = toTarget / horizontalDistance;
         SteeringStatus status;
+        var directGroundLimited = false;
         if (now < _approachCommitUntil)
         {
-            _locomotion.CommitTraversalDirection(direction, horizontalDistance);
+            _locomotion.CommitTraversalDirection(
+                _approachCommitDirection,
+                horizontalDistance);
         }
         else if (!_locomotion.TrySteerToward(
                      direction,
@@ -539,14 +553,21 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
                      now,
                      out status))
         {
+            directGroundLimited = status.DirectGroundLimited;
             _locomotion.Stop(now);
-            if (!TryRecoverApproach(now, direction, horizontalDistance, "blocked_path"))
+            if (directGroundLimited ||
+                !TryRecoverApproach(now, direction, horizontalDistance, "blocked_path"))
                 CompleteFailure("item_path_blocked");
             return;
         }
+        else
+        {
+            directGroundLimited = status.DirectGroundLimited;
+        }
 
         if (_locomotion.ObserveProgress(now) &&
-            !TryRecoverApproach(now, direction, horizontalDistance, "stuck"))
+            (directGroundLimited ||
+             !TryRecoverApproach(now, direction, horizontalDistance, "stuck")))
         {
             CompleteFailure("item_path_blocked");
         }
@@ -560,11 +581,23 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
     {
         if (_approachRecoveries >= MaximumApproachRecoveries)
             return false;
+        var committedDistance = Mathf.Min(
+            distance,
+            _locomotion.RunSpeed *
+            (ApproachCommitSeconds + ApproachNavigationInterval));
+        if (!_locomotion.HasGroundSupportAhead(direction, committedDistance))
+        {
+            Plugin.Logger.LogWarning(
+                $"[ACTION] PICKUP_APPROACH_BLOCKED referenceId={ReferenceIdForLog}, " +
+                "reason=unsupported_ground.");
+            return false;
+        }
 
         string jumpError;
         if (!_jump.TryRequestActionRecovery(
                 now,
                 _locomotion.Posture,
+                AgentToolCatalog.PickUpItem,
                 reason,
                 out jumpError))
         {
@@ -576,6 +609,7 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
 
         _approachRecoveries++;
         _approachCommitUntil = now + ApproachCommitSeconds;
+        _approachCommitDirection = direction;
         _locomotion.CommitTraversalDirection(direction, distance);
         _locomotion.ResetProgressObservation(now);
         Plugin.Logger.LogInfo(
@@ -989,7 +1023,10 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
 
     private void EndAction()
     {
-        if (_locomotion != null)
+        _jump.CancelActionRecovery(AgentToolCatalog.PickUpItem);
+        // Explicit drop reserves Hands only and may run concurrently with
+        // follow, so it must never clear locomotion it does not own.
+        if (_locomotion != null && !IsExplicitDrop)
             _locomotion.Stop(Time.realtimeSinceStartup);
         _state = PickupState.Idle;
         _target = null;
@@ -999,6 +1036,8 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
         ResetDropTracking();
         _approachRecoveries = 0;
         _approachCommitUntil = 0f;
+        _approachCommitDirection = Vector3.zero;
+        _nextApproachTick = 0f;
         _attention.ClearTarget(GazeChannel.Manipulation);
     }
 
@@ -1019,6 +1058,8 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
         _completion = null;
         _approachRecoveries = 0;
         _approachCommitUntil = 0f;
+        _approachCommitDirection = Vector3.zero;
+        _nextApproachTick = 0f;
         ResetDropTracking();
     }
 }

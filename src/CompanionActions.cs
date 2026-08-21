@@ -42,7 +42,7 @@ internal sealed class CompanionActionCoordinator
         _jobs = new ICompanionJob[]
         {
             new CompanionInspectionBehavior(_attention),
-            new CompanionInteractBehavior(_attention),
+            new CompanionInteractBehavior(_locomotion, _attention, _jump),
             new CompanionPickupBehavior(_locomotion, _attention, _jump),
             new CompanionKickBehavior(_attention)
         };
@@ -127,6 +127,12 @@ internal sealed class CompanionActionCoordinator
 
     internal AgentToolResult SetPosture(CompanionPosture posture, float now)
     {
+        var locomotionHolder = FindHolder(JobResources.Locomotion);
+        if (posture == CompanionPosture.Sitting && locomotionHolder != null)
+        {
+            return AgentToolResult.Failure(
+                locomotionHolder.ActiveName + "_in_progress");
+        }
         var result = _posture.Set(posture);
         if (!result.Ok)
             return result;
@@ -349,6 +355,11 @@ internal sealed class CompanionActionCoordinator
         out AgentToolResult failure)
     {
         var wanted = job.RequiredFor(request);
+        if ((wanted & JobResources.Locomotion) != 0 && _posture.BlocksMovement)
+        {
+            failure = AgentToolResult.Failure("movement_blocked_by_posture");
+            return false;
+        }
         if ((wanted & JobResources.Locomotion) != 0 && _jump.IsQueued)
         {
             failure = AgentToolResult.Failure("jump_in_progress");

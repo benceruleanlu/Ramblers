@@ -73,6 +73,7 @@ namespace Ramblers
         {
             CollapsesThroughLatestNearbyPoint();
             RejectsAnotherVerticalLevel();
+            RejectsBlockedNearbyPoint();
             PreservesUncommittedJump();
             PreservesUncommittedDrop();
             Console.WriteLine("Breadcrumb shortcut probe passed.");
@@ -95,6 +96,7 @@ namespace Ramblers
                 0.5f,
                 0,
                 0,
+                null,
                 out firstRemoved,
                 out lastRemoved);
 
@@ -119,11 +121,34 @@ namespace Ramblers
                 0.5f,
                 0,
                 0,
+                null,
                 out firstRemoved,
                 out lastRemoved);
 
             Expect(removed == 0, "stacked-floor point was incorrectly collapsed");
             Expect(trail.Count == 2, "vertical rejection mutated the route");
+        }
+
+        private static void RejectsBlockedNearbyPoint()
+        {
+            var trail = new BreadcrumbTrail(4);
+            trail.Add(Point(0f, 0f), false, false);
+            trail.Add(Point(1f, 0f), false, false);
+
+            BreadcrumbPoint firstRemoved;
+            BreadcrumbPoint lastRemoved;
+            var removed = trail.RemoveThroughLatestNearby(
+                Point(1f, 0f),
+                0.25f,
+                0.5f,
+                0,
+                0,
+                delegate { return false; },
+                out firstRemoved,
+                out lastRemoved);
+
+            Expect(removed == 0, "blocked nearby point was incorrectly collapsed");
+            Expect(trail.Count == 2, "blocked shortcut mutated the route");
         }
 
         private static void PreservesUncommittedJump()
@@ -143,6 +168,7 @@ namespace Ramblers
                 0.5f,
                 jump.Sequence,
                 0,
+                null,
                 out firstRemoved,
                 out lastRemoved);
             Expect(removed == 3, "committed jump should permit a proven loop shortcut");
@@ -171,6 +197,7 @@ namespace Ramblers
                 0.5f,
                 0,
                 0,
+                null,
                 out firstRemoved,
                 out lastRemoved);
             Expect(removed == 0, "uncommitted " + marker + " marker was skipped");

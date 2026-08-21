@@ -90,12 +90,17 @@ Assert-Order $bridge 'CompanionController.TryTakeAwarenessTurnContext(' `
 Assert-Order $bridge '_client.QueueTurnContext(awarenessContext.Message);' `
     '_client.RequestResponse(turnId);' `
     "the context item must enter the conversation before response.create"
+Assert-Order $bridge '_client.QueueTurnContext(awarenessContext.Message);' `
+    'CompanionController.ConfirmAwarenessTurnContextDelivered(' `
+    "events and visual memory must be consumed only after queue success"
 Assert-Contains $bridge '[AWARENESS] TURN_CONTEXT_CAPTURED' `
     "runtime evidence must report context delivery"
 Assert-Contains $bridge 'events={awarenessContext.EventCount}' `
     "runtime evidence must include the event count"
 Assert-Contains $bridge 'nearbyProps={awarenessContext.NearbyPropCount}' `
     "runtime evidence must include the nearby-prop count"
+Assert-Contains $bridge 'nearbyInteractables={awarenessContext.NearbyInteractableCount}' `
+    "runtime evidence must include actionable switch discovery"
 Assert-Contains $bridge 'rememberedProps={awarenessContext.RememberedPropCount}' `
     "runtime evidence must include cross-turn entity memory"
 Assert-Contains $bridge 'actionableEntities={awarenessContext.EntityReferences?.Count ?? 0}' `
@@ -116,6 +121,12 @@ Assert-NotContains $queueMethod 'QueueResponseCreate' `
     "queuing context must never trigger an unsolicited response"
 Assert-NotContains $queueMethod 'RequestResponse' `
     "the bridge alone must own response timing"
+Assert-Contains $queueMethod 'return QueueJson(new' `
+    "context delivery must report actual outbound admission"
+Assert-Contains $client 'private bool QueueRaw(string json)' `
+    "outbound queue admission must be observable to one-shot callers"
+Assert-Contains $client 'if (_disposed || _cancellation.IsCancellationRequested)' `
+    "queue admission must reject a closed client"
 
 Assert-Contains $awareness 'private const int MaximumJournalEntries = 8;' `
     "the recent event journal must remain bounded"
@@ -125,6 +136,10 @@ Assert-Contains $awareness 'private const int MaximumNearbyProps = 6;' `
     "nearby prop context must remain compact"
 Assert-Contains $awareness 'private const int MaximumNearbyPlayers = 3;' `
     "nearby player context must remain compact"
+Assert-Contains $awareness 'private const int MaximumNearbyInteractables = 6;' `
+    "nearby interaction context must remain compact"
+Assert-Contains $awareness 'payloadIndices.TryGetValue(' `
+    "one exact switch must not consume multiple bounded context entries"
 Assert-Contains $awareness 'while (_journal.Count > MaximumJournalEntries)' `
     "the journal bound must be enforced"
 Assert-Contains $awareness 'var props = Prop.allProps;' `
@@ -141,8 +156,12 @@ Assert-Contains $awareness 'recently_seen_props = rememberedProps' `
     "recent object context must survive beyond the immediate nearby list"
 Assert-Contains $awareness 'private const float RememberedPropLifetimeSeconds = 45f;' `
     "cross-turn object memory must be short lived"
-Assert-Contains $awareness 'entityReferences.Add(memory.Target);' `
+Assert-Contains $awareness 'entityReferences.Add(target);' `
     "remembered context IDs must remain actionable against the same object"
+Assert-Contains $awareness 'internal void ConfirmTurnContextDelivered(' `
+    "awareness must expose an explicit successful-delivery commit boundary"
+Assert-Contains $awareness 'context.DeliveredThroughEventSequence' `
+    "event delivery must commit only through the captured sequence"
 Assert-Contains $entityReferences '_props.TryGetValue(stableId, out target)' `
     "action targeting must resolve only an exact model-selected ID"
 Assert-Contains $entityReferences '!target.TryGetCurrentPoint(out point)' `
@@ -166,8 +185,10 @@ Assert-Contains $awareness '_nextPassiveCaptureAt = now + PassiveCandidateRetryS
     "a failed or unchanged capture candidate must retry before the normal cadence"
 Assert-Contains $awareness 'var attachVisual = !_passiveDelivered' `
     "a retained frame must be attached at most once"
-Assert-Contains $awareness 'if (attachVisual)' `
-    "visual delivery must be explicitly consumed"
+Assert-Contains $awareness 'if (context.HasImage && context.PassiveCapturedAt >= 0f' `
+    "visual delivery must be explicitly committed after successful queueing"
+Assert-Contains $awareness 'Mathf.Approximately(context.PassiveCapturedAt, _passiveCapturedAt)' `
+    "delivery confirmation must not consume a newer passive frame"
 Assert-Contains $awareness '_passiveDelivered = true;' `
     "one-shot visual delivery must be enforced"
 

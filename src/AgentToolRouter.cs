@@ -248,43 +248,47 @@ internal static class AgentToolRouter
                 AgentToolResult.Failure("invalid_arguments"));
         }
 
-        CompanionPeckSource source;
-        if (string.Equals(target, "human_reference", StringComparison.Ordinal))
-        {
-            source = CompanionPeckSource.HumanReference;
-        }
-        else if (string.Equals(
-                     target,
-                     "companion_held_item",
-                     StringComparison.Ordinal))
-        {
-            source = CompanionPeckSource.CompanionHeldItem;
-        }
-        else
+        if (turnReference == null)
         {
             return AgentToolDispatch.Immediate(
-                AgentToolResult.Failure("invalid_arguments"));
-        }
-
-        if (turnReference == null || turnReference.PeckCandidates == null)
-        {
-            return AgentToolDispatch.Immediate(
-                AgentToolResult.Failure(
-                    turnReference?.PeckCaptureError ??
-                    "interaction_reference_not_captured"));
+                AgentToolResult.Failure("object_not_found"));
         }
 
         CompanionPeckTarget peckTarget;
-        string selectionError;
-        if (!turnReference.PeckCandidates.TrySelect(
-                source,
-                out peckTarget,
-                out selectionError))
+        string selectionError = null;
+        if (string.Equals(target, "human_reference", StringComparison.Ordinal) ||
+            string.Equals(target, "companion_held_item", StringComparison.Ordinal))
+        {
+            var source = string.Equals(
+                target,
+                "companion_held_item",
+                StringComparison.Ordinal)
+                ? CompanionPeckSource.CompanionHeldItem
+                : CompanionPeckSource.HumanReference;
+            if (turnReference.PeckCandidates == null ||
+                !turnReference.PeckCandidates.TrySelect(
+                    source,
+                    out peckTarget,
+                    out selectionError))
+            {
+                return AgentToolDispatch.Immediate(
+                    AgentToolResult.Failure("object_not_found"));
+            }
+        }
+        else if (turnReference.EntityReferences == null ||
+                 !turnReference.EntityReferences.TryResolveInteraction(
+                     target,
+                     out peckTarget,
+                     out selectionError))
         {
             return AgentToolDispatch.Immediate(
-                AgentToolResult.Failure(
-                    selectionError ?? "interaction_reference_unavailable"));
+                AgentToolResult.Failure(selectionError ?? "object_not_found"));
         }
+
+        Plugin.Logger.LogInfo(
+            $"[ENTITY] TARGET_RESOLVED action={AgentToolCatalog.InteractWithObject}, " +
+            $"target={target}, referenceId={peckTarget.ReferenceId}, " +
+            $"netId={peckTarget.NetworkId}, turnId={turnReference.TurnId}.");
 
         return ExecuteJob(
             AgentToolCatalog.InteractWithObject,

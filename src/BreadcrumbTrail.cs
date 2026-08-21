@@ -1,3 +1,4 @@
+using System;
 using UnityEngine;
 
 namespace Ramblers;
@@ -211,6 +212,7 @@ internal sealed class BreadcrumbTrail
         float verticalTolerance,
         int committedJumpSequence,
         int committedDropSequence,
+        Func<Vector3, bool> canShortcut,
         out BreadcrumbPoint firstRemoved,
         out BreadcrumbPoint lastRemoved)
     {
@@ -233,7 +235,8 @@ internal sealed class BreadcrumbTrail
 
             if (offset > 0 &&
                 Mathf.Abs(from.y - point.Position.y) <= verticalTolerance &&
-                HorizontalDistance(from, point.Position) <= horizontalTolerance)
+                HorizontalDistance(from, point.Position) <= horizontalTolerance &&
+                (canShortcut == null || canShortcut(point.Position)))
             {
                 latestNearbyOffset = offset;
             }

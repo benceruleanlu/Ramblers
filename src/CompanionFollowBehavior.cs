@@ -32,6 +32,7 @@ internal sealed class CompanionFollowBehavior
     private const float DropCommitApproachDistance = 1.8f;
     private const float DropDirectionCommitSeconds = 1.25f;
     private const float TraversalDirectionCommitSeconds = 1.25f;
+    private const float RecoveryDirectionCommitSeconds = 0.45f;
     private const int MaximumJumpAttemptsPerBreadcrumb = 2;
     private const float StatusLogInterval = 1f;
     private const int MaximumBreadcrumbs = 1024;
@@ -76,6 +77,7 @@ internal sealed class CompanionFollowBehavior
     private int _jumpAttemptsForBreadcrumb;
     private int _dropCommittedSequence;
     private float _directTraversalUntil;
+    private Vector3 _committedTraversalDirection;
     private Vector3 _lastRouteDirection;
 
     internal CompanionFollowBehavior(
@@ -415,12 +417,14 @@ internal sealed class CompanionFollowBehavior
                 BreadcrumbArrivalVerticalTolerance,
                 _jumpCommittedSequence,
                 _dropCommittedSequence,
+                IsRouteShortcutTraversable,
                 out shortcutFirst,
                 out shortcutLast)
             : 0;
         if (shortcutRemoved > 0)
         {
             _directTraversalUntil = 0f;
+            _committedTraversalDirection = Vector3.zero;
             _locomotion.ResetProgressObservation(now);
             Plugin.Logger.LogInfo(
                 "[FOLLOW] ROUTE_SHORTCUT reason=later_breadcrumb_nearby " +
@@ -462,6 +466,8 @@ internal sealed class CompanionFollowBehavior
         var previousState = _state;
         var previousAngle = _locomotion.LastSteeringAngle;
         SteeringStatus status;
+        if (now >= _directTraversalUntil)
+            _committedTraversalDirection = Vector3.zero;
         var usedTraversalCommit = now < _directTraversalUntil;
         if (!usedTraversalCommit)
         {
@@ -478,6 +484,7 @@ internal sealed class CompanionFollowBehavior
                     now,
                     breadcrumb,
                     jumpReason,
+                    desiredDirection,
                     targetHorizontalDistance,
                     targetVerticalDelta))
             {
@@ -494,6 +501,7 @@ internal sealed class CompanionFollowBehavior
             _directTraversalUntil = Mathf.Max(
                 _directTraversalUntil,
                 now + DropDirectionCommitSeconds);
+            _committedTraversalDirection = desiredDirection;
             usedTraversalCommit = true;
             if (_dropCommittedSequence != breadcrumb.Sequence)
             {
@@ -511,7 +519,7 @@ internal sealed class CompanionFollowBehavior
         if (usedTraversalCommit)
         {
             status = _locomotion.CommitTraversalDirection(
-                desiredDirection,
+                _committedTraversalDirection,
                 trailDistance);
         }
         else if (!_locomotion.TrySteerToward(
@@ -520,12 +528,14 @@ internal sealed class CompanionFollowBehavior
                      now,
                      out status))
         {
-            if (targetHorizontalDistance <= BlockedJumpApproachDistance &&
+            if (!status.DirectGroundLimited &&
+                targetHorizontalDistance <= BlockedJumpApproachDistance &&
                 targetVerticalDelta >= -BreadcrumbArrivalVerticalTolerance &&
                 TryCommitTraversalJump(
                     now,
                     breadcrumb,
                     "blocked_route",
+                    desiredDirection,
                     targetHorizontalDistance,
                     targetVerticalDelta))
             {
@@ -573,11 +583,13 @@ internal sealed class CompanionFollowBehavior
 
         var stuck = _locomotion.ObserveProgress(now);
         if (stuck &&
+            !status.DirectGroundLimited &&
             targetVerticalDelta >= -BreadcrumbArrivalVerticalTolerance &&
             TryCommitTraversalJump(
                 now,
                 breadcrumb,
                 "stuck_recovery",
+                desiredDirection,
                 targetHorizontalDistance,
                 targetVerticalDelta))
         {
@@ -587,6 +599,13 @@ internal sealed class CompanionFollowBehavior
             _locomotion.ResetProgressObservation(now);
         }
         LogFollowStatusIfDue(now, humanDistance, targetDistance);
+    }
+
+    private bool IsRouteShortcutTraversable(Vector3 point)
+    {
+        if (_body == null || !_body.IsAlive)
+            return false;
+        return _locomotion.CanTraverseGroundedSegment(point);
     }
 
     private BreadcrumbPoint SelectTraversalLookahead(Vector3 botPosition)
@@ -685,6 +704,7 @@ internal sealed class CompanionFollowBehavior
         float now,
         BreadcrumbPoint breadcrumb,
         string reason,
+        Vector3 direction,
         float horizontalDistance,
         float verticalDelta)
     {
@@ -703,14 +723,30 @@ internal sealed class CompanionFollowBehavior
 
         _jumpAttemptsForBreadcrumb++;
         _jumpCommittedSequence = breadcrumb.Sequence;
-        _directTraversalUntil = now + TraversalDirectionCommitSeconds;
+        var recovery = string.Equals(
+                           reason,
+                           "blocked_route",
+                           StringComparison.Ordinal) ||
+                       string.Equals(
+                           reason,
+                           "stuck_recovery",
+                           StringComparison.Ordinal);
+        var commitSeconds = recovery
+            ? RecoveryDirectionCommitSeconds
+            : TraversalDirectionCommitSeconds;
+        _directTraversalUntil = now + commitSeconds;
+        direction.y = 0f;
+        _committedTraversalDirection = direction.sqrMagnitude < 0.0001f
+            ? breadcrumb.TravelDirection
+            : direction.normalized;
         _locomotion.ResetProgressObservation(now);
         Plugin.Logger.LogInfo(
             "[FOLLOW] JUMP_COMMIT " +
             $"breadcrumb={breadcrumb.Sequence}, reason={reason}, " +
             $"attempt={_jumpAttemptsForBreadcrumb}, " +
             $"horizontalDistance={horizontalDistance:F2}, " +
-            $"verticalDelta={verticalDelta:F2}.");
+            $"verticalDelta={verticalDelta:F2}, " +
+            $"commitSeconds={commitSeconds:F2}.");
         return true;
     }
 
@@ -809,6 +845,7 @@ internal sealed class CompanionFollowBehavior
         _jumpAttemptsForBreadcrumb = 0;
         _dropCommittedSequence = 0;
         _directTraversalUntil = 0f;
+        _committedTraversalDirection = Vector3.zero;
         _lastRouteDirection = Vector3.zero;
     }
 
@@ -925,7 +962,10 @@ internal sealed class CompanionFollowBehavior
     {
         _locomotion.Stop(now);
         if (state != FollowState.Following)
+        {
             _directTraversalUntil = 0f;
+            _committedTraversalDirection = Vector3.zero;
+        }
         _state = state;
     }
 

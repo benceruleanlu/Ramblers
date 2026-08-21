@@ -93,6 +93,10 @@ Assert-Contains $actions 'var wanted = job.RequiredFor(request);' `
     "the coordinator must reserve the requested operation's resources"
 Assert-Contains $pickup '? JobResources.Hands' `
     "drop must claim hands without unnecessarily blocking locomotion"
+Assert-Contains $pickup 'private const float DropTimeoutSecondsValue = 5f;' `
+    "drop must retain its short operation-specific timeout"
+Assert-Contains $pickup 'if (_locomotion != null && !IsExplicitDrop)' `
+    "drop completion must not stop locomotion it never reserved"
 
 Assert-Contains $target 'TryCaptureHeldProp(' `
     "drop must freeze the prop already in the companion's hands"

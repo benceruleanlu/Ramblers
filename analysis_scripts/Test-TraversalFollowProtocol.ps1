@@ -80,6 +80,8 @@ Assert-Contains $trail 'if (offset > 0 &&' `
     "route shortcutting must select a genuinely later breadcrumb"
 Assert-Contains $trail 'Mathf.Abs(from.y - point.Position.y) <= verticalTolerance' `
     "route shortcutting must preserve stacked-floor separation"
+Assert-Contains $trail '(canShortcut == null || canShortcut(point.Position))' `
+    "route shortcutting must allow the caller to reject through-wall proximity"
 Assert-Contains $trail 'break;' `
     "an uncommitted traversal marker must stop shortcut scanning"
 
@@ -112,6 +114,10 @@ Assert-Contains $follow '_trail.RemoveThroughLatestNearby(' `
     "follow must collapse a stale loop before selecting its next target"
 Assert-Contains $follow 'var shortcutRemoved = IsBodyGrounded' `
     "an airborne body must not rewrite its route from transient proximity"
+Assert-Contains $follow 'IsRouteShortcutTraversable,' `
+    "follow must require proof before deleting a nearby route prefix"
+Assert-Contains $follow '_locomotion.CanTraverseGroundedSegment(point)' `
+    "shortcut proof must reject body obstructions and unsupported ground"
 Assert-Order $follow '_trail.RemoveThroughLatestNearby(' `
     'var breadcrumb = SelectTraversalLookahead(botPosition);' `
     "route shortcutting must happen before the next breadcrumb is selected"
@@ -125,6 +131,20 @@ Assert-Contains $follow '(!traversalCommitted || now < _directTraversalUntil)' `
     "an expired traversal commitment must steer back to its point instead of running forever"
 Assert-Contains $follow '_jump.TryRequestTraversal(' `
     "recorded route traversal must queue a deterministic grounded jump"
+Assert-Contains $follow 'if (!status.DirectGroundLimited &&' `
+    "generic blocked-route recovery must not jump across unsupported ground"
+Assert-Contains $follow 'if (stuck &&' `
+    "stuck recovery must remain explicit and bounded"
+Assert-Contains $follow '!status.DirectGroundLimited &&' `
+    "stuck recovery must not commit the original heading across a ledge"
+Assert-Contains $follow 'private const float RecoveryDirectionCommitSeconds = 0.45f;' `
+    "generic recovery commitment must stay within the running support horizon"
+Assert-Contains $locomotion 'private const float BrakingLookahead = 0.55f;' `
+    "ground and obstacle proof must include one navigation tick beyond recovery expiry"
+Assert-Contains $follow '_committedTraversalDirection = desiredDirection;' `
+    "drop commitment must freeze the recorded route direction"
+Assert-Contains $follow '_committedTraversalDirection,' `
+    "an active traversal must not retarget to a later breadcrumb in midair"
 Assert-Contains $follow '"[FOLLOW] DROP_COMMIT "' `
     "a descending breadcrumb must commit forward movement at a ledge"
 Assert-Contains $follow '"stuck_recovery"' `
