@@ -72,6 +72,16 @@ Assert-Contains $trail 'point.Sequence != committedJumpSequence' `
     "an uncommitted jump marker must not be pruned as horizontally reached"
 Assert-Contains $trail 'point.Sequence != committedDropSequence' `
     "an uncommitted drop marker must not be pruned as horizontally reached"
+Assert-Contains $trail 'internal int RemoveThroughLatestNearby(' `
+    "the route must be able to collapse a stale prefix after crossing itself"
+Assert-Contains $trail 'if (_count < 2)' `
+    "route shortcutting must retain an ordinary single live target"
+Assert-Contains $trail 'if (offset > 0 &&' `
+    "route shortcutting must select a genuinely later breadcrumb"
+Assert-Contains $trail 'Mathf.Abs(from.y - point.Position.y) <= verticalTolerance' `
+    "route shortcutting must preserve stacked-floor separation"
+Assert-Contains $trail 'break;' `
+    "an uncommitted traversal marker must stop shortcut scanning"
 
 Assert-Order $follow 'if (UpdateCarryState(now))' `
     'ObserveHumanTraversal();' `
@@ -98,6 +108,17 @@ Assert-Contains $follow '"[FOLLOW] TRAVERSAL_LOOKAHEAD "' `
     "an upcoming traversal marker must not wait for exact arrival at the edge"
 Assert-Contains $follow '"[FOLLOW] ROUTE_ADVANCE reason=passed_plane "' `
     "waypoint overshoot must be visible in runtime evidence"
+Assert-Contains $follow '_trail.RemoveThroughLatestNearby(' `
+    "follow must collapse a stale loop before selecting its next target"
+Assert-Contains $follow 'var shortcutRemoved = IsBodyGrounded' `
+    "an airborne body must not rewrite its route from transient proximity"
+Assert-Order $follow '_trail.RemoveThroughLatestNearby(' `
+    'var breadcrumb = SelectTraversalLookahead(botPosition);' `
+    "route shortcutting must happen before the next breadcrumb is selected"
+Assert-Contains $follow '"[FOLLOW] ROUTE_SHORTCUT reason=later_breadcrumb_nearby "' `
+    "route-loop collapse must be visible in runtime evidence"
+Assert-Contains $follow '_locomotion.ResetProgressObservation(now);' `
+    "a new shortcut target must begin a fresh stuck-observation window"
 Assert-Contains $follow 'return breadcrumb.TravelDirection;' `
     "jump and drop commitment must follow the human's recorded route tangent"
 Assert-Contains $follow '(!traversalCommitted || now < _directTraversalUntil)' `

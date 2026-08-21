@@ -196,6 +196,66 @@ internal sealed class BreadcrumbTrail
         return removed;
     }
 
+    /// <summary>
+    /// Collapses an obsolete route prefix when the body is already inside the
+    /// arrival corridor of a later breadcrumb. This is the route equivalent of
+    /// taking a proven loop shortcut: the later point was occupied by the human,
+    /// and the body has independently reached the same place and level.
+    ///
+    /// An uncommitted traversal marker stops the scan. Geometric proximity must
+    /// never erase a jump or drop that the body has not performed.
+    /// </summary>
+    internal int RemoveThroughLatestNearby(
+        Vector3 from,
+        float horizontalTolerance,
+        float verticalTolerance,
+        int committedJumpSequence,
+        int committedDropSequence,
+        out BreadcrumbPoint firstRemoved,
+        out BreadcrumbPoint lastRemoved)
+    {
+        firstRemoved = default(BreadcrumbPoint);
+        lastRemoved = default(BreadcrumbPoint);
+        if (_count < 2)
+            return 0;
+
+        var latestNearbyOffset = -1;
+        for (var offset = 0; offset < _count; offset++)
+        {
+            var point = _points[(_head + offset) % _points.Length];
+            if ((point.RequiresJump &&
+                 point.Sequence != committedJumpSequence) ||
+                (point.RequiresDrop &&
+                 point.Sequence != committedDropSequence))
+            {
+                break;
+            }
+
+            if (offset > 0 &&
+                Mathf.Abs(from.y - point.Position.y) <= verticalTolerance &&
+                HorizontalDistance(from, point.Position) <= horizontalTolerance)
+            {
+                latestNearbyOffset = offset;
+            }
+        }
+
+        if (latestNearbyOffset < 1)
+            return 0;
+
+        var removed = 0;
+        for (var offset = 0; offset <= latestNearbyOffset; offset++)
+        {
+            BreadcrumbPoint point;
+            if (!TryRemoveFirst(out point))
+                break;
+            if (removed == 0)
+                firstRemoved = point;
+            lastRemoved = point;
+            removed++;
+        }
+        return removed;
+    }
+
     private static bool HasCrossedPointPlane(
         Vector3 from,
         BreadcrumbPoint point,

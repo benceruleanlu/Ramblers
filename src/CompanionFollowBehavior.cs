@@ -17,6 +17,7 @@ internal sealed class CompanionFollowBehavior
     private const float BreadcrumbArrivalTolerance = 0.8f;
     private const float BreadcrumbArrivalVerticalTolerance = 0.9f;
     private const float BreadcrumbPassLateralTolerance = 1.5f;
+    private const float RouteShortcutHorizontalTolerance = 1.5f;
     private const float FollowDistance = 2.25f;
     private const float ResumeDistance = 2.5f;
     private const float HoldingVerticalTolerance = 1.0f;
@@ -139,6 +140,18 @@ internal sealed class CompanionFollowBehavior
         if (_body == null || !_body.IsAlive)
             return;
 
+        // A physical job may own locomotion even while follow is explicitly
+        // set to stay. Yield before idle-follow cleanup can clear that job's
+        // velocity; the action coordinator is the authority for this gate.
+        if (!movementAllowed)
+        {
+            if (_followRequested)
+                SetMovementAllowed(false, now, movementBlocker);
+            else
+                _attention.ClearTarget(GazeChannel.Follow);
+            return;
+        }
+
         if (!_followRequested)
         {
             _attention.ClearTarget(GazeChannel.Follow);
@@ -157,12 +170,6 @@ internal sealed class CompanionFollowBehavior
             {
                 StopForState(FollowState.Carried, now);
             }
-            return;
-        }
-
-        if (!movementAllowed)
-        {
-            SetMovementAllowed(false, now, movementBlocker);
             return;
         }
 
@@ -276,8 +283,10 @@ internal sealed class CompanionFollowBehavior
                 _suspensionReason,
                 nextReason,
                 StringComparison.Ordinal);
-            if (_state != FollowState.Suspended ||
-                _locomotion.LastMovementIntent.sqrMagnitude > 0f)
+            // Stop only when follow first yields locomotion. Once suspended,
+            // any live movement intent belongs to the action holding that
+            // resource and must not be cleared by the follow behaviour.
+            if (_state != FollowState.Suspended)
             {
                 StopForState(FollowState.Suspended, now);
                 _suspensionReason = nextReason;
@@ -395,6 +404,29 @@ internal sealed class CompanionFollowBehavior
                 $"removed={removedBreadcrumbs}, last={lastRemoved.Sequence}, " +
                 $"position={botPosition}, waypoint={lastRemoved.Position}, " +
                 $"travelDirection={lastRemoved.TravelDirection}.");
+        }
+
+        var shortcutFirst = default(BreadcrumbPoint);
+        var shortcutLast = default(BreadcrumbPoint);
+        var shortcutRemoved = IsBodyGrounded
+            ? _trail.RemoveThroughLatestNearby(
+                botPosition,
+                RouteShortcutHorizontalTolerance,
+                BreadcrumbArrivalVerticalTolerance,
+                _jumpCommittedSequence,
+                _dropCommittedSequence,
+                out shortcutFirst,
+                out shortcutLast)
+            : 0;
+        if (shortcutRemoved > 0)
+        {
+            _directTraversalUntil = 0f;
+            _locomotion.ResetProgressObservation(now);
+            Plugin.Logger.LogInfo(
+                "[FOLLOW] ROUTE_SHORTCUT reason=later_breadcrumb_nearby " +
+                $"removed={shortcutRemoved}, first={shortcutFirst.Sequence}, " +
+                $"last={shortcutLast.Sequence}, remaining={_trail.Count}, " +
+                $"position={botPosition}.");
         }
         if (_trail.Count == 0)
             _trail.Add(routeEndpoint, false, false);
