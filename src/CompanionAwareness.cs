@@ -16,7 +16,9 @@ internal sealed class CompanionAwarenessTurnContext
     internal int EventCount;
     internal int NearbyPropCount;
     internal int NearbyPlayerCount;
+    internal int RememberedPropCount;
     internal float VisualAgeSeconds = -1f;
+    internal CompanionEntityReferenceSet EntityReferences;
 
     internal bool HasImage =>
         Message?.ImageBytes != null && Message.ImageBytes.Length > 0;
@@ -47,6 +49,9 @@ internal sealed class CompanionAwareness
     private const int MaximumNearbyPlayers = 3;
     private const float NearbyPropRadius = 10f;
     private const float NearbyPlayerRadius = 15f;
+    private const int MaximumRememberedProps = 4;
+    private const float RememberedPropLifetimeSeconds = 45f;
+    private const float RememberedPropMaximumDistance = 30f;
 
     private const float PassiveCaptureInitialDelaySeconds = 3f;
     private const float PassiveCaptureIntervalSeconds = 30f;
@@ -110,6 +115,22 @@ internal sealed class CompanionAwareness
         public HeldPayload held_item { get; set; }
     }
 
+    private sealed class RememberedPropPayload
+    {
+        public string id { get; set; }
+        public string name { get; set; }
+        public float last_seen_seconds_ago { get; set; }
+        public float current_distance_from_companion_m { get; set; }
+        public string current_bearing_from_companion { get; set; }
+    }
+
+    private sealed class RememberedProp
+    {
+        internal CompanionInteractionTarget Target;
+        internal string Name;
+        internal float SeenAt;
+    }
+
     private struct HeldObservation
     {
         internal int Key;
@@ -119,6 +140,8 @@ internal sealed class CompanionAwareness
     }
 
     private readonly Queue<JournalEntry> _journal = new Queue<JournalEntry>();
+    private readonly Dictionary<string, RememberedProp> _rememberedProps =
+        new Dictionary<string, RememberedProp>(StringComparer.Ordinal);
     private readonly LogLatch _passiveFailureLog = new LogLatch();
     private readonly LogLatch _tickFailureLog = new LogLatch();
 
@@ -403,7 +426,15 @@ internal sealed class CompanionAwareness
         }
 
         Tick(now);
-        var nearbyProps = CaptureNearbyProps(human);
+        var entityReferences = new CompanionEntityReferenceSet();
+        var nearbyProps = CaptureNearbyProps(human, now, entityReferences);
+        var nearbyPropIds = new HashSet<string>(StringComparer.Ordinal);
+        for (var index = 0; index < nearbyProps.Length; index++)
+            nearbyPropIds.Add(nearbyProps[index].id);
+        var rememberedProps = CaptureRememberedProps(
+            now,
+            nearbyPropIds,
+            entityReferences);
         var nearbyPlayers = CaptureNearbyPlayers(human);
         var recentEvents = CaptureUndeliveredEvents(now);
         var visualAge = _passiveImageBytes == null
@@ -457,6 +488,7 @@ internal sealed class CompanionAwareness
                 held_item = ToPayload(CaptureHeld(human))
             },
             nearby_props = nearbyProps,
+            recently_seen_props = rememberedProps,
             other_nearby_players = nearbyPlayers,
             recent_events = recentEvents,
             visual_memory = new
@@ -495,6 +527,8 @@ internal sealed class CompanionAwareness
             EventCount = recentEvents.Length,
             NearbyPropCount = nearbyProps.Length,
             NearbyPlayerCount = nearbyPlayers.Length,
+            RememberedPropCount = rememberedProps.Length,
+            EntityReferences = entityReferences,
             VisualAgeSeconds = attachVisual ? visualAge : -1f
         };
 
@@ -510,6 +544,7 @@ internal sealed class CompanionAwareness
         _humanAtSpawn = null;
         _actions = null;
         _journal.Clear();
+        _rememberedProps.Clear();
         _nextEventSequence = 0;
         _lastDeliveredEventSequence = 0;
         _humanHeld = default;
@@ -661,7 +696,10 @@ internal sealed class CompanionAwareness
         return events.ToArray();
     }
 
-    private NearbyPropPayload[] CaptureNearbyProps(PlayerCharacter human)
+    private NearbyPropPayload[] CaptureNearbyProps(
+        PlayerCharacter human,
+        float now,
+        CompanionEntityReferenceSet entityReferences)
     {
         var result = new List<NearbyPropPayload>();
         try
@@ -700,6 +738,19 @@ internal sealed class CompanionAwareness
                         : prop.isInInventory
                             ? "other_or_inventory"
                             : "none";
+                CompanionInteractionTarget entityTarget;
+                if (CompanionInteractionTarget.TryCaptureProp(
+                        prop,
+                        out entityTarget))
+                {
+                    entityReferences.Add(entityTarget);
+                    _rememberedProps[entityTarget.StableId] = new RememberedProp
+                    {
+                        Target = entityTarget,
+                        Name = PropName(prop),
+                        SeenAt = now
+                    };
+                }
                 result.Add(new NearbyPropPayload
                 {
                     id = StablePropId(prop),
@@ -727,10 +778,61 @@ internal sealed class CompanionAwareness
         }
 
         result.Sort((left, right) =>
-            left.distance_from_companion_m.CompareTo(
-                right.distance_from_companion_m));
+            Mathf.Min(
+                    left.distance_from_companion_m,
+                    left.distance_from_human_m)
+                .CompareTo(Mathf.Min(
+                    right.distance_from_companion_m,
+                    right.distance_from_human_m)));
         if (result.Count > MaximumNearbyProps)
             result.RemoveRange(MaximumNearbyProps, result.Count - MaximumNearbyProps);
+        return result.ToArray();
+    }
+
+    private RememberedPropPayload[] CaptureRememberedProps(
+        float now,
+        HashSet<string> nearbyPropIds,
+        CompanionEntityReferenceSet entityReferences)
+    {
+        var result = new List<RememberedPropPayload>();
+        var expired = new List<string>();
+        foreach (var pair in _rememberedProps)
+        {
+            var memory = pair.Value;
+            Vector3 point;
+            if (memory == null || memory.Target == null ||
+                now - memory.SeenAt > RememberedPropLifetimeSeconds ||
+                !memory.Target.TryGetCurrentPoint(out point))
+            {
+                expired.Add(pair.Key);
+                continue;
+            }
+
+            var distance = Vector3.Distance(_body.Position, point);
+            if (distance > RememberedPropMaximumDistance)
+                continue;
+
+            entityReferences.Add(memory.Target);
+            if (nearbyPropIds.Contains(pair.Key))
+                continue;
+            result.Add(new RememberedPropPayload
+            {
+                id = pair.Key,
+                name = memory.Name,
+                last_seen_seconds_ago = Round1(Mathf.Max(0f, now - memory.SeenAt)),
+                current_distance_from_companion_m = Round1(distance),
+                current_bearing_from_companion = BearingLabel(
+                    _body.Transform.forward,
+                    point - _body.Position)
+            });
+        }
+
+        for (var index = 0; index < expired.Count; index++)
+            _rememberedProps.Remove(expired[index]);
+        result.Sort((left, right) =>
+            left.last_seen_seconds_ago.CompareTo(right.last_seen_seconds_ago));
+        if (result.Count > MaximumRememberedProps)
+            result.RemoveRange(MaximumRememberedProps, result.Count - MaximumRememberedProps);
         return result.ToArray();
     }
 
@@ -872,12 +974,7 @@ internal sealed class CompanionAwareness
 
     private static string StablePropId(Prop prop)
     {
-        if (prop == null)
-            return "prop:unavailable";
-        var identity = prop.GetComponentInParent<NetworkIdentity>();
-        return identity != null && identity.netId != 0u
-            ? "prop:net:" + identity.netId
-            : "prop:local:" + prop.GetInstanceID();
+        return CompanionInteractionTarget.StableIdFor(prop);
     }
 
     private static string StablePlayerId(PlayerCharacter player)

@@ -98,6 +98,7 @@ internal sealed class CompanionTurnReference
     internal string InspectionCaptureError;
     internal CompanionPeckCandidates PeckCandidates;
     internal string PeckCaptureError;
+    internal CompanionEntityReferenceSet EntityReferences;
 }
 
 /// <summary>

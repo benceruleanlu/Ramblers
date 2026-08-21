@@ -72,6 +72,29 @@ internal sealed class CompanionJumpActuator
         return true;
     }
 
+    internal bool TryRequestActionRecovery(
+        float now,
+        CompanionPosture posture,
+        string reason,
+        out string error)
+    {
+        error = null;
+        if (_queued)
+            return true;
+        if (now < _nextRequestAt)
+        {
+            error = "jump_cooldown";
+            return false;
+        }
+        if (!CanJump(posture, out error))
+            return false;
+
+        Queue(now, "action", reason);
+        Plugin.Logger.LogInfo(
+            $"[ACTION] PICKUP_JUMP_QUEUED reason={reason ?? "path_recovery"}.");
+        return true;
+    }
+
     internal void TickFixed(float now, CompanionPosture posture)
     {
         if (!_queued)

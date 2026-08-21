@@ -130,11 +130,7 @@ internal static class AgentToolRouter
         CompanionTurnReference turnReference)
     {
         string target;
-        if (!TryReadOnlyStringArgument(arguments, "target", out target) ||
-            !string.Equals(
-                target,
-                "human_reference",
-                StringComparison.Ordinal))
+        if (!TryReadOnlyStringArgument(arguments, "target", out target))
         {
             return AgentToolDispatch.Immediate(
                 AgentToolResult.Failure("invalid_arguments"));
@@ -146,14 +142,34 @@ internal static class AgentToolRouter
                 AgentToolResult.Failure("human_reference_not_captured"));
         }
 
-        if (turnReference.Target == null)
+        CompanionInteractionTarget interactionTarget;
+        if (string.Equals(target, "human_reference", StringComparison.Ordinal))
         {
-            return AgentToolDispatch.Immediate(
-                AgentToolResult.Failure(
-                    string.IsNullOrEmpty(turnReference.CaptureError)
-                        ? "human_reference_not_captured"
-                        : turnReference.CaptureError));
+            interactionTarget = turnReference.Target;
+            if (interactionTarget == null)
+            {
+                return AgentToolDispatch.Immediate(
+                    AgentToolResult.Failure("item_not_found"));
+            }
         }
+        else
+        {
+            string resolveError = null;
+            if (turnReference.EntityReferences == null ||
+                !turnReference.EntityReferences.TryResolve(
+                    target,
+                    out interactionTarget,
+                    out resolveError))
+            {
+                return AgentToolDispatch.Immediate(
+                    AgentToolResult.Failure(resolveError ?? "item_not_found"));
+            }
+        }
+
+        Plugin.Logger.LogInfo(
+            $"[ENTITY] TARGET_RESOLVED action={jobName}, target={target}, " +
+            $"referenceId={interactionTarget.ReferenceId}, " +
+            $"netId={interactionTarget.NetworkId}, turnId={turnReference.TurnId}.");
 
         return ExecuteJob(
             jobName,
@@ -161,7 +177,7 @@ internal static class AgentToolRouter
             new CompanionJobRequest
             {
                 TurnId = turnReference.TurnId,
-                InteractionTarget = turnReference.Target
+                InteractionTarget = interactionTarget
             });
     }
 

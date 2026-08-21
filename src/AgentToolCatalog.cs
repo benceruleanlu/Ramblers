@@ -131,7 +131,7 @@ internal static class AgentToolCatalog
             type = "function",
             name = PickUpItem,
             description =
-                "Pick up the single nearby prop the human was looking at when their current utterance ended. Use only when the human explicitly asks you to pick up, grab, or take that referenced item. Never substitute another or nearest item; an unavailable or ambiguous reference must fail.",
+                "Go to and pick up one exact prop. Silently use its prop ID from nearby_props or recently_seen_props when the human names it or refers to an object already in context; use human_reference when their current gaze is the only grounding. Reuse a recent prop ID for natural follow-ups such as 'fetch it'. Never say IDs aloud, ask the human to choose an internal reference type, or substitute another or nearest item.",
             parameters = new
             {
                 type = "object",
@@ -141,8 +141,7 @@ internal static class AgentToolCatalog
                     {
                         type = "string",
                         description =
-                            "The frozen physical referent from this human utterance.",
-                        @enum = new[] { "human_reference" }
+                            "Either human_reference for the current pointed/gazed-at prop, or the exact prop:net:/prop:local: ID from private game context."
                     }
                 },
                 required = new[] { "target" },

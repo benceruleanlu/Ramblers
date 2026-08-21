@@ -322,7 +322,8 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             InspectionCandidates = inspectionCandidates,
             InspectionCaptureError = inspectionCaptureError,
             PeckCandidates = peckCandidates,
-            PeckCaptureError = peckCaptureError
+            PeckCaptureError = peckCaptureError,
+            EntityReferences = awarenessContext?.EntityReferences
         };
         var awarenessQueued = false;
         if (awarenessContext != null)
@@ -412,6 +413,8 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
                 $"textChars={awarenessContext.Message.Text.Length}, " +
                 $"events={awarenessContext.EventCount}, " +
                 $"nearbyProps={awarenessContext.NearbyPropCount}, " +
+                $"rememberedProps={awarenessContext.RememberedPropCount}, " +
+                $"actionableEntities={awarenessContext.EntityReferences?.Count ?? 0}, " +
                 $"nearbyPlayers={awarenessContext.NearbyPlayerCount}, " +
                 $"visualAttached={awarenessContext.HasImage}, " +
                 $"visualAgeSeconds={awarenessContext.VisualAgeSeconds:F1}.");

@@ -54,6 +54,8 @@ $client = Read-Source "src\OpenAIRealtimeClient.cs"
 $awareness = Read-Source "src\CompanionAwareness.cs"
 $ambient = Read-Source "src\CompanionAmbientGaze.cs"
 $controller = Read-Source "src\CompanionController.cs"
+$interactionTarget = Read-Source "src\CompanionInteractionTarget.cs"
+$entityReferences = Read-Source "src\CompanionEntityReferences.cs"
 
 $queueStart = $client.IndexOf(
     "internal bool QueueTurnContext",
@@ -94,6 +96,10 @@ Assert-Contains $bridge 'events={awarenessContext.EventCount}' `
     "runtime evidence must include the event count"
 Assert-Contains $bridge 'nearbyProps={awarenessContext.NearbyPropCount}' `
     "runtime evidence must include the nearby-prop count"
+Assert-Contains $bridge 'rememberedProps={awarenessContext.RememberedPropCount}' `
+    "runtime evidence must include cross-turn entity memory"
+Assert-Contains $bridge 'actionableEntities={awarenessContext.EntityReferences?.Count ?? 0}' `
+    "runtime evidence must report exact actionable entity bindings"
 Assert-Contains $bridge 'visualAttached={awarenessContext.HasImage}' `
     "runtime evidence must identify image attachment"
 Assert-Contains $bridge '[AWARENESS] TURN_CONTEXT_QUEUE_FAILED' `
@@ -123,12 +129,24 @@ Assert-Contains $awareness 'while (_journal.Count > MaximumJournalEntries)' `
     "the journal bound must be enforced"
 Assert-Contains $awareness 'var props = Prop.allProps;' `
     "nearby props must come from the game's maintained registry"
+Assert-Contains $awareness 'left.distance_from_human_m)' `
+    "the compact prop list must retain items relevant to either player"
 Assert-NotContains $awareness 'Resources.FindObjectsOfTypeAll<Prop>' `
     "awareness must not perform an exhaustive Unity object scan"
-Assert-Contains $awareness '"prop:net:" + identity.netId' `
+Assert-Contains $interactionTarget '"prop:net:" + identity.netId' `
     "network props must carry stable identity"
-Assert-Contains $awareness '"prop:local:" + prop.GetInstanceID()' `
+Assert-Contains $interactionTarget '"prop:local:" + prop.GetInstanceID()' `
     "local props must have an explicit scoped fallback identity"
+Assert-Contains $awareness 'recently_seen_props = rememberedProps' `
+    "recent object context must survive beyond the immediate nearby list"
+Assert-Contains $awareness 'private const float RememberedPropLifetimeSeconds = 45f;' `
+    "cross-turn object memory must be short lived"
+Assert-Contains $awareness 'entityReferences.Add(memory.Target);' `
+    "remembered context IDs must remain actionable against the same object"
+Assert-Contains $entityReferences '_props.TryGetValue(stableId, out target)' `
+    "action targeting must resolve only an exact model-selected ID"
+Assert-Contains $entityReferences '!target.TryGetCurrentPoint(out point)' `
+    "remembered action handles must revalidate live availability"
 Assert-Contains $awareness 'Private nonverbal game perception for the preceding human utterance.' `
     "each packet must be self-describing"
 

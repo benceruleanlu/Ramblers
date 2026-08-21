@@ -26,12 +26,44 @@ internal sealed class CompanionInteractionTarget
         ReferenceId = prop.GetInstanceID();
         _networkIdentity = prop.GetComponentInParent<NetworkIdentity>();
         _networkId = _networkIdentity == null ? 0u : _networkIdentity.netId;
+        StableId = StableIdFor(prop);
         _localHitPoint = prop.transform.InverseTransformPoint(hitPoint);
     }
 
     internal Prop Prop { get; }
     internal int ReferenceId { get; }
     internal uint NetworkId => _networkId;
+    internal string StableId { get; }
+
+    internal static string StableIdFor(Prop prop)
+    {
+        if (prop == null)
+            return "prop:unavailable";
+        var identity = prop.GetComponentInParent<NetworkIdentity>();
+        return identity != null && identity.netId != 0u
+            ? "prop:net:" + identity.netId
+            : "prop:local:" + prop.GetInstanceID();
+    }
+
+    /// <summary>
+    /// Captures an exact context entity without requiring the human to aim at
+    /// it. This is only called for props already selected into bounded world
+    /// context; it performs no nearest-object fallback.
+    /// </summary>
+    internal static bool TryCaptureProp(
+        Prop prop,
+        out CompanionInteractionTarget target)
+    {
+        target = null;
+        if (prop == null || prop.gameObject == null ||
+            !prop.gameObject.activeInHierarchy || prop.isInInventory)
+        {
+            return false;
+        }
+
+        target = new CompanionInteractionTarget(prop, prop.transform.position);
+        return true;
+    }
 
     /// <summary>
     /// Freezes the exact prop already in the companion's hands. Drop has no

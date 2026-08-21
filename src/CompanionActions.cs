@@ -43,7 +43,7 @@ internal sealed class CompanionActionCoordinator
         {
             new CompanionInspectionBehavior(_attention),
             new CompanionInteractBehavior(_attention),
-            new CompanionPickupBehavior(_attention),
+            new CompanionPickupBehavior(_locomotion, _attention, _jump),
             new CompanionKickBehavior(_attention)
         };
     }

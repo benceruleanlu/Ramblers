@@ -74,6 +74,9 @@ function Assert-Order {
 }
 
 $bridge = Read-Source "src\OpenAIRealtimeBridge.cs"
+$entities = Read-Source "src\CompanionEntityReferences.cs"
+$actions = Read-Source "src\CompanionActions.cs"
+$follow = Read-Source "src\CompanionFollowBehavior.cs"
 $client = Read-Source "src\OpenAIRealtimeClient.cs"
 $router = Read-Source "src\AgentToolRouter.cs"
 $catalog = Read-Source "src\AgentToolCatalog.cs"
@@ -86,12 +89,18 @@ $bridge = Read-Source "src\OpenAIRealtimeBridge.cs"
 
 Assert-Contains $catalog 'internal const string PickUpItem = "pick_up_item";' `
     "the allowlist must expose the bounded pickup tool"
-Assert-Contains $catalog '@enum = new[] { "human_reference" }' `
-    "the model may select only the frozen human reference"
+Assert-Contains $catalog 'the exact prop:net:/prop:local: ID from private game context' `
+    "the model may ground named objects through private stable IDs"
 Assert-Contains $router 'CompanionTurnReference turnReference' `
     "dispatch must receive response-scoped reference context"
-Assert-Contains $router 'InteractionTarget = turnReference.Target' `
+Assert-Contains $router 'turnReference.EntityReferences.TryResolve(' `
+    "dispatch must resolve a model-selected context ID"
+Assert-Contains $router 'InteractionTarget = interactionTarget' `
     "the job request must receive the frozen target"
+Assert-Contains $router '[ENTITY] TARGET_RESOLVED' `
+    "runtime evidence must report exact target grounding"
+Assert-Contains $entities '_props.TryGetValue(stableId, out target)' `
+    "entity resolution must be exact rather than proximity based"
 
 Assert-Order $bridge 'DrainClientEvents();' '_gameVoice.Tick(_client);' `
     "semantic speech edges must be handled before local voice sampling"
@@ -115,6 +124,20 @@ Assert-NotContains $target 'castProp' `
 
 Assert-Contains $pickup 'ServerPickUpPropAutomatic(_target.Prop)' `
     "host pickup must receive the exact frozen prop"
+Assert-Contains $actions 'new CompanionPickupBehavior(_locomotion, _attention, _jump)' `
+    "pickup must share the companion's native locomotion and recovery actuators"
+Assert-Contains $pickup 'PickupState.ApproachingTarget' `
+    "out-of-reach pickup must enter a bounded approach phase"
+Assert-Contains $pickup '_locomotion.TrySteerToward(' `
+    "pickup approach must reuse obstacle-aware steering"
+Assert-Contains $follow 'any live movement intent belongs to the action holding that' `
+    "suspended follow must not clear pickup's locomotion intent"
+Assert-Contains $follow 'Yield before idle-follow cleanup can clear that job' `
+    "stay mode must also yield locomotion to pickup"
+Assert-Contains $pickup '_jump.TryRequestActionRecovery(' `
+    "a stalled pickup approach must have bounded grounded jump recovery"
+Assert-Contains $pickup '[ACTION] PICKUP_APPROACH_REACHED' `
+    "runtime evidence must distinguish successful navigation from pickup"
 Assert-Contains $pickup '[ACTION] PICKUP_JOB_CONCLUDED' `
     "a completed pickup must log release of its job lifecycle"
 Assert-Order $pickup 'public void Conclude(float now)' `

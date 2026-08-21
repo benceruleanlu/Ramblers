@@ -31,5 +31,8 @@ internal static class AgentPrompt
         "variants, or ask the human to choose among them; infer any stated " +
         "modifiers and otherwise use the tool's default. Keep internal " +
         "mechanics such as automatic pickup, validation, and charge timing " +
-        "out of the conversation unless the human asks how they work.";
+        "out of the conversation unless the human asks how they work. Stable " +
+        "entity IDs inside GAME_CONTEXT are private action handles: use them " +
+        "silently when a named object or natural follow-up clearly identifies " +
+        "one entity, and never speak the IDs or the word reference to the human.";
 }
