@@ -5,6 +5,7 @@ extern alias privateuri;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Text.Json;
@@ -102,12 +103,18 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
     private Task _runTask;
     private volatile bool _ready;
     private volatile bool _stopped;
+    private bool _initialSessionConfigured;
     private bool _responseActive;
     private bool _responseCreateQueued;
     private bool _responseRequested;
     private long _responseRequestedTurnId;
+    private long _responseRequestedAt;
     private long _reservedResponseTurnId;
+    private long _reservedResponseRequestedAt;
     private long _activeResponseTurnId;
+    private long _activeResponseRequestedAt;
+    private long _activeResponseCreatedAt;
+    private bool _activeResponseFirstAudioLogged;
     private string _responseCreateEventId;
     private long _eventSequence;
     private bool _disposed;
@@ -188,15 +195,30 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
     public void CancelActiveResponse()
     {
         var shouldCancel = false;
+        var turnId = 0L;
+        var requestedAt = 0L;
         lock (_responseSync)
         {
             _responseRequested = false;
             _responseRequestedTurnId = 0;
+            _responseRequestedAt = 0;
             shouldCancel = _responseActive || _responseCreateQueued;
+            turnId = _responseActive
+                ? _activeResponseTurnId
+                : _reservedResponseTurnId;
+            requestedAt = _responseActive
+                ? _activeResponseRequestedAt
+                : _reservedResponseRequestedAt;
         }
 
         if (shouldCancel)
+        {
+            var now = Stopwatch.GetTimestamp();
+            _logs.Enqueue(
+                $"TURN_LATENCY turnId={turnId}, stage=cancel_requested, " +
+                $"requestToCancelMs={ElapsedMilliseconds(requestedAt, now):F0}");
             QueueJson(new { type = "response.cancel" });
+        }
     }
 
     /// <summary>
@@ -261,9 +283,11 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         }
 
         var shouldCreate = false;
+        var continuationRequested = false;
+        var continuationRequestedAt = Stopwatch.GetTimestamp();
+        long batchTurnId;
         lock (_responseSync)
         {
-            long batchTurnId;
             if (!_outstandingToolBatchTurns.TryGetValue(
                     responseId,
                     out batchTurnId))
@@ -275,10 +299,19 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             {
                 _responseRequested = true;
                 _responseRequestedTurnId = batchTurnId;
+                _responseRequestedAt = continuationRequestedAt;
+                continuationRequested = true;
             }
             shouldCreate = TryReserveResponseCreate();
         }
 
+        if (continuationRequested)
+        {
+            _logs.Enqueue(
+                $"TURN_LATENCY turnId={batchTurnId}, " +
+                $"stage=continuation_requested, " +
+                $"queue={(shouldCreate ? "create_queued" : "waiting_for_response_slot")}");
+        }
         if (shouldCreate)
             QueueResponseCreate();
         return true;
@@ -350,6 +383,10 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         finally
         {
             _ready = false;
+            _logs.Enqueue("CONNECTION_STOPPED");
+            // Publish stopped only after the terminal marker is queued. The
+            // bridge observes this volatile write before replacing the client,
+            // so it cannot abandon the marker in the old queue.
             _stopped = true;
         }
     }
@@ -468,10 +505,18 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             if (type == "session.updated")
             {
                 _ready = true;
-                _logs.Enqueue(
-                    "READY tools=" + AgentToolCatalog.NamesForLog +
-                    ", noiseReduction=near_field, " +
-                    "turnDetection=semantic_vad_client_response");
+                if (!_initialSessionConfigured)
+                {
+                    _initialSessionConfigured = true;
+                    _logs.Enqueue(
+                        "READY tools=" + AgentToolCatalog.NamesForLog +
+                        ", noiseReduction=near_field, " +
+                        "turnDetection=semantic_vad_client_response");
+                }
+                else
+                {
+                    _logs.Enqueue("SESSION_UPDATED");
+                }
                 return;
             }
 
@@ -509,6 +554,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                     var delta = deltaElement.GetString();
                     if (!string.IsNullOrEmpty(delta))
                     {
+                        LogFirstResponseAudio();
                         _clientEvents.Enqueue(new RealtimeClientEvent
                         {
                             Type = RealtimeClientEventType.AudioPacket,
@@ -556,13 +602,19 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                 // batch is outstanding, which is what stops a queued VAD turn
                 // from starting a response before the outputs are sent.
                 var completedTurnId = GetActiveResponseTurnId();
+                JsonElement completedResponse;
+                var responseStatus = root.TryGetProperty(
+                        "response",
+                        out completedResponse)
+                    ? GetString(completedResponse, "status")
+                    : null;
                 QueueFunctionCallBatch(root, completedTurnId);
                 _clientEvents.Enqueue(new RealtimeClientEvent
                 {
                     Type = RealtimeClientEventType.ResponseCompleted,
                     TurnId = completedTurnId
                 });
-                MarkResponseDone();
+                MarkResponseDone(responseStatus);
                 return;
             }
 
@@ -597,13 +649,23 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
     internal void RequestResponse(long turnId)
     {
         var shouldCreate = false;
+        var requestedAt = Stopwatch.GetTimestamp();
+        var queueState = "waiting_for_response_slot";
         lock (_responseSync)
         {
             _responseRequested = true;
             _responseRequestedTurnId = turnId;
+            _responseRequestedAt = requestedAt;
             shouldCreate = TryReserveResponseCreate();
+            if (shouldCreate)
+                queueState = "create_queued";
+            else if (_outstandingToolBatchTurns.Count > 0)
+                queueState = "waiting_for_tools";
         }
 
+        _logs.Enqueue(
+            $"TURN_LATENCY turnId={turnId}, stage=response_requested, " +
+            $"queue={queueState}");
         if (shouldCreate)
             QueueResponseCreate();
     }
@@ -615,6 +677,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
     internal void RequestContinuation(long turnId)
     {
         var shouldCreate = false;
+        var requestedAt = Stopwatch.GetTimestamp();
         lock (_responseSync)
         {
             // A newer response reservation already includes the submitted tool
@@ -624,40 +687,99 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                 return;
             _responseRequested = true;
             _responseRequestedTurnId = turnId;
+            _responseRequestedAt = requestedAt;
             shouldCreate = TryReserveResponseCreate();
         }
 
+        _logs.Enqueue(
+            $"TURN_LATENCY turnId={turnId}, stage=continuation_requested, " +
+            $"queue={(shouldCreate ? "create_queued" : "waiting_for_tools")}");
         if (shouldCreate)
             QueueResponseCreate();
     }
 
     private void MarkResponseCreated()
     {
+        long turnId;
+        long requestedAt;
+        long createdAt;
         lock (_responseSync)
         {
+            createdAt = Stopwatch.GetTimestamp();
             _responseActive = true;
             _responseCreateQueued = false;
             _responseCreateEventId = null;
             _activeResponseTurnId = _reservedResponseTurnId;
+            _activeResponseRequestedAt = _reservedResponseRequestedAt;
+            _activeResponseCreatedAt = createdAt;
+            _activeResponseFirstAudioLogged = false;
             _reservedResponseTurnId = 0;
+            _reservedResponseRequestedAt = 0;
+            turnId = _activeResponseTurnId;
+            requestedAt = _activeResponseRequestedAt;
         }
+
+        _logs.Enqueue(
+            $"TURN_LATENCY turnId={turnId}, stage=response_created, " +
+            $"requestToCreatedMs={ElapsedMilliseconds(requestedAt, createdAt):F0}");
     }
 
-    private void MarkResponseDone()
+    private void MarkResponseDone(string responseStatus)
     {
         var shouldCreate = false;
+        long turnId;
+        long requestedAt;
+        long createdAt;
+        bool firstAudioSeen;
+        var doneAt = Stopwatch.GetTimestamp();
         lock (_responseSync)
         {
+            turnId = _activeResponseTurnId;
+            requestedAt = _activeResponseRequestedAt;
+            createdAt = _activeResponseCreatedAt;
+            firstAudioSeen = _activeResponseFirstAudioLogged;
             _responseActive = false;
             _responseCreateQueued = false;
             _responseCreateEventId = null;
             _activeResponseTurnId = 0;
+            _activeResponseRequestedAt = 0;
+            _activeResponseCreatedAt = 0;
+            _activeResponseFirstAudioLogged = false;
             _reservedResponseTurnId = 0;
+            _reservedResponseRequestedAt = 0;
             shouldCreate = TryReserveResponseCreate();
         }
 
+        _logs.Enqueue(
+            $"TURN_LATENCY turnId={turnId}, stage=response_done, " +
+            $"status={responseStatus ?? "missing"}, " +
+            $"requestToDoneMs={ElapsedMilliseconds(requestedAt, doneAt):F0}, " +
+            $"createdToDoneMs={ElapsedMilliseconds(createdAt, doneAt):F0}, " +
+            $"firstAudioSeen={firstAudioSeen}");
         if (shouldCreate)
             QueueResponseCreate();
+    }
+
+    private void LogFirstResponseAudio()
+    {
+        long turnId;
+        long requestedAt;
+        long createdAt;
+        var firstAudioAt = Stopwatch.GetTimestamp();
+        lock (_responseSync)
+        {
+            if (!_responseActive || _activeResponseFirstAudioLogged)
+                return;
+            _activeResponseFirstAudioLogged = true;
+            turnId = _activeResponseTurnId;
+            requestedAt = _activeResponseRequestedAt;
+            createdAt = _activeResponseCreatedAt;
+        }
+
+        _logs.Enqueue(
+            $"TURN_LATENCY turnId={turnId}, stage=first_audio, " +
+            $"requestToFirstAudioMs={ElapsedMilliseconds(requestedAt, firstAudioAt):F0}, " +
+            $"createdToFirstAudioMs={ElapsedMilliseconds(createdAt, firstAudioAt):F0}");
     }
 
     private bool TryReserveResponseCreate()
@@ -669,7 +791,9 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         _responseRequested = false;
         _responseCreateQueued = true;
         _reservedResponseTurnId = _responseRequestedTurnId;
+        _reservedResponseRequestedAt = _responseRequestedAt;
         _responseRequestedTurnId = 0;
+        _responseRequestedAt = 0;
         return true;
     }
 
@@ -723,14 +847,24 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                 _responseActive = true;
                 _responseRequested = true;
                 _responseRequestedTurnId = _reservedResponseTurnId;
+                _responseRequestedAt = _reservedResponseRequestedAt;
                 _reservedResponseTurnId = 0;
+                _reservedResponseRequestedAt = 0;
                 _activeResponseTurnId = 0;
             }
             else
             {
                 _reservedResponseTurnId = 0;
+                _reservedResponseRequestedAt = 0;
             }
         }
+    }
+
+    private static double ElapsedMilliseconds(long startedAt, long endedAt)
+    {
+        if (startedAt <= 0 || endedAt < startedAt)
+            return -1d;
+        return (endedAt - startedAt) * 1000d / Stopwatch.Frequency;
     }
 
     private static string GetString(JsonElement root, string propertyName)
@@ -938,8 +1072,13 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             _outstandingToolBatchTurns.Clear();
             _responseCreateEventId = null;
             _responseRequestedTurnId = 0;
+            _responseRequestedAt = 0;
             _reservedResponseTurnId = 0;
+            _reservedResponseRequestedAt = 0;
             _activeResponseTurnId = 0;
+            _activeResponseRequestedAt = 0;
+            _activeResponseCreatedAt = 0;
+            _activeResponseFirstAudioLogged = false;
         }
         _cancellation.Cancel();
         try

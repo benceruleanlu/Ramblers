@@ -1,3 +1,6 @@
+using System;
+using System.IO;
+using System.Security.Cryptography;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
@@ -12,7 +15,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string Guid = "local.bigwalk.ramblers";
     public const string Name = "Ramblers";
-    public const string Version = "0.13.1";
+    public const string Version = "0.13.2";
 
     internal static ManualLogSource Logger = null;
     internal static ConfigEntry<bool> EnableRealtimeAgent = null;
@@ -42,7 +45,30 @@ public sealed class Plugin : BasePlugin
 
         AddComponent<CompanionController>();
         AddComponent<RealtimeAgentBridge>();
+        var assemblySha256 = ResolveAssemblySha256();
         Logger.LogInfo(
-            $"[RAMBLERS] Loaded version {Version}. Waiting for a host session and local player.");
+            $"[RAMBLERS] Loaded version {Version}, " +
+            $"assemblySha256={assemblySha256}. " +
+            "Waiting for a host session and local player.");
+    }
+
+    private static string ResolveAssemblySha256()
+    {
+        try
+        {
+            var path = typeof(Plugin).Assembly.Location;
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+                return "unavailable";
+            using var stream = File.OpenRead(path);
+            using var sha256 = SHA256.Create();
+            return BitConverter.ToString(sha256.ComputeHash(stream))
+                .Replace("-", string.Empty);
+        }
+        catch (Exception exception)
+        {
+            Logger.LogWarning(
+                $"[RAMBLERS] Assembly identity unavailable: {exception.Message}");
+            return "unavailable";
+        }
     }
 }

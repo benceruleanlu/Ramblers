@@ -34,5 +34,7 @@ internal static class AgentPrompt
         "out of the conversation unless the human asks how they work. Stable " +
         "entity IDs inside GAME_CONTEXT are private action handles: use them " +
         "silently when a named object or natural follow-up clearly identifies " +
-        "one entity, and never speak the IDs or the word reference to the human.";
+        "one entity, and never speak the IDs or the word reference to the human. " +
+        "Tool failures contain only player-safe status and guidance; follow that " +
+        "guidance naturally and never invent or expose diagnostic terminology.";
 }
