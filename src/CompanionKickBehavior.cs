@@ -130,7 +130,7 @@ internal sealed class CompanionKickBehavior : ICompanionJob
 
         Vector3 targetPoint;
         string validationError;
-        if (!TryValidateBeforeAuthority(out targetPoint, out validationError))
+        if (!TryValidateAdmission(out targetPoint, out validationError))
         {
             ClearActionParameters();
             failure = AgentToolResult.Failure(validationError);
@@ -274,7 +274,12 @@ internal sealed class CompanionKickBehavior : ICompanionJob
         }
 
         if (lookSeconds >= MaximumTargetLookSeconds)
-            CompleteFailure("target_alignment_failed");
+        {
+            Plugin.Logger.LogWarning(
+                $"[ACTION] KICK_ALIGNMENT_TIMEOUT referenceId={ReferenceIdForLog}, " +
+                $"lookSeconds={lookSeconds:F2}; continuing with exact target.");
+            BeginAuthoritativePickup(now);
+        }
     }
 
     private void BeginAuthoritativePickup(float now)
@@ -636,9 +641,15 @@ internal sealed class CompanionKickBehavior : ICompanionJob
         }
     }
 
+    private bool TryValidateAdmission(out Vector3 point, out string error)
+    {
+        return TryValidateBeforeAuthority(out point, out error, false);
+    }
+
     private bool TryValidateBeforeAuthority(
         out Vector3 point,
-        out string error)
+        out string error,
+        bool validateCurrentPose = true)
     {
         point = Vector3.zero;
         error = null;
@@ -685,7 +696,7 @@ internal sealed class CompanionKickBehavior : ICompanionJob
             return false;
         }
 
-        if (!TryValidateKickPose(out error))
+        if (!TryValidateKickPose(validateCurrentPose, out error))
             return false;
 
         float ignoredWindUp;
@@ -755,7 +766,7 @@ internal sealed class CompanionKickBehavior : ICompanionJob
             return false;
         }
 
-        if (!TryValidateKickPose(out error))
+        if (!TryValidateKickPose(true, out error))
             return false;
 
         Vector3 ignoredPosition;
@@ -777,13 +788,15 @@ internal sealed class CompanionKickBehavior : ICompanionJob
         return true;
     }
 
-    private bool TryValidateKickPose(out string error)
+    private bool TryValidateKickPose(
+        bool validateCurrentPose,
+        out string error)
     {
         error = null;
         var pose = _body.Character.poser == null
             ? null
             : _body.Character.poser.currentPose;
-        if (pose != null && !pose.allowKicking)
+        if (validateCurrentPose && pose != null && !pose.allowKicking)
         {
             error = "kick_pose_unavailable";
             return false;

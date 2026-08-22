@@ -107,6 +107,18 @@ Assert-Contains $router 'KickDirection = direction' `
     "the validated direction must cross the typed job boundary"
 Assert-Contains $actions 'new CompanionKickBehavior(_attention)' `
     "the coordinator must register the kick job"
+Assert-Contains $kick 'TryValidateAdmission(out targetPoint, out validationError)' `
+    "kick admission must defer current-pose validation until after auto-stand"
+Assert-Contains $kick 'return TryValidateBeforeAuthority(out point, out error, false);' `
+    "kick admission must retain every exact validation except the pre-stand pose"
+Assert-Contains $kick 'bool validateCurrentPose = true' `
+    "post-admission kick validation must restore the stock pose check"
+Assert-Contains $kick 'if (!TryValidateKickPose(validateCurrentPose, out error))' `
+    "kick admission must always cross the shared lifecycle validation"
+Assert-Contains $kick 'if (validateCurrentPose && pose != null && !pose.allowKicking)' `
+    "only current-pose compatibility may wait for auto-stand"
+Assert-Contains $kick 'if (PlayerArms.LegIsBusyKicking(_body.Character))' `
+    "kick admission must retain the stock leg-busy lifecycle guard"
 Assert-Contains $bridge 'AgentToolCatalog.KickItem,' `
     "new human speech must cancel a pending kick through reconciliation"
 
@@ -146,6 +158,10 @@ Assert-Contains $kick 'displacement >= MinimumMotionDistance' `
     "success must also accept visible target displacement"
 Assert-Contains $kick '"item_moving"' `
     "the terminal state must report confirmed motion"
+Assert-Contains $kick '[ACTION] KICK_ALIGNMENT_TIMEOUT' `
+    "custom gaze timeout must be telemetry rather than an action veto"
+Assert-NotContains $kick 'CompleteFailure("target_alignment_failed")' `
+    "custom kick alignment must not reject an exact stock action"
 
 Assert-NotContains $kick 'AddForce' `
     "kick must not bypass stock replication with a raw Rigidbody shove"

@@ -21,7 +21,6 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
     private const float DropRetrySeconds = 0.50f;
     private const float PickupTimeoutSecondsValue = 25f;
     private const float DropTimeoutSecondsValue = 5f;
-    private const int MaximumApproachRecoveries = 2;
     private const float ApproachCommitSeconds = 0.45f;
     private const float ApproachNavigationInterval = 0.1f;
 
@@ -478,7 +477,12 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
         }
 
         if (lookSeconds >= MaximumTargetLookSeconds)
-            CompleteFailure("target_alignment_failed");
+        {
+            Plugin.Logger.LogWarning(
+                $"[ACTION] PICKUP_ALIGNMENT_TIMEOUT referenceId={ReferenceIdForLog}, " +
+                $"lookSeconds={lookSeconds:F2}; continuing with exact target.");
+            ExecutePickup(now, targetPoint);
+        }
     }
 
     private void TickApproach(float now)
@@ -540,7 +544,6 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
 
         var direction = toTarget / horizontalDistance;
         SteeringStatus status;
-        var directGroundLimited = false;
         if (now < _approachCommitUntil)
         {
             _locomotion.CommitTraversalDirection(
@@ -553,21 +556,18 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
                      now,
                      out status))
         {
-            directGroundLimited = status.DirectGroundLimited;
             _locomotion.Stop(now);
-            if (directGroundLimited ||
-                !TryRecoverApproach(now, direction, horizontalDistance, "blocked_path"))
+            if (!TryRecoverApproach(
+                    now,
+                    direction,
+                    horizontalDistance,
+                    "blocked_path"))
                 CompleteFailure("item_path_blocked");
             return;
         }
-        else
-        {
-            directGroundLimited = status.DirectGroundLimited;
-        }
 
         if (_locomotion.ObserveProgress(now) &&
-            (directGroundLimited ||
-             !TryRecoverApproach(now, direction, horizontalDistance, "stuck")))
+            !TryRecoverApproach(now, direction, horizontalDistance, "stuck"))
         {
             CompleteFailure("item_path_blocked");
         }
@@ -579,20 +579,6 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
         float distance,
         string reason)
     {
-        if (_approachRecoveries >= MaximumApproachRecoveries)
-            return false;
-        var committedDistance = Mathf.Min(
-            distance,
-            _locomotion.RunSpeed *
-            (ApproachCommitSeconds + ApproachNavigationInterval));
-        if (!_locomotion.HasGroundSupportAhead(direction, committedDistance))
-        {
-            Plugin.Logger.LogWarning(
-                $"[ACTION] PICKUP_APPROACH_BLOCKED referenceId={ReferenceIdForLog}, " +
-                "reason=unsupported_ground.");
-            return false;
-        }
-
         string jumpError;
         if (!_jump.TryRequestActionRecovery(
                 now,
@@ -601,6 +587,15 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
                 reason,
                 out jumpError))
         {
+            if (CompanionJumpActuator.IsDeferredRecoveryError(jumpError))
+            {
+                _locomotion.ResetProgressObservation(now);
+                Plugin.Logger.LogInfo(
+                    $"[ACTION] PICKUP_APPROACH_DEFERRED referenceId={ReferenceIdForLog}, " +
+                    $"reason={reason}, recovery={jumpError}.");
+                return true;
+            }
+
             Plugin.Logger.LogWarning(
                 $"[ACTION] PICKUP_APPROACH_BLOCKED referenceId={ReferenceIdForLog}, " +
                 $"reason={reason}, recovery={jumpError ?? "unavailable"}.");

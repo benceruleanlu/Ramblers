@@ -46,17 +46,13 @@ internal sealed class CompanionLocomotion
     private const float FallbackWalkSpeed = 3f;
     private const float FallbackRunSpeed = 5.5f;
     // Movement intent is refreshed on the 10 Hz navigation cadence. Include one
-    // full cadence interval beyond the 0.45s commit window so the support and
-    // obstacle proof still covers motion until the first tick after expiry.
+    // full cadence interval beyond the 0.45s commit window so obstacle preview
+    // still covers motion until the first tick after expiry.
     private const float BrakingLookahead = 0.55f;
     private const float ObstacleProbeDistance = 1.5f;
     internal const float MinimumClearance = 0.7f;
     private const float MinimumGroundResponse = 0.08f;
     private const float WalkableSweepNormalY = 0.7f;
-    private const float GroundSupportProbeStep = 0.2f;
-    private const float MaximumGroundGrade = 1f;
-    private const float GroundHeightTolerance = 0.2f;
-    private const int MaximumUnsupportedProbeRun = 1;
     private const float AvoidanceSideHold = 1.5f;
     private const float StuckObservationWindow = 2.5f;
     private const float StuckMovementThreshold = 0.15f;
@@ -100,7 +96,6 @@ internal sealed class CompanionLocomotion
     private bool _lastDirectGroundLimited;
     private float _lastGroundResponse;
     private float _lastSlopeResponse;
-    private bool _lastDirectGroundSupported;
     private string _lastSteeringAuthority = "not_sampled";
     private float _lastSteepScalar;
     private string _lastDirectHit = "clear";
@@ -126,7 +121,6 @@ internal sealed class CompanionLocomotion
     internal bool LastDirectGroundLimited => _lastDirectGroundLimited;
     internal float LastGroundResponse => _lastGroundResponse;
     internal float LastSlopeResponse => _lastSlopeResponse;
-    internal bool LastDirectGroundSupported => _lastDirectGroundSupported;
     internal string LastSteeringAuthority => _lastSteeringAuthority;
     internal float LastSteepScalar => _lastSteepScalar;
     internal string LastDirectHit => _lastDirectHit;
@@ -178,7 +172,6 @@ internal sealed class CompanionLocomotion
         _lastDirectGroundLimited = false;
         _lastGroundResponse = 1f;
         _lastSlopeResponse = 1f;
-        _lastDirectGroundSupported = true;
         _lastSteeringAuthority = "not_sampled";
         _lastSteepScalar = 1f;
         _lastDirectHit = "clear";
@@ -313,9 +306,6 @@ internal sealed class CompanionLocomotion
         var directBlocked = clearance < MinimumClearance;
         float steepScalar;
         var groundResponse = MeasureGroundResponse(desiredDirection, out steepScalar);
-        var groundSupported = HasGroundSupportAhead(
-            desiredDirection,
-            probeDistance);
         var directGroundLimited = groundResponse < MinimumGroundResponse;
 
         _lastDirectPathBlocked = directBlocked || directGroundLimited;
@@ -324,7 +314,6 @@ internal sealed class CompanionLocomotion
         _lastClearance = clearance;
         _lastGroundResponse = groundResponse;
         _lastSlopeResponse = groundResponse;
-        _lastDirectGroundSupported = groundSupported;
         _lastSteeringAuthority = "committed_direction";
         _lastSteepScalar = steepScalar;
         _lastDirectHit = directHit;
@@ -449,16 +438,8 @@ internal sealed class CompanionLocomotion
         var directSlopeResponse = MeasureGroundResponse(
             desiredDirection,
             out directSteepScalar);
-        var directGroundSupported = HasGroundSupportAhead(
-            desiredDirection,
-            probeDistance);
-        // Forward floor rays are useful as conservative proof before deleting a
-        // recorded route or committing a recovery jump, but they are not a
-        // reliable movement authority across Big Walk's mesh seams and shared
-        // room geometry. Ordinary gait follows the stock player's slope solver.
         var directGroundResponse = directSlopeResponse;
         _lastSlopeResponse = directSlopeResponse;
-        _lastDirectGroundSupported = directGroundSupported;
         _lastSteeringAuthority = "stock_slope";
         directGroundLimited = directGroundResponse < MinimumGroundResponse;
         directBlocked = directClearance < MinimumClearance || directGroundLimited;
@@ -577,100 +558,11 @@ internal sealed class CompanionLocomotion
     }
 
     /// <summary>
-    /// Conservatively verifies floor beneath the body's forward corridor before
-    /// deleting a recorded route prefix or committing bounded action recovery.
-    /// A single unsupported sample is tolerated so tiny mesh seams can still be
-    /// proven. This is deliberately observational during ordinary steering:
-    /// some valid Big Walk floors cannot be proven by these downward rays, while
-    /// the stock player slope solver still accepts movement across them.
+    /// Body-clearance proof used before deleting a breadcrumb route prefix.
+    /// Human-recorded traversal markers remain intact; uncertain floor geometry
+    /// is left to Big Walk's stock player motor rather than a second physics model.
     /// </summary>
-    internal bool HasGroundSupportAhead(Vector3 direction, float distance)
-    {
-        if (_body == null || !_body.IsAlive)
-        {
-            return false;
-        }
-        if (_body.Character?.ground == null ||
-            !_body.Character.ground.isGrounded)
-        {
-            // Ordinary mid-air steering preserves the previous movement path.
-            // Only a grounded body can prove or disprove forward floor support.
-            return true;
-        }
-
-        direction.y = 0f;
-        if (direction.sqrMagnitude < 0.0001f)
-            return true;
-        direction.Normalize();
-
-        var probeDistance = Mathf.Max(distance, GroundSupportProbeStep);
-        var unsupportedRun = 0;
-        var lastAlong = 0f;
-        var lastSupportedAlong = 0f;
-        var lastSupportedHeight = _body.Position.y;
-        for (var along = GroundSupportProbeStep;
-             along <= probeDistance + 0.01f;
-             along += GroundSupportProbeStep)
-        {
-            lastAlong = along;
-            var center = _body.Position + direction * along;
-            float groundHeight;
-            var continuityFrom = unsupportedRun > 0
-                ? along - GroundSupportProbeStep
-                : lastSupportedAlong;
-            var supported = TryMeasureGroundHeight(
-                center,
-                along,
-                lastSupportedHeight,
-                continuityFrom,
-                out groundHeight);
-            if (supported)
-            {
-                unsupportedRun = 0;
-                lastSupportedAlong = along;
-                lastSupportedHeight = groundHeight;
-                continue;
-            }
-
-            unsupportedRun++;
-            if (unsupportedRun > MaximumUnsupportedProbeRun)
-                return false;
-        }
-
-        // Always prove the destination of a short segment. A missing sample is
-        // seam tolerance only when later support brackets it; an unsupported
-        // trailing edge is a ledge, not a seam.
-        if (probeDistance - lastAlong > 0.05f)
-        {
-            float groundHeight;
-            var continuityFrom = unsupportedRun > 0
-                ? probeDistance - GroundSupportProbeStep
-                : lastSupportedAlong;
-            var supported = TryMeasureGroundHeight(
-                    _body.Position + direction * probeDistance,
-                    probeDistance,
-                    lastSupportedHeight,
-                    continuityFrom,
-                    out groundHeight);
-            if (supported)
-            {
-                unsupportedRun = 0;
-            }
-            else
-            {
-                unsupportedRun++;
-            }
-        }
-
-        return unsupportedRun == 0;
-    }
-
-    /// <summary>
-    /// Conservative proof used before deleting a breadcrumb route prefix.
-    /// The destination must be reachable by the body without a wall or an
-    /// unsupported corridor; human-recorded traversal markers remain intact.
-    /// </summary>
-    internal bool CanTraverseGroundedSegment(Vector3 destination)
+    internal bool CanShortcutSegment(Vector3 destination)
     {
         if (_body == null || !_body.IsAlive)
             return false;
@@ -686,8 +578,7 @@ internal sealed class CompanionLocomotion
         return HasClearShortcutRay(direction, distance, 0.45f) &&
                HasClearShortcutRay(direction, distance, 1.1f) &&
                MeasureClearance(direction, distance, out ignoredHit) >=
-                   distance - 0.02f &&
-               HasGroundSupportAhead(direction, distance);
+                   distance - 0.02f;
     }
 
     private bool HasClearShortcutRay(
@@ -710,47 +601,6 @@ internal sealed class CompanionLocomotion
             remaining,
             GetObstacleMask(_body.Character),
             QueryTriggerInteraction.Ignore);
-    }
-
-    private bool TryMeasureGroundHeight(
-        Vector3 point,
-        float along,
-        float previousHeight,
-        float previousAlong,
-        out float height)
-    {
-        height = 0f;
-        var allowedChange =
-            (along - previousAlong) * MaximumGroundGrade +
-            GroundHeightTolerance;
-        var originHeight = previousHeight + allowedChange + 0.05f;
-        var castDepth = allowedChange * 2f + 0.1f;
-        var layerMask = GetObstacleMask(_body.Character);
-        var bodyCollider = _body.Character?.collision?.bodyCollider;
-        if (bodyCollider?.gameObject != null)
-            layerMask &= ~(1 << bodyCollider.gameObject.layer);
-
-        // The player root may share a layer with the room/floor mesh. Removing
-        // that whole layer made every downward sample miss ordinary floor in
-        // the spawn room. Exclude only the dedicated body-collider layer; the
-        // ray originates inside/above the remaining companion hierarchy.
-
-        RaycastHit hit;
-        if (!Physics.Raycast(
-            new Vector3(point.x, originHeight, point.z),
-            Vector3.down,
-            out hit,
-            castDepth,
-            layerMask,
-            QueryTriggerInteraction.Ignore))
-        {
-            return false;
-        }
-
-        if (hit.normal.y < WalkableSweepNormalY)
-            return false;
-        height = hit.point.y;
-        return Mathf.Abs(height - previousHeight) <= allowedChange;
     }
 
     private float MeasureClearance(

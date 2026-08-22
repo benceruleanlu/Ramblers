@@ -12,21 +12,36 @@ internal sealed class CompanionJumpActuator
 {
     private const float RequestCooldown = 0.5f;
 
+    private readonly CompanionJumpQueue _queue = new CompanionJumpQueue();
     private CompanionBody _body;
-    private bool _queued;
     private float _nextRequestAt;
-    private string _queuedSource;
-    private string _queuedReason;
 
-    internal bool IsQueued => _queued;
+    internal bool IsQueued => _queue.IsQueued;
 
     internal void Bind(CompanionBody body)
     {
         _body = body;
-        _queued = false;
+        _queue.Clear();
         _nextRequestAt = 0f;
-        _queuedSource = null;
-        _queuedReason = null;
+    }
+
+    /// <summary>
+    /// Preflights an explicit jump as though the coordinator had already stood
+    /// the companion. This lets an invalid request leave posture unchanged.
+    /// </summary>
+    internal bool CanRequest(float now, out string error)
+    {
+        error = null;
+        if (!CanJump(CompanionPosture.Standing, out error))
+            return false;
+        if (_queue.IsQueued)
+            return true;
+        if (now < _nextRequestAt)
+        {
+            error = "jump_cooldown";
+            return false;
+        }
+        return true;
     }
 
     internal AgentToolResult Request(float now, CompanionPosture posture)
@@ -34,12 +49,20 @@ internal sealed class CompanionJumpActuator
         string error;
         if (!CanJump(posture, out error))
             return AgentToolResult.Failure(error);
-        if (_queued)
+        if (_queue.IsQueued)
+        {
+            var previousOwner = _queue.ClaimForTool();
+            if (previousOwner != CompanionJumpQueueOwner.Tool)
+            {
+                Plugin.Logger.LogInfo(
+                    $"[ACTION] JUMP_CLAIMED previousOwner={previousOwner}.");
+            }
             return AgentToolResult.Success(AgentToolCatalog.Jump, "already_queued");
+        }
         if (now < _nextRequestAt)
             return AgentToolResult.Failure("jump_cooldown");
 
-        Queue(now, "tool", null);
+        Queue(now, CompanionJumpQueueOwner.Tool, null);
         Plugin.Logger.LogInfo("[ACTION] JUMP queued.");
         return AgentToolResult.Success(AgentToolCatalog.Jump, "queued");
     }
@@ -56,8 +79,13 @@ internal sealed class CompanionJumpActuator
         out string error)
     {
         error = null;
-        if (_queued)
-            return true;
+        if (_queue.IsQueued)
+        {
+            if (_queue.CanSatisfyFollow)
+                return true;
+            error = "jump_in_progress";
+            return false;
+        }
         if (now < _nextRequestAt)
         {
             error = "jump_cooldown";
@@ -66,7 +94,7 @@ internal sealed class CompanionJumpActuator
         if (!CanJump(posture, out error))
             return false;
 
-        Queue(now, "follow", reason);
+        Queue(now, CompanionJumpQueueOwner.Follow, reason);
         Plugin.Logger.LogInfo(
             $"[FOLLOW] JUMP_QUEUED reason={reason ?? "route"}.");
         return true;
@@ -80,8 +108,13 @@ internal sealed class CompanionJumpActuator
         out string error)
     {
         error = null;
-        if (_queued)
-            return true;
+        if (_queue.IsQueued)
+        {
+            if (_queue.CanSatisfyAction(actionName))
+                return true;
+            error = "jump_in_progress";
+            return false;
+        }
         if (now < _nextRequestAt)
         {
             error = "jump_cooldown";
@@ -90,46 +123,65 @@ internal sealed class CompanionJumpActuator
         if (!CanJump(posture, out error))
             return false;
 
-        Queue(now, "action", actionName + ":" + reason);
+        Queue(
+            now,
+            CompanionJumpQueueOwner.Action,
+            actionName + ":" + reason);
         Plugin.Logger.LogInfo(
             $"[ACTION] APPROACH_JUMP_QUEUED action={actionName ?? "unknown"}, " +
             $"reason={reason ?? "path_recovery"}.");
         return true;
     }
 
+    internal static bool IsDeferredRecoveryError(string error)
+    {
+        return string.Equals(
+                   error,
+                   "jump_in_progress",
+                   System.StringComparison.Ordinal) ||
+               string.Equals(
+                   error,
+                   "jump_cooldown",
+                   System.StringComparison.Ordinal) ||
+               string.Equals(
+                   error,
+                   "not_on_jumpable_ground",
+                   System.StringComparison.Ordinal);
+    }
+
     internal void CancelActionRecovery(string actionName)
     {
-        if (!_queued || !string.Equals(
-                _queuedSource,
-                "action",
-                System.StringComparison.Ordinal) ||
-            string.IsNullOrEmpty(_queuedReason) ||
-            !_queuedReason.StartsWith(
-                actionName + ":",
-                System.StringComparison.Ordinal))
-        {
+        if (!_queue.TryCancelAction(actionName))
             return;
-        }
 
         Plugin.Logger.LogInfo(
             $"[ACTION] APPROACH_JUMP_CANCELLED action={actionName}.");
-        ClearQueue();
+    }
+
+    internal void CancelFollow(string reason)
+    {
+        if (!_queue.TryCancelFollow())
+            return;
+
+        Plugin.Logger.LogWarning(
+            $"[FOLLOW] JUMP_CANCELLED reason={reason}.");
     }
 
     internal void TickFixed(float now, CompanionPosture posture)
     {
-        if (!_queued)
+        if (!_queue.IsQueued)
             return;
 
-        var source = _queuedSource;
-        var reason = _queuedReason;
+        var source = _queue.Owner;
+        var reason = _queue.Reason;
         ClearQueue();
         string error;
         if (!CanJump(posture, out error))
         {
             Plugin.Logger.LogWarning(
-                $"[{(source == "follow" ? "FOLLOW" : "ACTION")}] " +
-                $"JUMP_CANCELLED error={error}, reason={reason ?? source ?? "unknown"}.");
+                $"[{(source == CompanionJumpQueueOwner.Follow ? "FOLLOW" : "ACTION")}] " +
+                $"JUMP_CANCELLED error={error}, " +
+                $"reason={reason ?? source.ToString().ToLowerInvariant()}.");
             return;
         }
 
@@ -143,8 +195,8 @@ internal sealed class CompanionJumpActuator
         rigidbody.linearVelocity = velocity;
 
         Plugin.Logger.LogInfo(
-            $"[{(source == "follow" ? "FOLLOW" : "ACTION")}] JUMP_EXECUTED " +
-            $"reason={reason ?? source ?? "request"}, " +
+            $"[{(source == CompanionJumpQueueOwner.Follow ? "FOLLOW" : "ACTION")}] JUMP_EXECUTED " +
+            $"reason={reason ?? source.ToString().ToLowerInvariant()}, " +
             $"beforeVelocity={before}, afterVelocity={velocity}, " +
             $"jumpForce={_body.Character.tunings?.jumpForce}, " +
             $"justJumped={jumper.justJumped}, at={now:F2}.");
@@ -152,10 +204,10 @@ internal sealed class CompanionJumpActuator
 
     internal void Cancel(string reason)
     {
-        if (_queued)
+        if (_queue.IsQueued)
         {
             Plugin.Logger.LogWarning(
-                $"[{(_queuedSource == "follow" ? "FOLLOW" : "ACTION")}] " +
+                $"[{(_queue.Owner == CompanionJumpQueueOwner.Follow ? "FOLLOW" : "ACTION")}] " +
                 $"JUMP_CANCELLED reason={reason}.");
         }
         ClearQueue();
@@ -168,19 +220,18 @@ internal sealed class CompanionJumpActuator
         _nextRequestAt = 0f;
     }
 
-    private void Queue(float now, string source, string reason)
+    private void Queue(
+        float now,
+        CompanionJumpQueueOwner owner,
+        string reason)
     {
-        _queued = true;
-        _queuedSource = source;
-        _queuedReason = reason;
+        _queue.Set(owner, reason);
         _nextRequestAt = now + RequestCooldown;
     }
 
     private void ClearQueue()
     {
-        _queued = false;
-        _queuedSource = null;
-        _queuedReason = null;
+        _queue.Clear();
     }
 
     private bool CanJump(CompanionPosture posture, out string error)

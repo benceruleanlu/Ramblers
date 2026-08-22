@@ -267,8 +267,7 @@ internal sealed class CompanionFollowBehavior
         _followRequested = false;
         _suspensionReason = null;
         _followAt = float.PositiveInfinity;
-        if (_jump.IsQueued)
-            _jump.Cancel("follow stopped");
+        _jump.CancelFollow("follow stopped");
         _attention.ClearTarget(GazeChannel.Follow);
         StopForState(FollowState.Idle, now);
     }
@@ -528,8 +527,7 @@ internal sealed class CompanionFollowBehavior
                      now,
                      out status))
         {
-            if (!status.DirectGroundLimited &&
-                targetHorizontalDistance <= BlockedJumpApproachDistance &&
+            if (targetHorizontalDistance <= BlockedJumpApproachDistance &&
                 targetVerticalDelta >= -BreadcrumbArrivalVerticalTolerance &&
                 TryCommitTraversalJump(
                     now,
@@ -583,7 +581,6 @@ internal sealed class CompanionFollowBehavior
 
         var stuck = _locomotion.ObserveProgress(now);
         if (stuck &&
-            !status.DirectGroundLimited &&
             targetVerticalDelta >= -BreadcrumbArrivalVerticalTolerance &&
             TryCommitTraversalJump(
                 now,
@@ -605,7 +602,7 @@ internal sealed class CompanionFollowBehavior
     {
         if (_body == null || !_body.IsAlive)
             return false;
-        return _locomotion.CanTraverseGroundedSegment(point);
+        return _locomotion.CanShortcutSegment(point);
     }
 
     private BreadcrumbPoint SelectTraversalLookahead(Vector3 botPosition)
@@ -1029,7 +1026,6 @@ internal sealed class CompanionFollowBehavior
             $"groundLimited={_locomotion.LastDirectGroundLimited}, " +
             $"groundResponse={_locomotion.LastGroundResponse:F2}, " +
             $"slopeResponse={_locomotion.LastSlopeResponse:F2}, " +
-            $"groundSupported={_locomotion.LastDirectGroundSupported}, " +
             $"steeringAuthority={_locomotion.LastSteeringAuthority}, " +
             $"steepScalar={_locomotion.LastSteepScalar:F2}, " +
             $"steeringAngle={_locomotion.LastSteeringAngle:F0}, " +

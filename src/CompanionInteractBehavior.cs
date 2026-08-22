@@ -15,7 +15,6 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
     private const float AimToleranceDegrees = 5f;
     private const float ConfirmationSeconds = 1f;
     private const float InteractionTimeoutSeconds = 25f;
-    private const int MaximumApproachRecoveries = 2;
     private const float ApproachCommitSeconds = 0.45f;
     private const float ApproachNavigationInterval = 0.1f;
 
@@ -272,7 +271,12 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
         }
 
         if (elapsed >= MaximumLookSeconds)
-            CompleteFailure("interaction_alignment_failed");
+        {
+            Plugin.Logger.LogWarning(
+                $"[INTERACT] ALIGNMENT_TIMEOUT referenceId={_target.ReferenceId}, " +
+                $"lookSeconds={elapsed:F2}; continuing with exact target.");
+            Activate(now, elapsed);
+        }
     }
 
     private void TickApproach(float now)
@@ -315,7 +319,6 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
         var direction = new Vector3(toTarget.x, 0f, toTarget.z) /
                         horizontalDistance;
         SteeringStatus status;
-        var directGroundLimited = false;
         if (now < _approachCommitUntil)
         {
             _locomotion.CommitTraversalDirection(
@@ -328,21 +331,18 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
                      now,
                      out status))
         {
-            directGroundLimited = status.DirectGroundLimited;
             _locomotion.Stop(now);
-            if (directGroundLimited ||
-                !TryRecoverApproach(now, direction, horizontalDistance, "blocked_path"))
+            if (!TryRecoverApproach(
+                    now,
+                    direction,
+                    horizontalDistance,
+                    "blocked_path"))
                 CompleteFailure("interaction_path_blocked");
             return;
         }
-        else
-        {
-            directGroundLimited = status.DirectGroundLimited;
-        }
 
         if (_locomotion.ObserveProgress(now) &&
-            (directGroundLimited ||
-             !TryRecoverApproach(now, direction, horizontalDistance, "stuck")))
+            !TryRecoverApproach(now, direction, horizontalDistance, "stuck"))
         {
             CompleteFailure("interaction_path_blocked");
         }
@@ -354,20 +354,6 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
         float distance,
         string reason)
     {
-        if (_approachRecoveries >= MaximumApproachRecoveries)
-            return false;
-        var committedDistance = Mathf.Min(
-            distance,
-            _locomotion.RunSpeed *
-            (ApproachCommitSeconds + ApproachNavigationInterval));
-        if (!_locomotion.HasGroundSupportAhead(direction, committedDistance))
-        {
-            Plugin.Logger.LogWarning(
-                $"[INTERACT] APPROACH_BLOCKED referenceId={_target.ReferenceId}, " +
-                "reason=unsupported_ground.");
-            return false;
-        }
-
         string jumpError;
         if (!_jump.TryRequestActionRecovery(
                 now,
@@ -376,6 +362,15 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
                 reason,
                 out jumpError))
         {
+            if (CompanionJumpActuator.IsDeferredRecoveryError(jumpError))
+            {
+                _locomotion.ResetProgressObservation(now);
+                Plugin.Logger.LogInfo(
+                    $"[INTERACT] APPROACH_DEFERRED referenceId={_target.ReferenceId}, " +
+                    $"reason={reason}, recovery={jumpError}.");
+                return true;
+            }
+
             Plugin.Logger.LogWarning(
                 $"[INTERACT] APPROACH_BLOCKED referenceId={_target.ReferenceId}, " +
                 $"reason={reason}, recovery={jumpError ?? "unavailable"}.");

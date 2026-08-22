@@ -71,7 +71,7 @@ internal static class AgentToolCatalog
             type = "function",
             name = Jump,
             description =
-                "Queue one jump when the companion is standing on jumpable ground.",
+                "Queue one jump; the companion automatically stands first if needed.",
             parameters = new
             {
                 type = "object",

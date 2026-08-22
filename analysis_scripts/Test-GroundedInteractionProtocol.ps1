@@ -144,7 +144,11 @@ Assert-Contains $behavior '_target?.IsWorldTarget == true' `
 Assert-Contains $behavior 'if (_target.IsWorldTarget)' `
     "held-item interaction must not reset follow progress observation"
 Assert-Contains $behavior '_attention.IsAimWithin(' `
-    "the companion must visibly align before crossing authority"
+    "the companion must try to visibly align before crossing authority"
+Assert-Contains $behavior '[INTERACT] ALIGNMENT_TIMEOUT' `
+    "custom gaze timeout must be telemetry rather than an action veto"
+Assert-NotContains $behavior 'CompleteFailure("interaction_alignment_failed")' `
+    "custom interaction alignment must not reject an exact stock action"
 Assert-Order $behavior '_target.TryPrepare(_body, out _activation, out error)' `
     '_target.TryActivate(_activation, out error)' `
     "final validation must immediately precede mutation"
@@ -158,24 +162,44 @@ Assert-Contains $behavior '_locomotion.TrySteerToward(' `
     "interaction approach must reuse obstacle-aware locomotion"
 Assert-Contains $behavior '_jump.TryRequestActionRecovery(' `
     "stalled interaction travel must have bounded grounded recovery"
-Assert-Contains $behavior '_locomotion.HasGroundSupportAhead(direction, committedDistance)' `
-    "interaction recovery must not commit across unsupported ground"
-Assert-Contains $behavior '(ApproachCommitSeconds + ApproachNavigationInterval)' `
-    "interaction recovery proof must cover the first navigation tick after commit expiry"
+Assert-Contains $behavior 'CompanionJumpActuator.IsDeferredRecoveryError(jumpError)' `
+    "temporary jump contention must defer interaction instead of failing the job"
+Assert-Contains $behavior '[INTERACT] APPROACH_DEFERRED' `
+    "deferred recovery must be visible in runtime evidence"
+Assert-NotContains $behavior 'MaximumApproachRecoveries' `
+    "the existing job timeout must be the single recovery bound"
+Assert-NotContains $behavior 'directGroundLimited ||' `
+    "the stock slope signal must not veto interaction recovery"
+Assert-NotContains $behavior 'HasGroundSupportAhead' `
+    "an unreliable floor heuristic must not veto interaction recovery"
 Assert-Contains $behavior '_approachCommitDirection = direction;' `
-    "interaction recovery must freeze the direction that its support proof covered"
+    "interaction recovery must keep one direction through its bounded commitment"
 Assert-Contains $behavior '_jump.CancelActionRecovery(AgentToolCatalog.InteractWithObject)' `
     "cancelled interaction work must remove its queued recovery jump"
 Assert-Contains $behavior '[INTERACT] APPROACH_REACHED' `
     "runtime evidence must separate arrival from activation"
-Assert-Contains $locomotion 'internal bool HasGroundSupportAhead(' `
-    "conservative shortcut and recovery checks must retain forward-ground proof"
-Assert-Contains $locomotion 'layerMask &= ~(1 << bodyCollider.gameObject.layer);' `
-    "ground probes must exclude the companion capsule from floor evidence"
-Assert-NotContains $locomotion 'layerMask &= ~(1 << _body.GameObject.layer);' `
-    "ground probes must retain shared environment layers"
+Assert-NotContains $locomotion 'HasGroundSupportAhead' `
+    "the disproven forward-floor subsystem must stay removed"
 Assert-Contains $actions 'if (posture == CompanionPosture.Sitting && locomotionHolder != null)' `
     "a tool batch must not seat the companion during admitted locomotion work"
+Assert-Contains $actions '_posture.Set(CompanionPosture.Standing)' `
+    "a movement action must stand the companion instead of failing on sitting posture"
+Assert-Contains $actions '"[ACTION] AUTO_STAND ' `
+    "automatic posture recovery must be visible in runtime evidence"
+Assert-NotContains $actions 'movement_blocked_by_posture' `
+    "sitting must not reject an otherwise valid movement action"
+Assert-NotContains $actions 'jump_in_progress' `
+    "a queued stock jump must not reject an otherwise valid movement action"
+Assert-Order $actions 'if (!job.TryBegin(now, request, out failure))' `
+    'if ((job.RequiredFor(request) & JobResources.Locomotion) != 0 &&' `
+    "auto-standing must happen only after the job itself is admitted"
+Assert-Order $actions 'if (!_jump.CanRequest(now, out preflightError))' `
+    'if (!TryAutoStand("jump", now, out standFailure))' `
+    "an invalid explicit jump must not mutate posture"
+Assert-Contains $catalog 'the companion automatically stands first if needed' `
+    "the model-facing jump schema must match automatic posture recovery"
+Assert-NotContains $catalog 'when the companion is standing' `
+    "the schema must not preserve the removed standing refusal"
 Assert-NotContains $awareness 'nearby_interactables = nearbyInteractables' `
     "ambient switch discovery must stay out of the spoken-turn crash surface"
 Assert-NotContains $awareness 'Resources.FindObjectsOfTypeAll<CastableTarget>()' `
@@ -186,5 +210,5 @@ Assert-Contains $entities '_interactables.TryGetValue(stableId, out target)' `
     "interaction IDs must resolve exactly without proximity fallback"
 
 Write-Host "Grounded-interaction protocol checks passed."
-Write-Host "  Proven: the interaction implementation remains exact-targeted and fails closed, while its tool and all speech-time interaction capture are quarantined."
+Write-Host "  Proven: interaction remains exact-targeted, uncertain floor probes cannot block travel, and crash-isolated capture stays quarantined."
 Write-Host "  Not proven: spoken-turn native safety of interaction capture, named ambient discovery, live light wiring, visible on/off result, or compatibility with puzzle interactions."

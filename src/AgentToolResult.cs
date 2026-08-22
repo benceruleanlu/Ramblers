@@ -81,8 +81,7 @@ internal sealed class AgentToolResult
         if (!string.IsNullOrEmpty(error) &&
             (error.IndexOf("in_progress", System.StringComparison.Ordinal) >= 0 ||
              error.IndexOf("cooldown", System.StringComparison.Ordinal) >= 0 ||
-             error.IndexOf("hands_occupied", System.StringComparison.Ordinal) >= 0 ||
-             error.IndexOf("blocked_by_posture", System.StringComparison.Ordinal) >= 0))
+             error.IndexOf("hands_occupied", System.StringComparison.Ordinal) >= 0))
         {
             return "temporarily_busy";
         }

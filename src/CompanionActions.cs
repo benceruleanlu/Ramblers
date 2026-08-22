@@ -164,9 +164,13 @@ internal sealed class CompanionActionCoordinator
 
     internal AgentToolResult RequestJump(float now)
     {
-        var holder = FindHolder(JobResources.Locomotion);
-        if (holder != null)
-            return AgentToolResult.Failure(holder.ActiveName + "_in_progress");
+        string preflightError;
+        if (!_jump.CanRequest(now, out preflightError))
+            return AgentToolResult.Failure(preflightError);
+
+        AgentToolResult standFailure;
+        if (!TryAutoStand("jump", now, out standFailure))
+            return standFailure;
         return _jump.Request(now, _posture.Current);
     }
 
@@ -243,6 +247,14 @@ internal sealed class CompanionActionCoordinator
             return false;
         if (!job.TryBegin(now, request, out failure))
             return false;
+        if ((job.RequiredFor(request) & JobResources.Locomotion) != 0 &&
+            _posture.BlocksMovement &&
+            !TryAutoStand(job.ActiveName, now, out failure))
+        {
+            job.Cancel(now);
+            RefreshMovementGate(now);
+            return false;
+        }
 
         timeoutSeconds = job.TimeoutSeconds;
         RefreshMovementGate(now);
@@ -355,17 +367,6 @@ internal sealed class CompanionActionCoordinator
         out AgentToolResult failure)
     {
         var wanted = job.RequiredFor(request);
-        if ((wanted & JobResources.Locomotion) != 0 && _posture.BlocksMovement)
-        {
-            failure = AgentToolResult.Failure("movement_blocked_by_posture");
-            return false;
-        }
-        if ((wanted & JobResources.Locomotion) != 0 && _jump.IsQueued)
-        {
-            failure = AgentToolResult.Failure("jump_in_progress");
-            return false;
-        }
-
         for (var index = 0; index < _jobs.Length; index++)
         {
             var other = _jobs[index];
@@ -376,6 +377,29 @@ internal sealed class CompanionActionCoordinator
         }
 
         failure = null;
+        return true;
+    }
+
+    private bool TryAutoStand(
+        string reason,
+        float now,
+        out AgentToolResult failure)
+    {
+        failure = null;
+        if (_posture.Current == CompanionPosture.Standing)
+            return true;
+
+        var standResult = _posture.Set(CompanionPosture.Standing);
+        if (!standResult.Ok)
+        {
+            failure = standResult;
+            return false;
+        }
+
+        _locomotion.SetPosture(_posture.Current);
+        _attention.SetBodyTurnAllowed(BodyTurnAllowed);
+        Plugin.Logger.LogInfo(
+            $"[ACTION] AUTO_STAND reason={reason}, at={now:F2}.");
         return true;
     }
 

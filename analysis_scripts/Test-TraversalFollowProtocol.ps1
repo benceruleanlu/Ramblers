@@ -116,8 +116,8 @@ Assert-Contains $follow 'var shortcutRemoved = IsBodyGrounded' `
     "an airborne body must not rewrite its route from transient proximity"
 Assert-Contains $follow 'IsRouteShortcutTraversable,' `
     "follow must require proof before deleting a nearby route prefix"
-Assert-Contains $follow '_locomotion.CanTraverseGroundedSegment(point)' `
-    "shortcut proof must reject body obstructions and unsupported ground"
+Assert-Contains $follow '_locomotion.CanShortcutSegment(point)' `
+    "shortcut proof must reject body obstructions without inventing a second floor model"
 Assert-Order $follow '_trail.RemoveThroughLatestNearby(' `
     'var breadcrumb = SelectTraversalLookahead(botPosition);' `
     "route shortcutting must happen before the next breadcrumb is selected"
@@ -131,12 +131,12 @@ Assert-Contains $follow '(!traversalCommitted || now < _directTraversalUntil)' `
     "an expired traversal commitment must steer back to its point instead of running forever"
 Assert-Contains $follow '_jump.TryRequestTraversal(' `
     "recorded route traversal must queue a deterministic grounded jump"
-Assert-Contains $follow 'if (!status.DirectGroundLimited &&' `
-    "generic blocked-route recovery must reject a heading suppressed by the stock slope solver"
+Assert-NotContains $follow 'if (!status.DirectGroundLimited &&' `
+    "the stock slope signal must not veto a bounded jump recovery"
 Assert-Contains $follow 'if (stuck &&' `
     "stuck recovery must remain explicit and bounded"
-Assert-Contains $follow '!status.DirectGroundLimited &&' `
-    "stuck recovery must reject a heading suppressed by the stock slope solver"
+Assert-NotContains $follow '!status.DirectGroundLimited &&' `
+    "a steep or zero-response heading must still be allowed to try the stock jump path"
 Assert-Contains $follow 'private const float RecoveryDirectionCommitSeconds = 0.45f;' `
     "generic recovery commitment must remain tightly bounded"
 Assert-Contains $locomotion 'private const float BrakingLookahead = 0.55f;' `
@@ -154,21 +154,15 @@ Assert-Contains $locomotion 'CommitTraversalDirection(' `
 Assert-Contains $locomotion 'ground.GetSlopedMoveForce(direction, out steepScalar)' `
     "steering must consult the same stock slope solver used by the player motor"
 Assert-Contains $locomotion '_lastSlopeResponse = directSlopeResponse;' `
-    "runtime evidence must distinguish the stock slope response from floor support"
-Assert-Contains $locomotion '_lastDirectGroundSupported = directGroundSupported;' `
-    "runtime evidence must report the exact floor-support decision"
+    "runtime evidence must expose the stock slope response"
 Assert-Contains $locomotion 'var directGroundResponse = directSlopeResponse;' `
     "ordinary steering must use the stock slope response as movement authority"
-Assert-NotContains $locomotion 'var directGroundResponse = directGroundSupported' `
-    "an unproven support ray must not hard-stop ordinary follow movement"
-Assert-NotContains $locomotion '!HasGroundSupportAhead(candidate, probeDistance)' `
-    "an unproven support ray must not reject every alternate steering heading"
+Assert-NotContains $locomotion 'HasGroundSupportAhead' `
+    "the disproven forward-floor subsystem must stay removed"
 Assert-Contains $locomotion '_lastSteeringAuthority = "stock_slope";' `
     "ordinary steering telemetry must identify the stock slope solver as movement authority"
 Assert-Contains $locomotion '_lastSteeringAuthority = "committed_direction";' `
     "telemetry must identify obstacle-bypassing committed-direction movement"
-Assert-NotContains $locomotion 'layerMask &= ~(1 << _body.GameObject.layer);' `
-    "ground support must not remove a root layer that can also contain the room floor"
 Assert-Contains $locomotion 'hitDescription = DescribeHit(hit);' `
     "blocked-path evidence must identify the collider reported by the rigidbody sweep"
 Assert-Contains $locomotion 'hit.normal.y >= WalkableSweepNormalY' `
@@ -181,8 +175,6 @@ Assert-Contains $follow '$"probes={_locomotion.LastProbeSummary}, "' `
     "status evidence must include every evaluated steering candidate"
 Assert-Contains $follow '$"slopeResponse={_locomotion.LastSlopeResponse:F2}, "' `
     "status evidence must expose raw stock slope output separately"
-Assert-Contains $follow '$"groundSupported={_locomotion.LastDirectGroundSupported}, "' `
-    "status evidence must expose the floor-support result separately"
 Assert-Contains $follow '$"steeringAuthority={_locomotion.LastSteeringAuthority}, "' `
     "status evidence must distinguish ordinary steering from recorded traversal"
 Assert-Contains $locomotion 'Vector3.Distance(_progressAnchor, _body.Position)' `
@@ -195,6 +187,10 @@ Assert-Contains $jump 'jumper.LocalFixedUpdate(ref velocity);' `
 Assert-Order $actions '_follow.TickFixed(now, MovementAllowed, MovementBlocker);' `
     '_jump.TickFixed(now, _posture.Current);' `
     "follow must queue traversal before the jump actuator runs that physics tick"
+Assert-Contains $follow '_jump.CancelFollow("follow stopped");' `
+    "stay mode must cancel only a follow-owned queued jump"
+Assert-NotContains $follow '_jump.Cancel("follow stopped")' `
+    "stay mode must not erase an explicit or action-owned jump"
 
 Assert-NotContains $follow 'Teleport(' `
     "follow recovery must never teleport"
@@ -204,5 +200,5 @@ Assert-NotContains $locomotion 'AddForce' `
     "locomotion must continue through the stock remote-player motor"
 
 Write-Host "Traversal-follow protocol checks passed."
-Write-Host "  Proven: carry rebasing, 3D jump/drop route retention, traversal lookahead/tangents, slope-aware steering, bounded stuck jump, stock motor/jump paths, no teleport."
+Write-Host "  Proven: carry rebasing, 3D jump/drop route retention, traversal lookahead/tangents, slope-aware steering, non-vetoed bounded recovery, stock motor/jump paths, no teleport."
 Write-Host "  Not proven by this static check: live route quality, visible jump timing, ledge choice, or eventual arrival."

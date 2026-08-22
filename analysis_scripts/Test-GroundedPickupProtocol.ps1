@@ -131,25 +131,35 @@ Assert-Contains $pickup 'PickupState.ApproachingTarget' `
 Assert-Contains $pickup '_locomotion.TrySteerToward(' `
     "pickup approach must reuse obstacle-aware steering"
 Assert-Contains $pickup 'private const float ApproachNavigationInterval = 0.1f;' `
-    "pickup terrain probes must run at navigation cadence rather than every frame"
+    "pickup navigation must run at navigation cadence rather than every frame"
 Assert-Contains $follow 'any live movement intent belongs to the action holding that' `
     "suspended follow must not clear pickup's locomotion intent"
 Assert-Contains $follow 'Yield before idle-follow cleanup can clear that job' `
     "stay mode must also yield locomotion to pickup"
 Assert-Contains $pickup '_jump.TryRequestActionRecovery(' `
     "a stalled pickup approach must have bounded grounded jump recovery"
-Assert-Contains $pickup '_locomotion.HasGroundSupportAhead(direction, committedDistance)' `
-    "pickup recovery must not commit across unsupported ground"
-Assert-Contains $pickup '(ApproachCommitSeconds + ApproachNavigationInterval)' `
-    "pickup recovery proof must cover the first navigation tick after commit expiry"
+Assert-Contains $pickup 'CompanionJumpActuator.IsDeferredRecoveryError(jumpError)' `
+    "temporary jump contention must defer pickup instead of failing the job"
+Assert-Contains $pickup '[ACTION] PICKUP_APPROACH_DEFERRED' `
+    "deferred recovery must be visible in runtime evidence"
+Assert-NotContains $pickup 'MaximumApproachRecoveries' `
+    "the existing job timeout must be the single recovery bound"
+Assert-NotContains $pickup 'directGroundLimited ||' `
+    "the stock slope signal must not veto pickup recovery"
+Assert-NotContains $pickup 'HasGroundSupportAhead' `
+    "an unreliable floor heuristic must not veto pickup recovery"
 Assert-Contains $pickup '_approachCommitDirection = direction;' `
-    "pickup recovery must freeze the direction that its support proof covered"
+    "pickup recovery must keep one direction through its bounded commitment"
 Assert-Contains $pickup '_approachCommitDirection,' `
     "a moving prop must not redirect an active recovery commitment"
 Assert-Contains $pickup '_jump.CancelActionRecovery(AgentToolCatalog.PickUpItem)' `
     "cancelled pickup work must remove its queued recovery jump"
 Assert-Contains $pickup '[ACTION] PICKUP_APPROACH_REACHED' `
     "runtime evidence must distinguish successful navigation from pickup"
+Assert-Contains $pickup '[ACTION] PICKUP_ALIGNMENT_TIMEOUT' `
+    "custom gaze timeout must be telemetry rather than an action veto"
+Assert-NotContains $pickup 'CompleteFailure("target_alignment_failed")' `
+    "custom pickup alignment must not reject an exact stock action"
 Assert-Contains $pickup '[ACTION] PICKUP_JOB_CONCLUDED' `
     "a completed pickup must log release of its job lifecycle"
 Assert-Order $pickup 'public void Conclude(float now)' `
