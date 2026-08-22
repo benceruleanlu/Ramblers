@@ -1028,6 +1028,9 @@ internal sealed class CompanionFollowBehavior
             $"directBlocked={_locomotion.LastDirectPathBlocked}, " +
             $"groundLimited={_locomotion.LastDirectGroundLimited}, " +
             $"groundResponse={_locomotion.LastGroundResponse:F2}, " +
+            $"slopeResponse={_locomotion.LastSlopeResponse:F2}, " +
+            $"groundSupported={_locomotion.LastDirectGroundSupported}, " +
+            $"groundSupportEnforced={_locomotion.LastGroundSupportEnforced}, " +
             $"steepScalar={_locomotion.LastSteepScalar:F2}, " +
             $"steeringAngle={_locomotion.LastSteeringAngle:F0}, " +
             $"clearance={_locomotion.LastClearance:F2}, " +

@@ -153,6 +153,14 @@ Assert-Contains $locomotion 'CommitTraversalDirection(' `
     "a committed jump or drop must retain forward intent"
 Assert-Contains $locomotion 'ground.GetSlopedMoveForce(direction, out steepScalar)' `
     "steering must consult the same stock slope solver used by the player motor"
+Assert-Contains $locomotion '_lastSlopeResponse = directSlopeResponse;' `
+    "runtime evidence must distinguish the stock slope response from floor support"
+Assert-Contains $locomotion '_lastDirectGroundSupported = directGroundSupported;' `
+    "runtime evidence must report the exact floor-support decision"
+Assert-Contains $locomotion '_lastGroundSupportEnforced = false;' `
+    "committed traversal telemetry must identify that recorded-route support is observational"
+Assert-NotContains $locomotion 'layerMask &= ~(1 << _body.GameObject.layer);' `
+    "ground support must not remove a root layer that can also contain the room floor"
 Assert-Contains $locomotion 'hitDescription = DescribeHit(hit);' `
     "blocked-path evidence must identify the collider reported by the rigidbody sweep"
 Assert-Contains $locomotion 'hit.normal.y >= WalkableSweepNormalY' `
@@ -163,6 +171,12 @@ Assert-NotContains $locomotion 'SweepTestAll(' `
     "the stripped multi-hit sweep must never disable navigation at runtime"
 Assert-Contains $follow '$"probes={_locomotion.LastProbeSummary}, "' `
     "status evidence must include every evaluated steering candidate"
+Assert-Contains $follow '$"slopeResponse={_locomotion.LastSlopeResponse:F2}, "' `
+    "status evidence must expose raw stock slope output separately"
+Assert-Contains $follow '$"groundSupported={_locomotion.LastDirectGroundSupported}, "' `
+    "status evidence must expose the floor-support result separately"
+Assert-Contains $follow '$"groundSupportEnforced={_locomotion.LastGroundSupportEnforced}, "' `
+    "status evidence must distinguish ordinary steering from recorded traversal"
 Assert-Contains $locomotion 'Vector3.Distance(_progressAnchor, _body.Position)' `
     "jumping and falling must count as spatial progress"
 

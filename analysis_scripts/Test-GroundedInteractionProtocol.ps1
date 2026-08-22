@@ -172,6 +172,8 @@ Assert-Contains $locomotion 'internal bool HasGroundSupportAhead(' `
     "ordinary steering must sample forward ground rather than only current slope"
 Assert-Contains $locomotion 'layerMask &= ~(1 << bodyCollider.gameObject.layer);' `
     "ground probes must exclude the companion capsule from floor evidence"
+Assert-NotContains $locomotion 'layerMask &= ~(1 << _body.GameObject.layer);' `
+    "ground probes must retain shared environment layers"
 Assert-Contains $actions 'if (posture == CompanionPosture.Sitting && locomotionHolder != null)' `
     "a tool batch must not seat the companion during admitted locomotion work"
 Assert-NotContains $awareness 'nearby_interactables = nearbyInteractables' `

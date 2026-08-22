@@ -99,6 +99,9 @@ internal sealed class CompanionLocomotion
     private bool _lastDirectPathBlocked;
     private bool _lastDirectGroundLimited;
     private float _lastGroundResponse;
+    private float _lastSlopeResponse;
+    private bool _lastDirectGroundSupported;
+    private bool _lastGroundSupportEnforced;
     private float _lastSteepScalar;
     private string _lastDirectHit = "clear";
     private string _lastProbeSummary = "not_sampled";
@@ -122,6 +125,9 @@ internal sealed class CompanionLocomotion
     internal bool LastDirectPathBlocked => _lastDirectPathBlocked;
     internal bool LastDirectGroundLimited => _lastDirectGroundLimited;
     internal float LastGroundResponse => _lastGroundResponse;
+    internal float LastSlopeResponse => _lastSlopeResponse;
+    internal bool LastDirectGroundSupported => _lastDirectGroundSupported;
+    internal bool LastGroundSupportEnforced => _lastGroundSupportEnforced;
     internal float LastSteepScalar => _lastSteepScalar;
     internal string LastDirectHit => _lastDirectHit;
     internal string LastProbeSummary => _lastProbeSummary;
@@ -171,6 +177,9 @@ internal sealed class CompanionLocomotion
         _lastDirectPathBlocked = false;
         _lastDirectGroundLimited = false;
         _lastGroundResponse = 1f;
+        _lastSlopeResponse = 1f;
+        _lastDirectGroundSupported = true;
+        _lastGroundSupportEnforced = true;
         _lastSteepScalar = 1f;
         _lastDirectHit = "clear";
         _lastProbeSummary = "not_sampled";
@@ -304,6 +313,9 @@ internal sealed class CompanionLocomotion
         var directBlocked = clearance < MinimumClearance;
         float steepScalar;
         var groundResponse = MeasureGroundResponse(desiredDirection, out steepScalar);
+        var groundSupported = HasGroundSupportAhead(
+            desiredDirection,
+            probeDistance);
         var directGroundLimited = groundResponse < MinimumGroundResponse;
 
         _lastDirectPathBlocked = directBlocked || directGroundLimited;
@@ -311,6 +323,9 @@ internal sealed class CompanionLocomotion
         _lastSteeringAngle = 0f;
         _lastClearance = clearance;
         _lastGroundResponse = groundResponse;
+        _lastSlopeResponse = groundResponse;
+        _lastDirectGroundSupported = groundSupported;
+        _lastGroundSupportEnforced = false;
         _lastSteepScalar = steepScalar;
         _lastDirectHit = directHit;
         _lastProbeSummary = FormatProbe(0f, clearance, groundResponse, directHit);
@@ -431,11 +446,18 @@ internal sealed class CompanionLocomotion
             probeDistance,
             out directHit);
         float directSteepScalar;
-        var directGroundResponse = MeasureGroundResponse(
+        var directSlopeResponse = MeasureGroundResponse(
             desiredDirection,
             out directSteepScalar);
-        if (!HasGroundSupportAhead(desiredDirection, probeDistance))
-            directGroundResponse = 0f;
+        var directGroundSupported = HasGroundSupportAhead(
+            desiredDirection,
+            probeDistance);
+        var directGroundResponse = directGroundSupported
+            ? directSlopeResponse
+            : 0f;
+        _lastSlopeResponse = directSlopeResponse;
+        _lastDirectGroundSupported = directGroundSupported;
+        _lastGroundSupportEnforced = true;
         directGroundLimited = directGroundResponse < MinimumGroundResponse;
         directBlocked = directClearance < MinimumClearance || directGroundLimited;
         groundResponse = directGroundResponse;
@@ -711,8 +733,11 @@ internal sealed class CompanionLocomotion
         var bodyCollider = _body.Character?.collision?.bodyCollider;
         if (bodyCollider?.gameObject != null)
             layerMask &= ~(1 << bodyCollider.gameObject.layer);
-        if (_body.GameObject != null)
-            layerMask &= ~(1 << _body.GameObject.layer);
+
+        // The player root may share a layer with the room/floor mesh. Removing
+        // that whole layer made every downward sample miss ordinary floor in
+        // the spawn room. Exclude only the dedicated body-collider layer; the
+        // ray originates inside/above the remaining companion hierarchy.
 
         RaycastHit hit;
         if (!Physics.Raycast(
