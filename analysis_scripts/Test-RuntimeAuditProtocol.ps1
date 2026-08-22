@@ -10,6 +10,8 @@ $bridge = Get-Content -LiteralPath (Join-Path $PSScriptRoot "..\src\OpenAIRealti
 $client = Get-Content -LiteralPath (Join-Path $PSScriptRoot "..\src\OpenAIRealtimeClient.cs") -Raw
 $plugin = Get-Content -LiteralPath (Join-Path $PSScriptRoot "..\src\RamblersPlugin.cs") -Raw
 $build = Get-Content -LiteralPath (Join-Path $PSScriptRoot "..\build.ps1") -Raw
+$sharedLogReaderPath = Join-Path $PSScriptRoot "..\scripts\Read-SharedLogLines.ps1"
+. $sharedLogReaderPath
 
 function Assert-Contains {
     param(
@@ -67,6 +69,8 @@ Assert-Contains 'stage=(?<stage>[^,]+)' `
     "turn-latency stages must be included in the compact report"
 Assert-Contains 'Set-Content -LiteralPath $OutputPath' `
     "the audit must leave a diagnostic artifact"
+Assert-Contains '$allLines = @(Read-SharedLogLines $logPath)' `
+    "a one-line log must retain array semantics"
 Assert-Contains 'exit 1' `
     "invariant violations must produce a non-zero exit"
 if ($plugin.IndexOf('assemblySha256={assemblySha256}', [System.StringComparison]::Ordinal) -lt 0) {
@@ -92,6 +96,51 @@ $drainIndex = $bridge.IndexOf('DrainClientEvents();', [System.StringComparison]:
 $ensureIndex = $bridge.IndexOf('EnsureClient();', [System.StringComparison]::Ordinal)
 if ($drainIndex -lt 0 -or $ensureIndex -lt 0 -or $drainIndex -gt $ensureIndex) {
     throw "Runtime-audit check failed: stopped-client logs must drain before client replacement"
+}
+
+$probePath = Join-Path ([System.IO.Path]::GetTempPath()) (
+    "RamblersSharedLog-" + [Guid]::NewGuid().ToString("N") + ".log")
+$writerStream = $null
+$writer = $null
+try {
+    $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+    $writerStream = New-Object System.IO.FileStream(
+        $probePath,
+        [System.IO.FileMode]::CreateNew,
+        [System.IO.FileAccess]::ReadWrite,
+        $share)
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $writer = New-Object System.IO.StreamWriter($writerStream, $utf8, 1024, $true)
+    $writer.Write("only-line")
+    $writer.Flush()
+    $single = @(Read-SharedLogLines $probePath)
+    if ($single.Count -ne 1 -or $single[0] -ne "only-line") {
+        throw "Runtime-audit check failed: shared reader lost one-line array semantics"
+    }
+
+    $writer.Dispose()
+    $writer = $null
+    $writerStream.SetLength(0)
+    $writerStream.Position = 0
+    $writer = New-Object System.IO.StreamWriter($writerStream, $utf8, 1024, $true)
+    $writer.Write("first`r`nsecond")
+    $writer.Flush()
+    $multiple = @(Read-SharedLogLines $probePath)
+    if ($multiple.Count -ne 2 -or $multiple[0] -ne "first" -or
+        $multiple[1] -ne "second") {
+        throw "Runtime-audit check failed: shared reader did not preserve live multiline content"
+    }
+}
+finally {
+    if ($null -ne $writer) {
+        $writer.Dispose()
+    }
+    if ($null -ne $writerStream) {
+        $writerStream.Dispose()
+    }
+    if (Test-Path -LiteralPath $probePath) {
+        Remove-Item -LiteralPath $probePath -Force
+    }
 }
 
 Write-Host "Runtime-audit protocol checks passed."

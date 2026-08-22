@@ -11,10 +11,15 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ramblersRoot = Split-Path -Parent $PSScriptRoot
 $gamePathResolver = Join-Path $ramblersRoot "scripts\Resolve-BigWalkGamePath.ps1"
+$sharedLogReader = Join-Path $ramblersRoot "scripts\Read-SharedLogLines.ps1"
 if (-not (Test-Path -LiteralPath $gamePathResolver -PathType Leaf)) {
     throw "Big Walk path resolver is missing: $gamePathResolver"
 }
+if (-not (Test-Path -LiteralPath $sharedLogReader -PathType Leaf)) {
+    throw "Shared log reader is missing: $sharedLogReader"
+}
 . $gamePathResolver
+. $sharedLogReader
 
 if ([string]::IsNullOrWhiteSpace($GamePath)) {
     $GamePath = $env:RAMBLERS_GAME_PATH
@@ -122,7 +127,7 @@ if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) {
 else {
     $logItem = Get-Item -LiteralPath $logPath
     $logTimestamp = $logItem.LastWriteTime.ToString("o")
-    $allLines = [System.IO.File]::ReadAllLines($logPath)
+    $allLines = @(Read-SharedLogLines $logPath)
     $sessionStart = -1
     for ($index = 0; $index -lt $allLines.Length; $index++) {
         if ($allLines[$index] -match '\[RAMBLERS\] Loaded version (?<version>\d+\.\d+\.\d+)(?:, assemblySha256=(?<hash>[A-Fa-f0-9]+|unavailable))?\.') {
