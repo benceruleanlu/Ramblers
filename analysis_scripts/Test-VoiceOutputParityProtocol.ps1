@@ -22,26 +22,18 @@ function Assert-NotContains {
     }
 }
 
-Assert-Contains 'playback?.SourceController?.AudioSource' `
-    "the synthetic source must discover the stock player-voice route"
-Assert-Contains 'destination.outputAudioMixerGroup = stock.outputAudioMixerGroup;' `
-    "the stock voice mixer must be preserved"
-Assert-Contains 'destination.spatialize = stock.spatialize;' `
-    "the stock spatializer setting must be preserved"
-Assert-Contains 'destination.spatialBlend = stock.spatialBlend;' `
-    "the stock 2D/3D blend must be preserved"
-Assert-Contains 'if (!_stockRouteApplied &&' `
-    "late stock voice initialization must still upgrade the synthetic route"
-Assert-Contains '_nextStockRouteResolveAt = Time.realtimeSinceStartup + 1f;' `
-    "late route discovery must not scan Unity assets every frame"
-Assert-Contains '_nextAttenuationResolveAt = Time.realtimeSinceStartup + 1f;' `
-    "a late game attenuation curve must be retried at bounded cadence"
-Assert-Contains '[AGENT] VOICE_ROUTE_TEMPLATE_UNAVAILABLE' `
-    "late stock-route failures must degrade to the existing source without escaping Update"
-Assert-Contains '[AGENT] VOICE_ATTENUATION_ROUTE_UNAVAILABLE' `
-    "late curve failures must degrade to the temporary Unity fallback without escaping Update"
+Assert-NotContains '.SourceController' `
+    "synthetic speech must not cross the crash-prone Dissonance SourceController wrapper"
+Assert-NotContains 'FindObjectsOfTypeAll<PlayerVoicePlaybackControl>' `
+    "synthetic speech must not enumerate and dereference unrelated live voice controls"
+Assert-NotContains 'CopyStockVoiceRoute' `
+    "synthetic speech must not clone an unproven live AudioSource route"
+Assert-NotContains 'outputAudioMixerGroup' `
+    "mixer-route parity must remain deferred until it has an isolated safe integration"
+Assert-Contains 'playback == null ? null : playback.AttenuationCurve' `
+    "attenuation must use the already-exercised companion playback field path"
 Assert-Contains 'ConfigureMetreAttenuation();' `
-    "a late curve must replace the temporary logarithmic fallback"
+    "the game curve must select direct metre-domain attenuation"
 Assert-Contains '_attenuationCurve.Evaluate(Mathf.Max(0f, distance))' `
     "Big Walk attenuation must be evaluated in the game's metre domain"
 Assert-Contains 'AnimationCurve.Linear(0f, 1f, 1f, 1f)' `
@@ -54,7 +46,9 @@ Assert-Contains '[AGENT] VOICE_ROUTE_READY' `
     "the selected route and reference curve must be logged"
 Assert-Contains '[AGENT] VOICE_ROUTE_LEVEL' `
     "live distance and applied level must be observable"
+Assert-Contains 'route=local_3d_safe' `
+    "runtime evidence must identify the crash-contained local route"
 
-Write-Host "Voice-output parity protocol checks passed."
-Write-Host "  Proven: stock mixer/spatial route cloning, metre-domain attenuation, flat Unity rolloff, and live level telemetry."
-Write-Host "  Not proven: perceived loudness parity with a real remote player in the deployed game."
+Write-Host "Voice-output safety protocol checks passed."
+Write-Host "  Proven: crash-prone source introspection is absent; metre-domain attenuation, flat Unity rolloff, and live level telemetry remain."
+Write-Host "  Not proven: spoken runtime stability, perceived loudness, or mixer-route parity with a real remote player."

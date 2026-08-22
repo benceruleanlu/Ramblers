@@ -16,7 +16,6 @@ internal sealed class CompanionAwarenessTurnContext
     internal int EventCount;
     internal int NearbyPropCount;
     internal int NearbyPlayerCount;
-    internal int NearbyInteractableCount;
     internal int RememberedPropCount;
     internal float VisualAgeSeconds = -1f;
     internal CompanionEntityReferenceSet EntityReferences;
@@ -50,10 +49,8 @@ internal sealed class CompanionAwareness
     private const float JournalLifetimeSeconds = 120f;
     private const int MaximumNearbyProps = 6;
     private const int MaximumNearbyPlayers = 3;
-    private const int MaximumNearbyInteractables = 6;
     private const float NearbyPropRadius = 10f;
     private const float NearbyPlayerRadius = 15f;
-    private const float NearbyInteractableRadius = 12f;
     private const int MaximumRememberedProps = 4;
     private const float RememberedPropLifetimeSeconds = 45f;
     private const float RememberedPropMaximumDistance = 30f;
@@ -118,19 +115,6 @@ internal sealed class CompanionAwareness
         public bool visible_from_companion { get; set; }
         public bool grounded { get; set; }
         public HeldPayload held_item { get; set; }
-    }
-
-    private sealed class NearbyInteractablePayload
-    {
-        public string id { get; set; }
-        public string name { get; set; }
-        public float distance_from_companion_m { get; set; }
-        public float distance_from_human_m { get; set; }
-        public float height_from_companion_m { get; set; }
-        public string bearing_from_companion { get; set; }
-        public bool visible_from_companion { get; set; }
-        public bool reachable_now { get; set; }
-        public bool blocked { get; set; }
     }
 
     private sealed class RememberedPropPayload
@@ -453,9 +437,6 @@ internal sealed class CompanionAwareness
             now,
             nearbyPropIds,
             entityReferences);
-        var nearbyInteractables = CaptureNearbyInteractables(
-            human,
-            entityReferences);
         var nearbyPlayers = CaptureNearbyPlayers(human);
         var recentEvents = CaptureUndeliveredEvents(now);
         var visualAge = _passiveImageBytes == null
@@ -510,7 +491,6 @@ internal sealed class CompanionAwareness
             },
             nearby_props = nearbyProps,
             recently_seen_props = rememberedProps,
-            nearby_interactables = nearbyInteractables,
             other_nearby_players = nearbyPlayers,
             recent_events = recentEvents,
             visual_memory = new
@@ -549,7 +529,6 @@ internal sealed class CompanionAwareness
             EventCount = recentEvents.Length,
             NearbyPropCount = nearbyProps.Length,
             NearbyPlayerCount = nearbyPlayers.Length,
-            NearbyInteractableCount = nearbyInteractables.Length,
             RememberedPropCount = rememberedProps.Length,
             EntityReferences = entityReferences,
             DeliveredThroughEventSequence = _nextEventSequence,
@@ -889,142 +868,6 @@ internal sealed class CompanionAwareness
         return result.ToArray();
     }
 
-    private NearbyInteractablePayload[] CaptureNearbyInteractables(
-        PlayerCharacter human,
-        CompanionEntityReferenceSet entityReferences)
-    {
-        var result = new List<NearbyInteractablePayload>();
-        var capturedTargets =
-            new Dictionary<string, CompanionPeckTarget>(StringComparer.Ordinal);
-        var payloadIndices =
-            new Dictionary<string, int>(StringComparer.Ordinal);
-        try
-        {
-            // FindObjectsByType is compile-visible but not runtime-probed in
-            // this IL2CPP build. Reuse the already exercised Resources path
-            // and filter every result through active/enabled exact capture.
-            var targets = Resources.FindObjectsOfTypeAll<CastableTarget>();
-            if (targets == null)
-                return result.ToArray();
-
-            var botPosition = _body.Position;
-            var humanPosition = human.transform.position;
-            var layerMask = ResolveLayerMask(human);
-            for (var index = 0; index < targets.Length; index++)
-            {
-                var castable = targets[index];
-                CompanionPeckTarget target;
-                string captureError;
-                if (!CompanionPeckTarget.TryCaptureContextEntity(
-                        castable,
-                        _body,
-                        out target,
-                        out captureError))
-                {
-                    continue;
-                }
-
-                Vector3 point;
-                string pointError;
-                if (!target.TryGetCurrentPoint(out point, out pointError))
-                    continue;
-                var botDistance = Vector3.Distance(botPosition, point);
-                var humanDistance = Vector3.Distance(humanPosition, point);
-                if (botDistance > NearbyInteractableRadius &&
-                    humanDistance > NearbyInteractableRadius)
-                {
-                    continue;
-                }
-
-                var reachableNow = _body.Character?.caster != null &&
-                                   _body.Character.caster.CanStillReachSwitch(
-                                       target.PeckSwitch);
-                var payload = new NearbyInteractablePayload
-                {
-                    id = target.ReferenceId,
-                    name = InteractableName(castable, target.PeckSwitch),
-                    distance_from_companion_m = Round1(botDistance),
-                    distance_from_human_m = Round1(humanDistance),
-                    height_from_companion_m = Round1(point.y - botPosition.y),
-                    bearing_from_companion = BearingLabel(
-                        _body.Transform.forward,
-                        point - botPosition),
-                    visible_from_companion = HasLineOfSight(
-                        _body.HeadPosition,
-                        target.PeckSwitch.transform,
-                        point,
-                        layerMask),
-                    reachable_now = reachableNow,
-                    blocked = !target.PeckSwitch.isNotBlocked
-                };
-                int existingIndex;
-                if (payloadIndices.TryGetValue(
-                        target.ReferenceId,
-                        out existingIndex))
-                {
-                    var existing = result[existingIndex];
-                    var existingDistance = Mathf.Min(
-                        existing.distance_from_companion_m,
-                        existing.distance_from_human_m);
-                    var newDistance = Mathf.Min(
-                        payload.distance_from_companion_m,
-                        payload.distance_from_human_m);
-                    if (existingDistance <= newDistance)
-                        continue;
-                    result[existingIndex] = payload;
-                }
-                else
-                {
-                    payloadIndices[target.ReferenceId] = result.Count;
-                    result.Add(payload);
-                }
-                capturedTargets[target.ReferenceId] = target;
-            }
-        }
-        catch (Exception exception)
-        {
-            Plugin.Logger.LogWarning(
-                $"[AWARENESS] Nearby-interactable snapshot degraded: {exception.Message}");
-        }
-
-        result.Sort((left, right) =>
-            Mathf.Min(
-                    left.distance_from_companion_m,
-                    left.distance_from_human_m)
-                .CompareTo(Mathf.Min(
-                    right.distance_from_companion_m,
-                    right.distance_from_human_m)));
-        if (result.Count > MaximumNearbyInteractables)
-        {
-            result.RemoveRange(
-                MaximumNearbyInteractables,
-                result.Count - MaximumNearbyInteractables);
-        }
-        for (var index = 0; index < result.Count; index++)
-        {
-            CompanionPeckTarget target;
-            if (capturedTargets.TryGetValue(result[index].id, out target))
-            {
-                entityReferences.Add(target);
-                Plugin.Logger.LogInfo(
-                    $"[ENTITY] CONTEXT_INTERACTABLE id={result[index].id}, " +
-                    $"name={SanitizeLogText(result[index].name)}, " +
-                    $"companionDistance={result[index].distance_from_companion_m:F1}, " +
-                    $"humanDistance={result[index].distance_from_human_m:F1}, " +
-                    $"reachable={result[index].reachable_now}, " +
-                    $"blocked={result[index].blocked}.");
-            }
-        }
-        return result.ToArray();
-    }
-
-    private static string SanitizeLogText(string value)
-    {
-        return string.IsNullOrEmpty(value)
-            ? "unnamed"
-            : value.Replace('\r', ' ').Replace('\n', ' ').Replace(',', '_');
-    }
-
     private NearbyPlayerPayload[] CaptureNearbyPlayers(PlayerCharacter human)
     {
         var result = new List<NearbyPlayerPayload>();
@@ -1201,22 +1044,6 @@ internal sealed class CompanionAwareness
         return next == 0
             ? "unknown_prop"
             : new string(cleaned, 0, next);
-    }
-
-    private static string InteractableName(
-        CastableTarget castable,
-        PeckSwitch peckSwitch)
-    {
-        var value = castable?.gameObject?.name;
-        if (string.IsNullOrWhiteSpace(value) ||
-            string.Equals(value, "CastableTarget", StringComparison.OrdinalIgnoreCase))
-        {
-            value = peckSwitch?.gameObject?.name;
-        }
-        if (string.IsNullOrWhiteSpace(value))
-            return "interactive_object";
-        value = value.Replace("(Clone)", string.Empty).Trim();
-        return value.Length <= 64 ? value : value.Substring(0, 64);
     }
 
     private static bool IsGrounded(PlayerCharacter character)

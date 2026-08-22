@@ -304,11 +304,6 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         CompanionController.TryCaptureInspectionCandidates(
             out inspectionCandidates,
             out inspectionCaptureError);
-        CompanionPeckCandidates peckCandidates;
-        string peckCaptureError;
-        CompanionController.TryCapturePeckCandidates(
-            out peckCandidates,
-            out peckCaptureError);
         CompanionAwarenessTurnContext awarenessContext;
         string awarenessCaptureError;
         CompanionController.TryTakeAwarenessTurnContext(
@@ -321,8 +316,8 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             CaptureError = captureError,
             InspectionCandidates = inspectionCandidates,
             InspectionCaptureError = inspectionCaptureError,
-            PeckCandidates = peckCandidates,
-            PeckCaptureError = peckCaptureError,
+            PeckCandidates = null,
+            PeckCaptureError = "interaction_context_quarantined",
             EntityReferences = awarenessContext?.EntityReferences
         };
         var awarenessQueued = false;
@@ -381,28 +376,6 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
                 $"heldNetId={inspectionCandidates.HeldItemNetworkId}.");
         }
 
-        if (peckCandidates == null)
-        {
-            Plugin.Logger.LogInfo(
-                $"[AGENT] TURN_INTERACTION_REFERENCE_CAPTURED source={source}, " +
-                $"turnId={turnId}, status=unavailable, " +
-                $"reason={peckCaptureError ?? "interaction_reference_not_captured"}.");
-        }
-        else
-        {
-            Plugin.Logger.LogInfo(
-                $"[AGENT] TURN_INTERACTION_REFERENCES_CAPTURED source={source}, " +
-                $"turnId={turnId}, " +
-                $"humanAvailable={peckCandidates.HumanReferenceAvailable}, " +
-                $"humanReason={peckCandidates.HumanReferenceError ?? "none"}, " +
-                $"humanReferenceId={peckCandidates.HumanReferenceId}, " +
-                $"humanNetId={peckCandidates.HumanReferenceNetworkId}, " +
-                $"heldItemAvailable={peckCandidates.CompanionHeldItemAvailable}, " +
-                $"heldItemReason={peckCandidates.CompanionHeldItemError ?? "none"}, " +
-                $"heldReferenceId={peckCandidates.CompanionHeldItemReferenceId}, " +
-                $"heldNetId={peckCandidates.CompanionHeldItemNetworkId}.");
-        }
-
         if (!awarenessQueued)
         {
             Plugin.Logger.LogInfo(
@@ -418,7 +391,6 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
                 $"textChars={awarenessContext.Message.Text.Length}, " +
                 $"events={awarenessContext.EventCount}, " +
                 $"nearbyProps={awarenessContext.NearbyPropCount}, " +
-                $"nearbyInteractables={awarenessContext.NearbyInteractableCount}, " +
                 $"rememberedProps={awarenessContext.RememberedPropCount}, " +
                 $"actionableEntities={awarenessContext.EntityReferences?.Count ?? 0}, " +
                 $"nearbyPlayers={awarenessContext.NearbyPlayerCount}, " +

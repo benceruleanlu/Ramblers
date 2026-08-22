@@ -17,7 +17,7 @@ internal static class AgentToolCatalog
     internal const string CancelAction = "cancel_action";
 
     internal const string NamesForLog =
-        "set_follow_mode,set_posture,jump,inspect_reference,interact_with_object,pick_up_item,kick_item,drop_item,cancel_action";
+        "set_follow_mode,set_posture,jump,inspect_reference,pick_up_item,kick_item,drop_item,cancel_action";
 
     internal static readonly object[] RealtimeDefinitions =
     {
@@ -97,28 +97,6 @@ internal static class AgentToolCatalog
                         description =
                             "Silently inferred visual referent for this utterance.",
                         @enum = new[] { "human_held_item", "human_gaze" }
-                    }
-                },
-                required = new[] { "target" },
-                additionalProperties = false
-            }
-        },
-        new
-        {
-            type = "function",
-            name = InteractWithObject,
-            description =
-                "Go to and perform one primary interaction on an exact usable object. Silently use its switch ID from nearby_interactables when the human names a nearby button, switch, or light control; use companion_held_item for the prop you are holding; use human_reference when current gaze is the only grounding. Never say IDs aloud, ask the human to choose an internal target type, or substitute another object. Use directly to press, activate, toggle, use, or operate a light control; do not use it for pickup, kick, or drop. This performs the object's primary interaction rather than setting a guaranteed named on/off state, so do not claim a final state unless it was actually observed.",
-            parameters = new
-            {
-                type = "object",
-                properties = new
-                {
-                    target = new
-                    {
-                        type = "string",
-                        description =
-                            "Either companion_held_item, human_reference, or the exact switch: ID from private nearby_interactables context."
                     }
                 },
                 required = new[] { "target" },

@@ -99,8 +99,8 @@ Assert-Contains $bridge 'events={awarenessContext.EventCount}' `
     "runtime evidence must include the event count"
 Assert-Contains $bridge 'nearbyProps={awarenessContext.NearbyPropCount}' `
     "runtime evidence must include the nearby-prop count"
-Assert-Contains $bridge 'nearbyInteractables={awarenessContext.NearbyInteractableCount}' `
-    "runtime evidence must include actionable switch discovery"
+Assert-NotContains $bridge 'nearbyInteractables={awarenessContext.NearbyInteractableCount}' `
+    "the spoken-turn path must not invoke quarantined ambient switch discovery"
 Assert-Contains $bridge 'rememberedProps={awarenessContext.RememberedPropCount}' `
     "runtime evidence must include cross-turn entity memory"
 Assert-Contains $bridge 'actionableEntities={awarenessContext.EntityReferences?.Count ?? 0}' `
@@ -136,10 +136,10 @@ Assert-Contains $awareness 'private const int MaximumNearbyProps = 6;' `
     "nearby prop context must remain compact"
 Assert-Contains $awareness 'private const int MaximumNearbyPlayers = 3;' `
     "nearby player context must remain compact"
-Assert-Contains $awareness 'private const int MaximumNearbyInteractables = 6;' `
-    "nearby interaction context must remain compact"
-Assert-Contains $awareness 'payloadIndices.TryGetValue(' `
-    "one exact switch must not consume multiple bounded context entries"
+Assert-NotContains $awareness 'CaptureNearbyInteractables(' `
+    "spoken context must not cross the unverified CastableTarget scan after a native crash"
+Assert-NotContains $awareness 'FindObjectsOfTypeAll<CastableTarget>' `
+    "spoken context must not instantiate the quarantined CastableTarget resource scan"
 Assert-Contains $awareness 'while (_journal.Count > MaximumJournalEntries)' `
     "the journal bound must be enforced"
 Assert-Contains $awareness 'var props = Prop.allProps;' `
@@ -205,5 +205,5 @@ Assert-Contains $controller '[AWARENESS] BIND_FAILED' `
     "awareness bind faults must degrade without preventing companion spawn"
 
 Write-Host "Awareness-context checks passed."
-Write-Host "  Proven: bounded structured context, turn ordering, silent delivery, stable nearby identities, settled ambient capture, freshness, one-shot images, and telemetry."
+Write-Host "  Proven: bounded structured context, turn ordering, silent delivery, stable prop identities, quarantined switch scanning, settled ambient capture, freshness, one-shot images, and telemetry."
 Write-Host "  Not proven: live Unity state quality, model interpretation, or captured image composition."

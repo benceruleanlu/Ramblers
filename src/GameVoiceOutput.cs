@@ -62,17 +62,10 @@ internal sealed class GameVoiceOutput
 
     private readonly List<VoiceSegment> _segments = new List<VoiceSegment>();
     private readonly LogLatch _ringWriteFailureLog = new LogLatch();
-    private readonly LogLatch _stockRouteUpgradeFailureLog = new LogLatch();
-    private readonly LogLatch _attenuationUpgradeFailureLog = new LogLatch();
 
     private PlayerCharacter _speaker;
     private AudioSource _source;
-    private PlayerVoicePlaybackControl _voicePlayback;
     private AnimationCurve _attenuationCurve;
-    private string _voiceMixerName = "none";
-    private bool _stockRouteApplied;
-    private float _nextStockRouteResolveAt;
-    private float _nextAttenuationResolveAt;
     private float _nextRouteLevelLog;
     private AudioClip _ring;
     private Il2CppStructArray<float> _writeBlock;
@@ -124,7 +117,7 @@ internal sealed class GameVoiceOutput
         EnsureSource(bot);
         if (_source == null || _ring == null)
             return;
-        UpdateVoiceRoute(human, bot);
+        UpdateVoiceAttenuation(human, bot);
 
         if (_playing)
         {
@@ -516,7 +509,6 @@ internal sealed class GameVoiceOutput
             if (playback == null)
                 playback = bot.GetComponentInChildren<PlayerVoicePlaybackControl>(true);
 
-            var stockSource = ResolveStockVoiceSource(playback);
             var voiceObject = playback != null
                 ? playback.gameObject
                 : bot.gameObject;
@@ -533,12 +525,13 @@ internal sealed class GameVoiceOutput
             _source.dopplerLevel = 0f;
             _source.volume = 1f;
 
-            if (stockSource != null)
-                CopyStockVoiceRoute(stockSource, _source);
-
-            _voicePlayback = playback;
-            _stockRouteApplied = stockSource != null;
-            _attenuationCurve = ResolveAttenuationCurve(playback);
+            // AttenuationCurve is the same direct field path used by the stable
+            // pre-0.13 output and by GameVoiceInput. Do not introspect
+            // Dissonance SourceController or enumerate live playback controls:
+            // those generated IL2CPP wrapper chains were newly present in the
+            // first deployed 0.13 speech turn that ended in a native CoreCLR
+            // access violation, and such a failure cannot be caught here.
+            _attenuationCurve = playback == null ? null : playback.AttenuationCurve;
             if (_attenuationCurve != null)
             {
                 ConfigureMetreAttenuation();
@@ -546,20 +539,15 @@ internal sealed class GameVoiceOutput
             else
             {
                 _source.rolloffMode = AudioRolloffMode.Logarithmic;
-                _source.minDistance = stockSource == null
-                    ? 1f
-                    : stockSource.minDistance;
-                _source.maxDistance = stockSource == null
-                    ? 60f
-                    : stockSource.maxDistance;
+                _source.minDistance = 1f;
+                _source.maxDistance = 60f;
             }
 
             PrepareRing();
             Plugin.Logger.LogInfo(
                 $"[AGENT] VOICE_ROUTE_READY source=" +
                 $"{(playback == null ? "companion_body" : "player_voice_playback")}, " +
-                $"route=local_3d, stockSource={stockSource != null}, " +
-                $"mixer={_voiceMixerName}, spatialBlend={_source.spatialBlend:F2}, " +
+                $"route=local_3d_safe, spatialBlend={_source.spatialBlend:F2}, " +
                 $"rolloff={_source.rolloffMode}, curveMode=" +
                 $"{(_attenuationCurve == null ? "unity_fallback" : "game_metre_curve")}, " +
                 $"curve0={EvaluateAttenuation(0f):F3}, " +
@@ -577,58 +565,6 @@ internal sealed class GameVoiceOutput
         }
     }
 
-    private static AudioSource ResolveStockVoiceSource(
-        PlayerVoicePlaybackControl playback)
-    {
-        var source = playback?.SourceController?.AudioSource;
-        if (source != null)
-            return source;
-
-        var playbacks = Resources.FindObjectsOfTypeAll<PlayerVoicePlaybackControl>();
-        for (var index = 0; index < playbacks.Length; index++)
-        {
-            source = playbacks[index]?.SourceController?.AudioSource;
-            if (source != null)
-                return source;
-        }
-        return null;
-    }
-
-    private static AnimationCurve ResolveAttenuationCurve(
-        PlayerVoicePlaybackControl playback)
-    {
-        if (playback?.AttenuationCurve != null)
-            return playback.AttenuationCurve;
-
-        var playbacks = Resources.FindObjectsOfTypeAll<PlayerVoicePlaybackControl>();
-        for (var index = 0; index < playbacks.Length; index++)
-        {
-            var curve = playbacks[index]?.AttenuationCurve;
-            if (curve != null)
-                return curve;
-        }
-        return null;
-    }
-
-    private void CopyStockVoiceRoute(AudioSource stock, AudioSource destination)
-    {
-        destination.outputAudioMixerGroup = stock.outputAudioMixerGroup;
-        destination.priority = stock.priority;
-        destination.panStereo = stock.panStereo;
-        destination.spatialBlend = stock.spatialBlend;
-        destination.spread = stock.spread;
-        destination.dopplerLevel = stock.dopplerLevel;
-        destination.spatialize = stock.spatialize;
-        destination.spatializePostEffects = stock.spatializePostEffects;
-        destination.reverbZoneMix = stock.reverbZoneMix;
-        destination.bypassEffects = stock.bypassEffects;
-        destination.bypassListenerEffects = stock.bypassListenerEffects;
-        destination.bypassReverbZones = stock.bypassReverbZones;
-        _voiceMixerName = stock.outputAudioMixerGroup == null
-            ? "none"
-            : stock.outputAudioMixerGroup.name;
-    }
-
     private void ConfigureMetreAttenuation()
     {
         // Big Walk's curve is keyed in metres and evaluated directly by
@@ -643,68 +579,10 @@ internal sealed class GameVoiceOutput
             AnimationCurve.Linear(0f, 1f, 1f, 1f));
     }
 
-    private void UpdateVoiceRoute(PlayerCharacter human, PlayerCharacter bot)
+    private void UpdateVoiceAttenuation(PlayerCharacter human, PlayerCharacter bot)
     {
         if (_source == null || human == null || bot == null)
-        {
             return;
-        }
-
-        if (!_stockRouteApplied &&
-            Time.realtimeSinceStartup >= _nextStockRouteResolveAt)
-        {
-            _nextStockRouteResolveAt = Time.realtimeSinceStartup + 1f;
-            try
-            {
-                var stockSource = ResolveStockVoiceSource(_voicePlayback);
-                if (stockSource != null && stockSource != _source)
-                {
-                    CopyStockVoiceRoute(stockSource, _source);
-                    _stockRouteApplied = true;
-                    _stockRouteUpgradeFailureLog.Reset();
-                    Plugin.Logger.LogInfo(
-                        $"[AGENT] VOICE_ROUTE_TEMPLATE_APPLIED mixer={_voiceMixerName}, " +
-                        $"spatialBlend={_source.spatialBlend:F2}, " +
-                        $"spatialize={_source.spatialize}.");
-                }
-            }
-            catch (Exception exception)
-            {
-                if (_stockRouteUpgradeFailureLog.ShouldLog())
-                {
-                    Plugin.Logger.LogWarning(
-                        $"[AGENT] VOICE_ROUTE_TEMPLATE_UNAVAILABLE " +
-                        $"detail={exception.Message}");
-                }
-            }
-        }
-        if (_attenuationCurve == null &&
-            Time.realtimeSinceStartup >= _nextAttenuationResolveAt)
-        {
-            _nextAttenuationResolveAt = Time.realtimeSinceStartup + 1f;
-            try
-            {
-                _attenuationCurve = ResolveAttenuationCurve(_voicePlayback);
-                if (_attenuationCurve != null)
-                {
-                    ConfigureMetreAttenuation();
-                    _attenuationUpgradeFailureLog.Reset();
-                    Plugin.Logger.LogInfo(
-                        "[AGENT] VOICE_ATTENUATION_ROUTE_APPLIED " +
-                        "mode=game_metre_curve.");
-                }
-            }
-            catch (Exception exception)
-            {
-                _attenuationCurve = null;
-                if (_attenuationUpgradeFailureLog.ShouldLog())
-                {
-                    Plugin.Logger.LogWarning(
-                        $"[AGENT] VOICE_ATTENUATION_ROUTE_UNAVAILABLE " +
-                        $"detail={exception.Message}");
-                }
-            }
-        }
         if (_attenuationCurve == null)
             return;
 
@@ -719,7 +597,7 @@ internal sealed class GameVoiceOutput
             Plugin.Logger.LogInfo(
                 $"[AGENT] VOICE_ROUTE_LEVEL distance={distance:F2}, " +
                 $"gameAttenuation={attenuation:F3}, " +
-                $"sourceVolume={_source.volume:F3}, mixer={_voiceMixerName}.");
+                $"sourceVolume={_source.volume:F3}, route=local_3d_safe.");
         }
     }
 
@@ -811,12 +689,7 @@ internal sealed class GameVoiceOutput
         _writeBlock = null;
         _zeroBlock = null;
         _speaker = null;
-        _voicePlayback = null;
         _attenuationCurve = null;
-        _voiceMixerName = "none";
-        _stockRouteApplied = false;
-        _nextStockRouteResolveAt = 0f;
-        _nextAttenuationResolveAt = 0f;
         _nextRouteLevelLog = 0f;
         _playing = false;
         _writeBlocksTotal = 0;
@@ -824,7 +697,5 @@ internal sealed class GameVoiceOutput
         _playedBase = 0;
         _lastTimeSamples = 0;
         _ringWriteFailureLog.Reset();
-        _stockRouteUpgradeFailureLog.Reset();
-        _attenuationUpgradeFailureLog.Reset();
     }
 }

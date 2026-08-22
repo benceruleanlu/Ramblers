@@ -12,7 +12,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string Guid = "local.bigwalk.ramblers";
     public const string Name = "Ramblers";
-    public const string Version = "0.13.0";
+    public const string Version = "0.13.1";
 
     internal static ManualLogSource Logger = null;
     internal static ConfigEntry<bool> EnableRealtimeAgent = null;

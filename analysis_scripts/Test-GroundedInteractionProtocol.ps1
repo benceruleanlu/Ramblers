@@ -61,31 +61,22 @@ $entities = Read-Source "src\CompanionEntityReferences.cs"
 $locomotion = Read-Source "src\CompanionLocomotion.cs"
 
 Assert-Contains $catalog 'internal const string InteractWithObject = "interact_with_object";' `
-    "the model must receive one narrowly named primary-interaction tool"
-Assert-Contains $catalog 'press, activate, toggle, use, or operate a light control' `
-    "natural primary-interaction requests must route directly to the tool"
-Assert-Contains $catalog 'rather than setting a guaranteed named on/off state' `
-    "the tool must not promise idempotent state semantics it cannot observe"
-Assert-Contains $catalog 'the exact switch: ID from private nearby_interactables context' `
-    "the model may resolve named nearby switches without direct pointing"
-Assert-Contains $catalog 'Never say IDs aloud, ask the human to choose an internal target type' `
-    "internal interaction targeting must remain invisible in conversation"
-Assert-Contains $catalog 'or substitute another object' `
-    "the schema must prohibit fallback targeting"
+    "the dormant implementation must retain one narrowly named interaction action"
+Assert-NotContains $catalog 'name = InteractWithObject,' `
+    "the unverified interaction wrapper chain must not be model-callable"
+Assert-NotContains $catalog 'inspect_reference,interact_with_object,pick_up_item' `
+    "the ready-tool log must not advertise the quarantined interaction"
 
-Assert-Contains $bridge 'CompanionController.TryCapturePeckCandidates(' `
-    "all game-owned usable references must be frozen at the utterance boundary"
-Assert-Order $bridge 'CompanionController.TryCapturePeckCandidates(' `
-    '_client.RequestResponse(turnId);' `
-    "interaction capture must precede the model response"
-Assert-Contains $bridge 'PeckCandidates = peckCandidates' `
-    "the frozen interaction candidates must stay bound to their response turn"
-Assert-Contains $bridge '[AGENT] TURN_INTERACTION_REFERENCES_CAPTURED' `
-    "capture success and boundary failures must be observable"
-Assert-Contains $bridge 'heldItemReason={peckCandidates.CompanionHeldItemError' `
-    "held-use capture failures must remain diagnosable"
+Assert-NotContains $bridge 'CompanionController.TryCapturePeckCandidates(' `
+    "speech completion must not traverse the unverified interaction wrapper chain"
+Assert-Contains $bridge 'PeckCandidates = null' `
+    "turn state must make the interaction quarantine explicit"
+Assert-Contains $bridge 'PeckCaptureError = "interaction_context_quarantined"' `
+    "dormant routing must fail closed if somehow invoked"
+Assert-NotContains $bridge '[AGENT] TURN_INTERACTION_REFERENCES_CAPTURED' `
+    "speech completion must not inspect or log interaction wrapper properties"
 Assert-Contains $bridge 'AgentToolCatalog.InteractWithObject' `
-    "a new utterance must recognize the job as a physical action"
+    "dormant in-flight interaction jobs must still be recognized as physical actions"
 
 Assert-Contains $router 'turnReference.PeckCandidates.TrySelect(' `
     "routing must select only from turn-bound interaction candidates"
@@ -183,15 +174,15 @@ Assert-Contains $locomotion 'layerMask &= ~(1 << bodyCollider.gameObject.layer);
     "ground probes must exclude the companion capsule from floor evidence"
 Assert-Contains $actions 'if (posture == CompanionPosture.Sitting && locomotionHolder != null)' `
     "a tool batch must not seat the companion during admitted locomotion work"
-Assert-Contains $awareness 'nearby_interactables = nearbyInteractables' `
-    "turn context must expose named usable switches"
-Assert-Contains $awareness 'Resources.FindObjectsOfTypeAll<CastableTarget>()' `
-    "interactable discovery must reuse the runtime-exercised IL2CPP API"
+Assert-NotContains $awareness 'nearby_interactables = nearbyInteractables' `
+    "ambient switch discovery must stay out of the spoken-turn crash surface"
+Assert-NotContains $awareness 'Resources.FindObjectsOfTypeAll<CastableTarget>()' `
+    "the unverified CastableTarget generic scan must remain quarantined"
 Assert-NotContains $awareness 'FindObjectsByType<CastableTarget>(' `
     "an unprobed stripped Unity API must not enter the runtime path"
 Assert-Contains $entities '_interactables.TryGetValue(stableId, out target)' `
     "interaction IDs must resolve exactly without proximity fallback"
 
 Write-Host "Grounded-interaction protocol checks passed."
-Write-Host "  Proven: context/gaze/held targeting, exact identity, approach arbitration, companion conditions, reach/held checks, host authority, visible aim, state confirmation, and no fallback target."
-Write-Host "  Not proven: the light's live switch wiring, visible on/off result, or compatibility with every puzzle interaction."
+Write-Host "  Proven: the interaction implementation remains exact-targeted and fails closed, while its tool and all speech-time interaction capture are quarantined."
+Write-Host "  Not proven: spoken-turn native safety of interaction capture, named ambient discovery, live light wiring, visible on/off result, or compatibility with puzzle interactions."
