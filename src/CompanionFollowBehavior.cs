@@ -1030,7 +1030,7 @@ internal sealed class CompanionFollowBehavior
             $"groundResponse={_locomotion.LastGroundResponse:F2}, " +
             $"slopeResponse={_locomotion.LastSlopeResponse:F2}, " +
             $"groundSupported={_locomotion.LastDirectGroundSupported}, " +
-            $"groundSupportEnforced={_locomotion.LastGroundSupportEnforced}, " +
+            $"steeringAuthority={_locomotion.LastSteeringAuthority}, " +
             $"steepScalar={_locomotion.LastSteepScalar:F2}, " +
             $"steeringAngle={_locomotion.LastSteeringAngle:F0}, " +
             $"clearance={_locomotion.LastClearance:F2}, " +

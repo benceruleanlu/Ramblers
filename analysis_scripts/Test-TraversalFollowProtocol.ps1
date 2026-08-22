@@ -132,15 +132,15 @@ Assert-Contains $follow '(!traversalCommitted || now < _directTraversalUntil)' `
 Assert-Contains $follow '_jump.TryRequestTraversal(' `
     "recorded route traversal must queue a deterministic grounded jump"
 Assert-Contains $follow 'if (!status.DirectGroundLimited &&' `
-    "generic blocked-route recovery must not jump across unsupported ground"
+    "generic blocked-route recovery must reject a heading suppressed by the stock slope solver"
 Assert-Contains $follow 'if (stuck &&' `
     "stuck recovery must remain explicit and bounded"
 Assert-Contains $follow '!status.DirectGroundLimited &&' `
-    "stuck recovery must not commit the original heading across a ledge"
+    "stuck recovery must reject a heading suppressed by the stock slope solver"
 Assert-Contains $follow 'private const float RecoveryDirectionCommitSeconds = 0.45f;' `
-    "generic recovery commitment must stay within the running support horizon"
+    "generic recovery commitment must remain tightly bounded"
 Assert-Contains $locomotion 'private const float BrakingLookahead = 0.55f;' `
-    "ground and obstacle proof must include one navigation tick beyond recovery expiry"
+    "obstacle preview must include one navigation tick beyond recovery expiry"
 Assert-Contains $follow '_committedTraversalDirection = desiredDirection;' `
     "drop commitment must freeze the recorded route direction"
 Assert-Contains $follow '_committedTraversalDirection,' `
@@ -157,8 +157,16 @@ Assert-Contains $locomotion '_lastSlopeResponse = directSlopeResponse;' `
     "runtime evidence must distinguish the stock slope response from floor support"
 Assert-Contains $locomotion '_lastDirectGroundSupported = directGroundSupported;' `
     "runtime evidence must report the exact floor-support decision"
-Assert-Contains $locomotion '_lastGroundSupportEnforced = false;' `
-    "committed traversal telemetry must identify that recorded-route support is observational"
+Assert-Contains $locomotion 'var directGroundResponse = directSlopeResponse;' `
+    "ordinary steering must use the stock slope response as movement authority"
+Assert-NotContains $locomotion 'var directGroundResponse = directGroundSupported' `
+    "an unproven support ray must not hard-stop ordinary follow movement"
+Assert-NotContains $locomotion '!HasGroundSupportAhead(candidate, probeDistance)' `
+    "an unproven support ray must not reject every alternate steering heading"
+Assert-Contains $locomotion '_lastSteeringAuthority = "stock_slope";' `
+    "ordinary steering telemetry must identify the stock slope solver as movement authority"
+Assert-Contains $locomotion '_lastSteeringAuthority = "committed_direction";' `
+    "telemetry must identify obstacle-bypassing committed-direction movement"
 Assert-NotContains $locomotion 'layerMask &= ~(1 << _body.GameObject.layer);' `
     "ground support must not remove a root layer that can also contain the room floor"
 Assert-Contains $locomotion 'hitDescription = DescribeHit(hit);' `
@@ -175,7 +183,7 @@ Assert-Contains $follow '$"slopeResponse={_locomotion.LastSlopeResponse:F2}, "' 
     "status evidence must expose raw stock slope output separately"
 Assert-Contains $follow '$"groundSupported={_locomotion.LastDirectGroundSupported}, "' `
     "status evidence must expose the floor-support result separately"
-Assert-Contains $follow '$"groundSupportEnforced={_locomotion.LastGroundSupportEnforced}, "' `
+Assert-Contains $follow '$"steeringAuthority={_locomotion.LastSteeringAuthority}, "' `
     "status evidence must distinguish ordinary steering from recorded traversal"
 Assert-Contains $locomotion 'Vector3.Distance(_progressAnchor, _body.Position)' `
     "jumping and falling must count as spatial progress"

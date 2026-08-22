@@ -101,7 +101,7 @@ internal sealed class CompanionLocomotion
     private float _lastGroundResponse;
     private float _lastSlopeResponse;
     private bool _lastDirectGroundSupported;
-    private bool _lastGroundSupportEnforced;
+    private string _lastSteeringAuthority = "not_sampled";
     private float _lastSteepScalar;
     private string _lastDirectHit = "clear";
     private string _lastProbeSummary = "not_sampled";
@@ -127,7 +127,7 @@ internal sealed class CompanionLocomotion
     internal float LastGroundResponse => _lastGroundResponse;
     internal float LastSlopeResponse => _lastSlopeResponse;
     internal bool LastDirectGroundSupported => _lastDirectGroundSupported;
-    internal bool LastGroundSupportEnforced => _lastGroundSupportEnforced;
+    internal string LastSteeringAuthority => _lastSteeringAuthority;
     internal float LastSteepScalar => _lastSteepScalar;
     internal string LastDirectHit => _lastDirectHit;
     internal string LastProbeSummary => _lastProbeSummary;
@@ -179,7 +179,7 @@ internal sealed class CompanionLocomotion
         _lastGroundResponse = 1f;
         _lastSlopeResponse = 1f;
         _lastDirectGroundSupported = true;
-        _lastGroundSupportEnforced = true;
+        _lastSteeringAuthority = "not_sampled";
         _lastSteepScalar = 1f;
         _lastDirectHit = "clear";
         _lastProbeSummary = "not_sampled";
@@ -285,10 +285,10 @@ internal sealed class CompanionLocomotion
     }
 
     /// <summary>
-    /// Keeps forward intent through a route-proven jump or ledge transition.
-    /// Ordinary steering remains clearance-gated; this narrow path is entered
-    /// only after follow code has committed to replaying a human traversal
-    /// breadcrumb, where braking at the edge or obstacle would defeat it.
+    /// Keeps forward intent through a bounded traversal or recovery commitment.
+    /// Ordinary steering remains clearance-gated; callers enter this narrow path
+    /// only after committing to a recorded human transition or a bounded recovery,
+    /// where braking at the edge or obstacle would defeat the intended action.
     /// </summary>
     internal SteeringStatus CommitTraversalDirection(
         Vector3 desiredDirection,
@@ -325,7 +325,7 @@ internal sealed class CompanionLocomotion
         _lastGroundResponse = groundResponse;
         _lastSlopeResponse = groundResponse;
         _lastDirectGroundSupported = groundSupported;
-        _lastGroundSupportEnforced = false;
+        _lastSteeringAuthority = "committed_direction";
         _lastSteepScalar = steepScalar;
         _lastDirectHit = directHit;
         _lastProbeSummary = FormatProbe(0f, clearance, groundResponse, directHit);
@@ -452,12 +452,14 @@ internal sealed class CompanionLocomotion
         var directGroundSupported = HasGroundSupportAhead(
             desiredDirection,
             probeDistance);
-        var directGroundResponse = directGroundSupported
-            ? directSlopeResponse
-            : 0f;
+        // Forward floor rays are useful as conservative proof before deleting a
+        // recorded route or committing a recovery jump, but they are not a
+        // reliable movement authority across Big Walk's mesh seams and shared
+        // room geometry. Ordinary gait follows the stock player's slope solver.
+        var directGroundResponse = directSlopeResponse;
         _lastSlopeResponse = directSlopeResponse;
         _lastDirectGroundSupported = directGroundSupported;
-        _lastGroundSupportEnforced = true;
+        _lastSteeringAuthority = "stock_slope";
         directGroundLimited = directGroundResponse < MinimumGroundResponse;
         directBlocked = directClearance < MinimumClearance || directGroundLimited;
         groundResponse = directGroundResponse;
@@ -498,12 +500,6 @@ internal sealed class CompanionLocomotion
             var candidateGroundResponse = MeasureGroundResponse(
                 candidate,
                 out candidateSteepScalar);
-            if (candidateClearance >= MinimumClearance &&
-                candidateGroundResponse >= MinimumGroundResponse &&
-                !HasGroundSupportAhead(candidate, probeDistance))
-            {
-                candidateGroundResponse = 0f;
-            }
             AppendProbe(
                 probeSummary,
                 angle,
@@ -581,12 +577,12 @@ internal sealed class CompanionLocomotion
     }
 
     /// <summary>
-    /// Verifies that an ordinary grounded move has floor beneath the body's
-    /// forward corridor. A single unsupported sample is tolerated so the
-    /// companion crosses tiny mesh seams, but a real gap cannot look like an
-    /// unobstructed path merely because the head ray and current slope are clear.
-    /// Recorded jump/drop traversal uses CommitTraversalDirection and remains
-    /// the only path allowed to cross unsupported ground intentionally.
+    /// Conservatively verifies floor beneath the body's forward corridor before
+    /// deleting a recorded route prefix or committing bounded action recovery.
+    /// A single unsupported sample is tolerated so tiny mesh seams can still be
+    /// proven. This is deliberately observational during ordinary steering:
+    /// some valid Big Walk floors cannot be proven by these downward rays, while
+    /// the stock player slope solver still accepts movement across them.
     /// </summary>
     internal bool HasGroundSupportAhead(Vector3 direction, float distance)
     {

@@ -169,7 +169,7 @@ Assert-Contains $behavior '_jump.CancelActionRecovery(AgentToolCatalog.InteractW
 Assert-Contains $behavior '[INTERACT] APPROACH_REACHED' `
     "runtime evidence must separate arrival from activation"
 Assert-Contains $locomotion 'internal bool HasGroundSupportAhead(' `
-    "ordinary steering must sample forward ground rather than only current slope"
+    "conservative shortcut and recovery checks must retain forward-ground proof"
 Assert-Contains $locomotion 'layerMask &= ~(1 << bodyCollider.gameObject.layer);' `
     "ground probes must exclude the companion capsule from floor evidence"
 Assert-NotContains $locomotion 'layerMask &= ~(1 << _body.GameObject.layer);' `
