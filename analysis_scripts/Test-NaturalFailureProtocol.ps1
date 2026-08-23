@@ -52,10 +52,10 @@ Assert-Contains $result 'Do not blame the player or mention tools, codes, diagno
     "unavailable actions must produce natural in-world guidance"
 Assert-Contains $bridge 'diagnosticError={diagnosticError ?? "none"}' `
     "developer logs must retain the exact failure code"
-Assert-Contains $bridge 'dispatch.Result.Error' `
-    "immediate failure diagnostics must cross the logging boundary"
+Assert-Contains $bridge 'var result = dispatch.Result ??' `
+    "immediate dispatch must retain the typed result before logging"
 Assert-Contains $bridge 'result.Error' `
-    "deferred failure diagnostics must cross the logging boundary"
+    "immediate and deferred failure diagnostics must cross the logging boundary"
 Assert-Contains $prompt 'never invent or expose diagnostic terminology' `
     "the cross-cutting prompt must forbid reconstructed technical language"
 
@@ -85,6 +85,8 @@ $cases = @(
     @{ Error = "human_reference_not_captured"; Status = "could_not_identify_object" },
     @{ Error = "item_not_known"; Status = "could_not_identify_object" },
     @{ Error = "object_not_known"; Status = "could_not_identify_object" },
+    @{ Error = "kick_target_destination_ambiguous"; Status = "could_not_identify_object" },
+    @{ Error = "interaction_requires_item_placement"; Status = "game_action_unavailable" },
     @{ Error = "pick_up_item_in_progress"; Status = "temporarily_busy" },
     @{ Error = "bot_authority_unavailable"; Status = "game_action_unavailable" }
 )

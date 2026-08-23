@@ -52,7 +52,7 @@ $catalog = Read-Source "src\AgentToolCatalog.cs"
 $router = Read-Source "src\AgentToolRouter.cs"
 $bridge = Read-Source "src\OpenAIRealtimeBridge.cs"
 $candidates = Read-Source "src\CompanionInspectionReferent.cs"
-$interactionTarget = Read-Source "src\CompanionInteractionTarget.cs"
+$propTarget = Read-Source "src\CompanionPropTarget.cs"
 $inspection = Read-Source "src\CompanionInspectionBehavior.cs"
 
 Assert-Contains $catalog '@enum = new[] { "human_held_item", "human_gaze" }' `
@@ -87,7 +87,7 @@ Assert-Contains $router 'InspectionReferent = referent' `
 
 Assert-Contains $candidates 'human.hands.heldProp' `
     "the human-held prop must be captured at the boundary"
-Assert-Contains $candidates 'CompanionInteractionTarget.TryCaptureHeldProp(' `
+Assert-Contains $candidates 'CompanionPropTarget.TryCaptureHeldProp(' `
     "held-item capture must reuse exact managed and network identity"
 Assert-Contains $candidates 'CompanionInspectionReferent.FromGaze(' `
     "gaze selection must use the previously captured point"
@@ -96,9 +96,9 @@ Assert-NotContains $candidates 'FindObjects' `
 Assert-NotContains $candidates 'nearest' `
     "inspection must never substitute the nearest object"
 
-Assert-Contains $interactionTarget 'TryGetCurrentInspectionPoint' `
+Assert-Contains $propTarget 'TryGetCurrentInspectionPoint' `
     "a moving held item must expose its current point without changing identity"
-Assert-Contains $interactionTarget 'IsStillTheSameProp(Prop)' `
+Assert-Contains $propTarget 'IsStillTheSameProp(Prop)' `
     "held-item tracking must revalidate the exact frozen object"
 
 Assert-Contains $inspection 'request.InspectionReferent' `

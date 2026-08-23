@@ -54,8 +54,10 @@ $client = Read-Source "src\OpenAIRealtimeClient.cs"
 $awareness = Read-Source "src\CompanionAwareness.cs"
 $ambient = Read-Source "src\CompanionAmbientGaze.cs"
 $controller = Read-Source "src\CompanionController.cs"
-$interactionTarget = Read-Source "src\CompanionInteractionTarget.cs"
+$propTarget = Read-Source "src\CompanionPropTarget.cs"
 $entityReferences = Read-Source "src\CompanionEntityReferences.cs"
+$interactableDiscovery = Read-Source "src\CompanionInteractableDiscovery.cs"
+$interactionReference = Read-Source "src\CompanionInteractionReference.cs"
 
 $queueStart = $client.IndexOf(
     "internal bool QueueTurnContext",
@@ -84,6 +86,14 @@ Assert-Contains $prompt 'use inspect_reference yourself' `
 
 Assert-Contains $bridge 'CompanionController.TryTakeAwarenessTurnContext(' `
     "one context snapshot must be frozen at the human-turn boundary"
+$awarenessCallIndex = $bridge.IndexOf(
+    'CompanionController.TryTakeAwarenessTurnContext(',
+    [System.StringComparison]::Ordinal)
+$awarenessCall = $bridge.Substring(
+    $awarenessCallIndex,
+    [Math]::Min(240, $bridge.Length - $awarenessCallIndex))
+Assert-Contains $awarenessCall 'affordanceCandidates,' `
+    "awareness must consume the already-frozen interaction snapshot"
 Assert-Order $bridge 'CompanionController.TryTakeAwarenessTurnContext(' `
     '_client.QueueTurnContext(awarenessContext.Message);' `
     "capture must precede queuing"
@@ -99,10 +109,12 @@ Assert-Contains $bridge 'events={awarenessContext.EventCount}' `
     "runtime evidence must include the event count"
 Assert-Contains $bridge 'nearbyProps={awarenessContext.NearbyPropCount}' `
     "runtime evidence must include the nearby-prop count"
-Assert-NotContains $bridge 'nearbyInteractables={awarenessContext.NearbyInteractableCount}' `
-    "the spoken-turn path must not invoke quarantined ambient switch discovery"
 Assert-Contains $bridge 'rememberedProps={awarenessContext.RememberedPropCount}' `
     "runtime evidence must include cross-turn entity memory"
+Assert-Contains $bridge 'nearbyInteractables={awarenessContext.NearbyInteractableCount}' `
+    "runtime evidence must include bounded nearby interactions"
+Assert-Contains $bridge 'rememberedInteractables={awarenessContext.RememberedInteractableCount}' `
+    "runtime evidence must include exact recent interaction memory"
 Assert-Contains $bridge 'actionableEntities={awarenessContext.EntityReferences?.Count ?? 0}' `
     "runtime evidence must report exact actionable entity bindings"
 Assert-Contains $bridge 'visualAttached={awarenessContext.HasImage}' `
@@ -136,10 +148,14 @@ Assert-Contains $awareness 'private const int MaximumNearbyProps = 6;' `
     "nearby prop context must remain compact"
 Assert-Contains $awareness 'private const int MaximumNearbyPlayers = 3;' `
     "nearby player context must remain compact"
-Assert-NotContains $awareness 'CaptureNearbyInteractables(' `
-    "spoken context must not cross the unverified CastableTarget scan after a native crash"
-Assert-NotContains $awareness 'FindObjectsOfTypeAll<CastableTarget>' `
-    "spoken context must not instantiate the quarantined CastableTarget resource scan"
+Assert-Contains $awareness '_interactableDiscovery.Capture(' `
+    "spoken context must use the isolated bounded interactable discovery path"
+Assert-Contains $awareness 'nearby_interactables = nearbyInteractables' `
+    "bounded nearby interactions must enter private context"
+Assert-Contains $awareness 'recently_seen_interactables = rememberedInteractables' `
+    "exact interaction memory must support natural follow-ups"
+Assert-NotContains ($awareness + $interactableDiscovery) 'FindObjectsOfTypeAll<CastableTarget>' `
+    "spoken context must never restore the crashed global CastableTarget resource scan"
 Assert-Contains $awareness 'while (_journal.Count > MaximumJournalEntries)' `
     "the journal bound must be enforced"
 Assert-Contains $awareness 'var props = Prop.allProps;' `
@@ -148,9 +164,9 @@ Assert-Contains $awareness 'left.distance_from_human_m)' `
     "the compact prop list must retain items relevant to either player"
 Assert-NotContains $awareness 'Resources.FindObjectsOfTypeAll<Prop>' `
     "awareness must not perform an exhaustive Unity object scan"
-Assert-Contains $interactionTarget '"prop:net:" + identity.netId' `
+Assert-Contains $propTarget '"prop:net:" + identity.netId' `
     "network props must carry stable identity"
-Assert-Contains $interactionTarget '"prop:local:" + prop.GetInstanceID()' `
+Assert-Contains $propTarget '"prop:local:" + prop.GetInstanceID()' `
     "local props must have an explicit scoped fallback identity"
 Assert-Contains $awareness 'recently_seen_props = rememberedProps' `
     "recent object context must survive beyond the immediate nearby list"
@@ -166,8 +182,28 @@ Assert-Contains $entityReferences '_props.TryGetValue(stableId, out target)' `
     "action targeting must resolve only an exact model-selected ID"
 Assert-Contains $entityReferences '!target.TryGetCurrentPoint(out point)' `
     "remembered action handles must revalidate live availability"
+Assert-Contains $entityReferences 'reference.TryResolve(candidates, out target, out error)' `
+    "interaction handles must also revalidate exact identity"
+Assert-Contains $interactableDiscovery 'var spawned = NetworkServer.spawned;' `
+    "network interaction discovery must use Mirror's maintained spawned registry"
+Assert-Contains $interactableDiscovery 'var homes = PropHome.allPropHomes;' `
+    "local homes must use their game-owned lifecycle registry"
+Assert-Contains $interactableDiscovery 'affordanceCandidates.TryGetExactHumanWorldReference(' `
+    "recent interaction memory must reuse the frozen human target"
+Assert-NotContains $interactableDiscovery 'TryCaptureHumanReferenceIdentity(' `
+    "awareness discovery must never cast human gaze a second time"
+Assert-Contains $interactableDiscovery 'MaximumSpawnedHierarchyNodes = 1024;' `
+    "registry traversal must have a hard hierarchy-work bound"
+Assert-NotContains $interactableDiscovery 'Resources.' `
+    "interaction discovery must not scan Unity's global resource table"
+Assert-Contains $interactionReference 'IsExactCastableIdentity()' `
+    "a context ID must remain bound to its frozen CastableTarget"
 Assert-Contains $awareness 'Private nonverbal game perception for the preceding human utterance.' `
     "each packet must be self-describing"
+Assert-Contains $awareness 'carrying_human = _actions?.IsCarryingHuman == true' `
+    "the turn snapshot must distinguish the companion carrying the human"
+Assert-Contains $awareness '"the companion picked up the human"' `
+    "player pickup must enter the significant-event journal"
 
 Assert-Contains $ambient '_conversationActive ||' `
     "passive capture must be disabled during conversation"
@@ -205,5 +241,5 @@ Assert-Contains $controller '[AWARENESS] BIND_FAILED' `
     "awareness bind faults must degrade without preventing companion spawn"
 
 Write-Host "Awareness-context checks passed."
-Write-Host "  Proven: bounded structured context, turn ordering, silent delivery, stable prop identities, quarantined switch scanning, settled ambient capture, freshness, one-shot images, and telemetry."
+Write-Host "  Proven: bounded structured context, turn ordering, silent delivery, stable prop and interaction identities, safe game-registry discovery, settled ambient capture, freshness, one-shot images, and telemetry."
 Write-Host "  Not proven: live Unity state quality, model interpretation, or captured image composition."

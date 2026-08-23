@@ -12,14 +12,29 @@ $ErrorActionPreference = "Stop"
 $ramblersRoot = Split-Path -Parent $PSScriptRoot
 $gamePathResolver = Join-Path $ramblersRoot "scripts\Resolve-BigWalkGamePath.ps1"
 $sharedLogReader = Join-Path $ramblersRoot "scripts\Read-SharedLogLines.ps1"
+$followRuntimeInvariants = Join-Path $ramblersRoot "scripts\FollowRuntimeInvariants.ps1"
+$physicalActionRuntimeInvariants = Join-Path $ramblersRoot "scripts\PhysicalActionRuntimeInvariants.ps1"
+$toolBatchSettlementRuntimeInvariants = Join-Path $ramblersRoot "scripts\ToolBatchSettlementRuntimeInvariants.ps1"
 if (-not (Test-Path -LiteralPath $gamePathResolver -PathType Leaf)) {
     throw "Big Walk path resolver is missing: $gamePathResolver"
 }
 if (-not (Test-Path -LiteralPath $sharedLogReader -PathType Leaf)) {
     throw "Shared log reader is missing: $sharedLogReader"
 }
+if (-not (Test-Path -LiteralPath $followRuntimeInvariants -PathType Leaf)) {
+    throw "Follow runtime invariants are missing: $followRuntimeInvariants"
+}
+if (-not (Test-Path -LiteralPath $physicalActionRuntimeInvariants -PathType Leaf)) {
+    throw "Physical-action runtime invariants are missing: $physicalActionRuntimeInvariants"
+}
+if (-not (Test-Path -LiteralPath $toolBatchSettlementRuntimeInvariants -PathType Leaf)) {
+    throw "Tool-batch settlement runtime invariants are missing: $toolBatchSettlementRuntimeInvariants"
+}
 . $gamePathResolver
 . $sharedLogReader
+. $followRuntimeInvariants
+. $physicalActionRuntimeInvariants
+. $toolBatchSettlementRuntimeInvariants
 
 if ([string]::IsNullOrWhiteSpace($GamePath)) {
     $GamePath = $env:RAMBLERS_GAME_PATH
@@ -194,15 +209,79 @@ $successfulPhysicalCalls = @{}
 $activePresentationJobs = @{}
 $discardedResponses = New-Object System.Collections.Generic.List[string]
 $resolvedIdentities = @{}
+$kickLaunches = New-Object System.Collections.Generic.List[string]
+$kickLaunchesByCall = @{}
+$kickDirections = @{}
+$interactionConfirmations = @{}
+$interactionEvidence = New-Object System.Collections.Generic.List[string]
+$directedMoveArrivals = @{}
+$directedMoveResolutions = @{}
+$directedMoveEvidence = New-Object System.Collections.Generic.List[string]
 $physicalActions = @(
     "inspect_reference",
+    "go_to_location",
     "interact_with_object",
     "pick_up_item",
     "kick_item",
-    "drop_item"
+    "drop_item",
+    "pick_up_player",
+    "drop_player"
 )
 
 foreach ($line in $sessionLines) {
+    $followTangentViolation = Get-FollowTangentViolation -Line $line
+    if ($null -ne $followTangentViolation) {
+        Add-Failure $followTangentViolation
+    }
+
+    if ($line -match '\[ACTION\] KICK_LAUNCH_REQUESTED (?<details>.*)$') {
+        $kickLaunches.Add($Matches["details"])
+        $kickLaunch = Get-KickLaunchEvidence -Line $line
+        if ($null -eq $kickLaunch) {
+            Add-Failure "A kick launch omitted exact call, turn, target, or direction evidence."
+        }
+        else {
+            Add-KickLaunchEvidence `
+                -LaunchesByCall $kickLaunchesByCall `
+                -Evidence $kickLaunch
+        }
+    }
+
+    $directedMoveArrival = Get-DirectedMoveArrivalEvidence -Line $line
+    if ($null -ne $directedMoveArrival) {
+        Add-DirectedMoveArrivalEvidence `
+            -ArrivalsByCall $directedMoveArrivals `
+            -Evidence $directedMoveArrival
+        $directedMoveEvidence.Add(
+            "turnId=$($directedMoveArrival.TurnId), " +
+            "callId=$($directedMoveArrival.CallId), " +
+            "referenceId=$($directedMoveArrival.ReferenceId), " +
+            "destinationPoint=$($directedMoveArrival.DestinationPoint)")
+    }
+
+    if ($line -match '\[AGENT\] TURN_INTERACTION_REFERENCES_CAPTURED .*turnId=(?<turn>\d+), (?<details>.*)$') {
+        $turnId = [long]$Matches["turn"]
+        if (-not $turns.ContainsKey($turnId)) {
+            $turns[$turnId] = New-Object System.Collections.Generic.List[string]
+        }
+        $turns[$turnId].Add("affordances " + $Matches["details"])
+    }
+
+    $interactionConfirmation = Get-InteractionConfirmationEvidence -Line $line
+    if ($null -ne $interactionConfirmation) {
+        $turnId = $interactionConfirmation.TurnId
+        $callId = $interactionConfirmation.CallId
+        Add-InteractionConfirmationEvidence `
+            -ConfirmedIdentities $interactionConfirmations `
+            -Evidence $interactionConfirmation
+        $evidence = "turnId=$turnId, callId=$callId, kind=$($interactionConfirmation.Kind), referenceId=$($interactionConfirmation.ReferenceId), $($interactionConfirmation.Details)"
+        $interactionEvidence.Add($evidence)
+        if (-not $turns.ContainsKey($turnId)) {
+            $turns[$turnId] = New-Object System.Collections.Generic.List[string]
+        }
+        $turns[$turnId].Add("interaction confirmed callId=$callId, kind=$($interactionConfirmation.Kind), referenceId=$($interactionConfirmation.ReferenceId)")
+    }
+
     if ($line -match 'TURN_LATENCY turnId=(?<turn>\d+), stage=(?<stage>[^,]+)(?<details>.*)$') {
         $turnId = [long]$Matches["turn"]
         if (-not $turns.ContainsKey($turnId)) {
@@ -227,18 +306,33 @@ foreach ($line in $sessionLines) {
         $turns[$turnId].Add("context " + $Matches["details"])
     }
 
-    if ($line -match '\[ENTITY\] TARGET_RESOLVED action=(?<action>[^,]+), .*referenceId=(?<reference>[^,]+), .*turnId=(?<turn>\d+)') {
-        $identityKey = $Matches["turn"] + "|" + $Matches["action"]
-        if (-not $resolvedIdentities.ContainsKey($identityKey)) {
-            $resolvedIdentities[$identityKey] = New-Object System.Collections.Generic.HashSet[string]
+    $targetResolution = Get-TargetResolutionEvidence -Line $line
+    if ($null -ne $targetResolution) {
+        $identityKey = Add-TargetResolutionEvidence `
+            -ResolvedIdentities $resolvedIdentities `
+            -Evidence $targetResolution
+        if ($targetResolution.CallId -eq "none") {
+            Add-Failure "Target resolution missing call identity: $identityKey."
         }
-        [void]$resolvedIdentities[$identityKey].Add($Matches["reference"])
-        $turnId = [long]$Matches["turn"]
+        if ($targetResolution.Action -eq "kick_item") {
+            if (-not $kickDirections.ContainsKey($targetResolution.CallId)) {
+                $kickDirections[$targetResolution.CallId] =
+                    New-Object System.Collections.Generic.HashSet[string]
+            }
+            [void]$kickDirections[$targetResolution.CallId].Add(
+                [string]$targetResolution.Direction)
+        }
+        if ($targetResolution.Action -eq "go_to_location") {
+            Add-DirectedMoveResolutionEvidence `
+                -ResolutionsByCall $directedMoveResolutions `
+                -Evidence $targetResolution
+        }
+        $turnId = $targetResolution.TurnId
         if (-not $turns.ContainsKey($turnId)) {
             $turns[$turnId] = New-Object System.Collections.Generic.List[string]
         }
         $turns[$turnId].Add(
-            "target action=$($Matches["action"]), referenceId=$($Matches["reference"])")
+            "target action=$($targetResolution.Action), callId=$($targetResolution.CallId), referenceId=$($targetResolution.ReferenceId)")
     }
 
     if ($line -match 'TOOL_BATCH_DEFERRED responseId=(?<response>[^,]+), turnId=(?<turn>\d+)') {
@@ -247,14 +341,17 @@ foreach ($line in $sessionLines) {
         $deferredResponses[$response] = $true
     }
 
-    if ($line -match '\[AGENT\] CALL name=(?<action>[^,]+), .*turnId=(?<turn>\d+), responseId=(?<response>[^,]+), result=(?<result>\{.*\}), diagnosticError=(?<error>[^,\s]+)') {
+    if ($line -match '\[AGENT\] CALL name=(?<action>[^,]+), callId=(?<call>[^,]+), .*turnId=(?<turn>\d+), responseId=(?<response>[^,]+), result=(?<result>\{.*\}), diagnosticError=(?<error>[^,\s]+)') {
         $action = $Matches["action"]
+        $callId = $Matches["call"]
         $turn = $Matches["turn"]
         $response = $Matches["response"]
         $resultJson = $Matches["result"]
         $diagnosticError = $Matches["error"]
         if ($physicalActions -contains $action -and $resultJson -match '"ok":true') {
-            $successfulPhysicalCalls[$response] = [pscustomobject]@{
+            $successfulPhysicalCalls[$callId] = [pscustomobject]@{
+                CallId = $callId
+                Response = $response
                 Turn = $turn
                 Action = $action
             }
@@ -311,14 +408,71 @@ foreach ($candidate in $possibleStaleBlockers) {
         Add-Failure "Turn $($candidate.Turn) response $($candidate.Response) reported $($candidate.Error) without deferring that tool batch; this may be a stale blocker."
     }
 }
-foreach ($response in $successfulPhysicalCalls.Keys) {
-    $call = $successfulPhysicalCalls[$response]
-    if (-not $completedResponses.ContainsKey($response)) {
-        Add-Failure "Turn $($call.Turn) response $response succeeded as $($call.Action) without a completed tool batch."
+foreach ($callId in $successfulPhysicalCalls.Keys) {
+    $call = $successfulPhysicalCalls[$callId]
+    if (-not $completedResponses.ContainsKey($call.Response)) {
+        Add-Failure "Turn $($call.Turn) response $($call.Response) call $callId succeeded as $($call.Action) without a completed tool batch."
+    }
+    if ($call.Action -eq "interact_with_object") {
+        $interactionViolation = Get-InteractionTargetViolation `
+            -ResolvedIdentities $resolvedIdentities `
+            -ConfirmedIdentities $interactionConfirmations `
+            -CallId $callId
+        if ($null -ne $interactionViolation) {
+            Add-Failure "Turn $($call.Turn) response $($call.Response): $interactionViolation"
+        }
+    }
+    if ($call.Action -eq "go_to_location") {
+        $directedMoveViolation = Get-DirectedMoveCallViolation `
+            -ResolvedIdentities $resolvedIdentities `
+            -ResolutionsByCall $directedMoveResolutions `
+            -ArrivalsByCall $directedMoveArrivals `
+            -CallId $callId `
+            -TurnId ([long]$call.Turn)
+        if ($null -ne $directedMoveViolation) {
+            Add-Failure "Turn $($call.Turn) response $($call.Response): $directedMoveViolation"
+        }
+    }
+    if ($call.Action -eq "pick_up_player" -or
+        $call.Action -eq "drop_player") {
+        $playerIdentityKey = "$callId|$($call.Action)"
+        if (-not $resolvedIdentities.ContainsKey($playerIdentityKey) -or
+            $resolvedIdentities[$playerIdentityKey].Count -ne 1) {
+            Add-Failure "Turn $($call.Turn) response $($call.Response) call $callId did not retain one exact human identity for $($call.Action)."
+        }
+    }
+    if ($call.Action -eq "kick_item") {
+        if (-not $kickDirections.ContainsKey($callId) -or
+            $kickDirections[$callId].Count -ne 1 -or
+            $kickDirections[$callId].Contains("")) {
+            Add-Failure "Turn $($call.Turn) response $($call.Response) call $callId did not retain one resolved kick direction."
+        }
+        else {
+            $kickDirection = @($kickDirections[$callId])[0]
+            $kickCallViolation = Get-KickLaunchCallViolation `
+                -ResolvedIdentities $resolvedIdentities `
+                -LaunchesByCall $kickLaunchesByCall `
+                -CallId $callId `
+                -TurnId ([long]$call.Turn) `
+                -Direction $kickDirection
+            if ($null -ne $kickCallViolation) {
+                Add-Failure "Turn $($call.Turn) response $($call.Response): $kickCallViolation"
+            }
+        }
+    }
+}
+
+foreach ($launch in $kickLaunches) {
+    $kickViolation = Get-TowardReferenceKickViolation -Details $launch
+    if ($null -ne $kickViolation) {
+        Add-Failure $kickViolation
     }
 }
 foreach ($response in $activeJobs.Keys) {
     Add-Failure "Turn $($activeJobs[$response]) response $response still has an unresolved deferred tool batch at the end of the log."
+}
+foreach ($violation in @(Get-ToolBatchSettlementViolations -Lines $sessionLines)) {
+    Add-Failure $violation
 }
 foreach ($turn in $activePresentationJobs.Keys) {
     Add-Failure "Turn $turn still has an unreleased presentation job at the end of the log."
@@ -414,6 +568,18 @@ $report.Add("Codec proof: builtHash=$distCodecHash deployedHash=$deployedCodecHa
 $report.Add("Deployment proof: hash=$deployedHash game=$GamePath")
 $report.Add("Runtime proof: loadedVersion=$loadedVersion loadedHash=$loadedHash ready=$ready logUpdated=$logTimestamp")
 $report.Add("Visual QA: not assessed by this command")
+$report.Add("Kick launches: $($kickLaunches.Count)")
+foreach ($launch in $kickLaunches) {
+    $report.Add("  $launch")
+}
+$report.Add("Interaction confirmations: $($interactionEvidence.Count)")
+foreach ($evidence in $interactionEvidence) {
+    $report.Add("  $evidence")
+}
+$report.Add("Directed-move arrivals: $($directedMoveEvidence.Count)")
+foreach ($evidence in $directedMoveEvidence) {
+    $report.Add("  $evidence")
+}
 $report.Add("")
 $report.Add("Turns: $($turns.Count)")
 foreach ($turnId in @($turns.Keys | Sort-Object)) {
