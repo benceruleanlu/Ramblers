@@ -1,5 +1,6 @@
 using System;
 using System.Text.Json;
+using UnityEngine;
 
 namespace Ramblers;
 
@@ -32,24 +33,42 @@ internal static class AgentToolRouter
                 return ExecuteInspectionJob(
                     functionCall.Arguments,
                     turnReference);
+            case AgentToolCatalog.GoToLocation:
+                return ExecuteMoveToLocationJob(
+                    functionCall.Arguments,
+                    turnReference,
+                    functionCall.CallId);
             case AgentToolCatalog.InteractWithObject:
                 return ExecuteInteractionJob(
                     functionCall.Arguments,
-                    turnReference);
+                    turnReference,
+                    functionCall.CallId);
             case AgentToolCatalog.PickUpItem:
                 return ExecuteReferencedItemJob(
                     AgentToolCatalog.PickUpItem,
                     functionCall.Arguments,
-                    turnReference);
+                    turnReference,
+                    functionCall.CallId);
             case AgentToolCatalog.KickItem:
                 return ExecuteKickItemJob(
                     functionCall.Arguments,
-                    turnReference);
+                    turnReference,
+                    functionCall.CallId);
             case AgentToolCatalog.DropItem:
-                return ExecuteJob(
-                    AgentToolCatalog.DropItem,
+                return ExecuteDropItemJob(
                     functionCall.Arguments,
-                    null);
+                    turnReference,
+                    functionCall.CallId);
+            case AgentToolCatalog.PickUpPlayer:
+                return ExecutePickUpPlayerJob(
+                    functionCall.Arguments,
+                    turnReference,
+                    functionCall.CallId);
+            case AgentToolCatalog.DropPlayer:
+                return ExecuteDropPlayerJob(
+                    functionCall.Arguments,
+                    turnReference,
+                    functionCall.CallId);
             case AgentToolCatalog.CancelAction:
                 result = ExecuteCancelAction(functionCall.Arguments);
                 break;
@@ -127,7 +146,8 @@ internal static class AgentToolRouter
     private static AgentToolDispatch ExecuteReferencedItemJob(
         string jobName,
         string arguments,
-        CompanionTurnReference turnReference)
+        CompanionTurnReference turnReference,
+        string callId)
     {
         string target;
         if (!TryReadOnlyStringArgument(arguments, "target", out target))
@@ -142,11 +162,11 @@ internal static class AgentToolRouter
                 AgentToolResult.Failure("human_reference_not_captured"));
         }
 
-        CompanionInteractionTarget interactionTarget;
+        CompanionPropTarget propTarget;
         if (string.Equals(target, "human_reference", StringComparison.Ordinal))
         {
-            interactionTarget = turnReference.Target;
-            if (interactionTarget == null)
+            propTarget = turnReference.Target;
+            if (propTarget == null)
             {
                 return AgentToolDispatch.Immediate(
                     AgentToolResult.Failure("item_not_found"));
@@ -158,7 +178,7 @@ internal static class AgentToolRouter
             if (turnReference.EntityReferences == null ||
                 !turnReference.EntityReferences.TryResolve(
                     target,
-                    out interactionTarget,
+                    out propTarget,
                     out resolveError))
             {
                 return AgentToolDispatch.Immediate(
@@ -168,16 +188,119 @@ internal static class AgentToolRouter
 
         Plugin.Logger.LogInfo(
             $"[ENTITY] TARGET_RESOLVED action={jobName}, target={target}, " +
-            $"referenceId={interactionTarget.ReferenceId}, " +
-            $"netId={interactionTarget.NetworkId}, turnId={turnReference.TurnId}.");
+            $"referenceId={propTarget.ReferenceId}, " +
+            $"netId={propTarget.NetworkId}, callId={callId ?? "none"}, " +
+            $"turnId={turnReference.TurnId}.");
 
         return ExecuteJob(
             jobName,
             "{}",
             new CompanionJobRequest
             {
+                CallId = callId,
                 TurnId = turnReference.TurnId,
-                InteractionTarget = interactionTarget
+                PropTarget = propTarget
+            });
+    }
+
+    private static AgentToolDispatch ExecutePickUpPlayerJob(
+        string arguments,
+        CompanionTurnReference turnReference,
+        string callId)
+    {
+        if (!IsEmptyObject(arguments))
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure("invalid_arguments"));
+        }
+        if (turnReference?.HumanPlayerTarget == null)
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure("human_player_unavailable"));
+        }
+
+        Plugin.Logger.LogInfo(
+            $"[ENTITY] TARGET_RESOLVED action={AgentToolCatalog.PickUpPlayer}, " +
+            $"target=human, referenceId={turnReference.HumanPlayerTarget.StableId}, " +
+            $"netId={turnReference.HumanPlayerTarget.NetworkId}, " +
+            $"callId={callId ?? "none"}, turnId={turnReference.TurnId}.");
+        return ExecuteJob(
+            AgentToolCatalog.PickUpPlayer,
+            arguments,
+            new CompanionJobRequest
+            {
+                CallId = callId,
+                TurnId = turnReference.TurnId,
+                PlayerTarget = turnReference.HumanPlayerTarget
+            });
+    }
+
+    private static AgentToolDispatch ExecuteDropItemJob(
+        string arguments,
+        CompanionTurnReference turnReference,
+        string callId)
+    {
+        if (!IsEmptyObject(arguments))
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure("invalid_arguments"));
+        }
+
+        var propTarget = turnReference?.CompanionHeldTarget;
+        if (propTarget == null)
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure(
+                    turnReference?.CompanionHeldCaptureError ??
+                    "companion_held_item_unavailable"));
+        }
+
+        Plugin.Logger.LogInfo(
+            $"[ENTITY] TARGET_RESOLVED action={AgentToolCatalog.DropItem}, " +
+            $"target=companion_held_item, referenceId={propTarget.ReferenceId}, " +
+            $"netId={propTarget.NetworkId}, callId={callId ?? "none"}, " +
+            $"turnId={turnReference.TurnId}.");
+        return ExecuteJob(
+            AgentToolCatalog.DropItem,
+            arguments,
+            new CompanionJobRequest
+            {
+                CallId = callId,
+                TurnId = turnReference.TurnId,
+                PropTarget = propTarget
+            });
+    }
+
+    private static AgentToolDispatch ExecuteDropPlayerJob(
+        string arguments,
+        CompanionTurnReference turnReference,
+        string callId)
+    {
+        if (!IsEmptyObject(arguments))
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure("invalid_arguments"));
+        }
+        if (turnReference?.HumanPlayerTarget == null)
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure("human_player_unavailable"));
+        }
+
+        Plugin.Logger.LogInfo(
+            $"[ENTITY] TARGET_RESOLVED action={AgentToolCatalog.DropPlayer}, " +
+            $"target=companion_held_player, " +
+            $"referenceId={turnReference.HumanPlayerTarget.StableId}, " +
+            $"netId={turnReference.HumanPlayerTarget.NetworkId}, " +
+            $"callId={callId ?? "none"}, turnId={turnReference.TurnId}.");
+        return ExecuteJob(
+            AgentToolCatalog.DropPlayer,
+            arguments,
+            new CompanionJobRequest
+            {
+                CallId = callId,
+                TurnId = turnReference.TurnId,
+                PlayerTarget = turnReference.HumanPlayerTarget
             });
     }
 
@@ -239,10 +362,12 @@ internal static class AgentToolRouter
 
     private static AgentToolDispatch ExecuteInteractionJob(
         string arguments,
-        CompanionTurnReference turnReference)
+        CompanionTurnReference turnReference,
+        string callId)
     {
         string target;
-        if (!TryReadOnlyStringArgument(arguments, "target", out target))
+        CompanionInteractionIntent intent;
+        if (!TryReadInteractionArguments(arguments, out target, out intent))
         {
             return AgentToolDispatch.Immediate(
                 AgentToolResult.Failure("invalid_arguments"));
@@ -254,55 +379,122 @@ internal static class AgentToolRouter
                 AgentToolResult.Failure("object_not_found"));
         }
 
-        CompanionPeckTarget peckTarget;
+        CompanionAffordanceTarget affordanceTarget;
         string selectionError = null;
         if (string.Equals(target, "human_reference", StringComparison.Ordinal) ||
-            string.Equals(target, "companion_held_item", StringComparison.Ordinal))
+            string.Equals(
+                target,
+                "companion_held_item",
+                StringComparison.Ordinal))
         {
             var source = string.Equals(
                 target,
                 "companion_held_item",
                 StringComparison.Ordinal)
-                ? CompanionPeckSource.CompanionHeldItem
-                : CompanionPeckSource.HumanReference;
-            if (turnReference.PeckCandidates == null ||
-                !turnReference.PeckCandidates.TrySelect(
+                ? CompanionAffordanceSource.CompanionHeldItem
+                : CompanionAffordanceSource.HumanReference;
+            if (turnReference.AffordanceCandidates == null ||
+                !turnReference.AffordanceCandidates.TrySelect(
                     source,
-                    out peckTarget,
+                    out affordanceTarget,
                     out selectionError))
             {
                 return AgentToolDispatch.Immediate(
-                    AgentToolResult.Failure("object_not_found"));
+                    AgentToolResult.Failure(
+                        selectionError ??
+                        turnReference.AffordanceCaptureError ??
+                        "object_not_found"));
             }
         }
         else if (turnReference.EntityReferences == null ||
                  !turnReference.EntityReferences.TryResolveInteraction(
                      target,
-                     out peckTarget,
+                     turnReference.AffordanceCandidates,
+                     out affordanceTarget,
                      out selectionError))
         {
             return AgentToolDispatch.Immediate(
-                AgentToolResult.Failure(selectionError ?? "object_not_found"));
+                AgentToolResult.Failure(
+                    selectionError ??
+                    "object_not_found"));
         }
 
         Plugin.Logger.LogInfo(
             $"[ENTITY] TARGET_RESOLVED action={AgentToolCatalog.InteractWithObject}, " +
-            $"target={target}, referenceId={peckTarget.ReferenceId}, " +
-            $"netId={peckTarget.NetworkId}, turnId={turnReference.TurnId}.");
+            $"target={target}, referenceId={affordanceTarget.ReferenceId}, " +
+            $"kind={affordanceTarget.KindLabel}, netId={affordanceTarget.NetworkId}, " +
+            $"intent={intent.ToString().ToLowerInvariant()}, callId={callId ?? "none"}, " +
+            $"turnId={turnReference.TurnId}.");
 
         return ExecuteJob(
             AgentToolCatalog.InteractWithObject,
             "{}",
             new CompanionJobRequest
             {
+                CallId = callId,
                 TurnId = turnReference.TurnId,
-                PeckTarget = peckTarget
+                AffordanceTarget = affordanceTarget,
+                InteractionIntent = intent
+            });
+    }
+
+    private static AgentToolDispatch ExecuteMoveToLocationJob(
+        string arguments,
+        CompanionTurnReference turnReference,
+        string callId)
+    {
+        if (!IsEmptyObject(arguments))
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure("invalid_arguments"));
+        }
+
+        CompanionInspectionReferent destination;
+        string selectionError = null;
+        if (turnReference?.InspectionCandidates == null ||
+            !turnReference.InspectionCandidates.TrySelect(
+                CompanionInspectionSource.HumanGaze,
+                out destination,
+                out selectionError) ||
+            destination == null || !destination.GazeRayHit)
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure(
+                    selectionError ??
+                    turnReference?.InspectionCaptureError ??
+                    "location_not_found"));
+        }
+
+        Vector3 destinationPoint;
+        if (!destination.TryGetCurrentPoint(out destinationPoint))
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure("location_not_found"));
+        }
+        var destinationReferenceId =
+            CompanionInspectionReferent.GetFrozenPointReferenceId(
+                destinationPoint);
+        Plugin.Logger.LogInfo(
+            $"[ENTITY] TARGET_RESOLVED action={AgentToolCatalog.GoToLocation}, " +
+            $"target=human_indicated_location, source={destination.SourceLabel}, " +
+            $"referenceId={destinationReferenceId}, " +
+            $"destinationPoint={destinationPoint}, " +
+            $"callId={callId ?? "none"}, turnId={turnReference.TurnId}.");
+        return ExecuteJob(
+            AgentToolCatalog.GoToLocation,
+            arguments,
+            new CompanionJobRequest
+            {
+                CallId = callId,
+                TurnId = turnReference.TurnId,
+                MoveDestination = destination
             });
     }
 
     private static AgentToolDispatch ExecuteKickItemJob(
         string arguments,
-        CompanionTurnReference turnReference)
+        CompanionTurnReference turnReference,
+        string callId)
     {
         string target;
         CompanionKickStrength strength;
@@ -311,11 +503,7 @@ internal static class AgentToolRouter
                 arguments,
                 out target,
                 out strength,
-                out direction) ||
-            !string.Equals(
-                target,
-                "human_reference",
-                StringComparison.Ordinal))
+                out direction))
         {
             return AgentToolDispatch.Immediate(
                 AgentToolResult.Failure("invalid_arguments"));
@@ -327,25 +515,162 @@ internal static class AgentToolRouter
                 AgentToolResult.Failure("human_reference_not_captured"));
         }
 
-        if (turnReference.Target == null)
+        // One utterance-boundary gaze cannot freeze both the prop and its
+        // destination. Require the model to name the held/context prop
+        // independently; never reinterpret a requested gaze target.
+        if (string.Equals(target, "human_reference", StringComparison.Ordinal) &&
+            direction == CompanionKickDirection.TowardReference)
         {
             return AgentToolDispatch.Immediate(
                 AgentToolResult.Failure(
-                    string.IsNullOrEmpty(turnReference.CaptureError)
-                        ? "human_reference_not_captured"
-                        : turnReference.CaptureError));
+                    "kick_target_destination_ambiguous"));
         }
+
+        CompanionPropTarget propTarget;
+        string targetError = null;
+        if (string.Equals(target, "human_reference", StringComparison.Ordinal))
+        {
+            propTarget = turnReference.Target;
+            targetError = turnReference.CaptureError;
+        }
+        else if (string.Equals(
+                     target,
+                     "companion_held_item",
+                     StringComparison.Ordinal))
+        {
+            propTarget = turnReference.CompanionHeldTarget;
+            targetError = turnReference.CompanionHeldCaptureError;
+        }
+        else if (turnReference.EntityReferences == null ||
+                 !turnReference.EntityReferences.TryResolve(
+                     target,
+                     out propTarget,
+                     out targetError))
+        {
+            propTarget = null;
+        }
+
+        if (propTarget == null)
+        {
+            return AgentToolDispatch.Immediate(
+                AgentToolResult.Failure(targetError ?? "item_not_found"));
+        }
+
+        CompanionPlayerTarget playerTarget = null;
+        if (direction == CompanionKickDirection.TowardHuman)
+        {
+            playerTarget = turnReference.HumanPlayerTarget;
+            if (playerTarget == null)
+            {
+                return AgentToolDispatch.Immediate(
+                    AgentToolResult.Failure("human_player_unavailable"));
+            }
+        }
+
+        CompanionInspectionReferent destination = null;
+        if (direction == CompanionKickDirection.TowardReference)
+        {
+            string destinationError = null;
+            if (turnReference.InspectionCandidates == null ||
+                !turnReference.InspectionCandidates.TrySelect(
+                    CompanionInspectionSource.HumanGaze,
+                    out destination,
+                    out destinationError))
+            {
+                return AgentToolDispatch.Immediate(
+                    AgentToolResult.Failure(
+                        destinationError ??
+                        turnReference.InspectionCaptureError ??
+                        "kick_destination_not_captured"));
+            }
+        }
+
+        Plugin.Logger.LogInfo(
+            $"[ENTITY] TARGET_RESOLVED action={AgentToolCatalog.KickItem}, " +
+            $"target={target}, referenceId={propTarget.ReferenceId}, " +
+            $"netId={propTarget.NetworkId}, direction={direction.ToWireValue()}, " +
+            $"humanTarget={(playerTarget == null ? "none" : playerTarget.StableId)}, " +
+            $"humanReferenceId={(playerTarget == null ? 0 : playerTarget.ReferenceId)}, " +
+            $"humanNetId={(playerTarget == null ? 0u : playerTarget.NetworkId)}, " +
+            $"destination={(destination == null ? "none" : destination.SourceLabel)}, " +
+            $"callId={callId ?? "none"}, " +
+            $"turnId={turnReference.TurnId}.");
 
         return ExecuteJob(
             AgentToolCatalog.KickItem,
             "{}",
             new CompanionJobRequest
             {
+                CallId = callId,
                 TurnId = turnReference.TurnId,
-                InteractionTarget = turnReference.Target,
+                PropTarget = propTarget,
+                PlayerTarget = playerTarget,
+                KickDestination = destination,
                 KickStrength = strength,
                 KickDirection = direction
             });
+    }
+
+    private static bool TryReadInteractionArguments(
+        string arguments,
+        out string target,
+        out CompanionInteractionIntent intent)
+    {
+        target = null;
+        intent = CompanionInteractionIntent.Use;
+        if (string.IsNullOrWhiteSpace(arguments))
+            return false;
+
+        try
+        {
+            using var document = JsonDocument.Parse(arguments);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+                return false;
+
+            var sawTarget = false;
+            var sawIntent = false;
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                if (property.Value.ValueKind != JsonValueKind.String)
+                    return false;
+
+                var value = property.Value.GetString();
+                if (string.Equals(property.Name, "target", StringComparison.Ordinal))
+                {
+                    if (sawTarget || string.IsNullOrWhiteSpace(value))
+                        return false;
+                    sawTarget = true;
+                    target = value;
+                    continue;
+                }
+
+                if (string.Equals(property.Name, "intent", StringComparison.Ordinal))
+                {
+                    if (sawIntent)
+                        return false;
+                    sawIntent = true;
+                    if (string.Equals(value, "use", StringComparison.Ordinal))
+                    {
+                        intent = CompanionInteractionIntent.Use;
+                        continue;
+                    }
+                    if (string.Equals(value, "sit", StringComparison.Ordinal))
+                    {
+                        intent = CompanionInteractionIntent.Sit;
+                        continue;
+                    }
+                    return false;
+                }
+
+                return false;
+            }
+
+            return sawTarget;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     private static bool TryReadKickArguments(
@@ -455,6 +780,11 @@ internal static class AgentToolRouter
         if (string.Equals(value, "toward_human", StringComparison.Ordinal))
         {
             direction = CompanionKickDirection.TowardHuman;
+            return true;
+        }
+        if (string.Equals(value, "toward_reference", StringComparison.Ordinal))
+        {
+            direction = CompanionKickDirection.TowardReference;
             return true;
         }
         return false;

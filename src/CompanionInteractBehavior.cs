@@ -3,9 +3,9 @@ using UnityEngine;
 namespace Ramblers;
 
 /// <summary>
-/// One bounded primary interaction with an exact switch frozen from gaze,
-/// held state, or private game context. World targets are approached before
-/// the same game-owned reach and authority checks are crossed.
+/// One bounded primary interaction with an exact native affordance frozen from
+/// gaze, held state, or private game context. The lifecycle is independent of
+/// puzzle identity: approach, align, revalidate, activate, and confirm.
 /// </summary>
 internal sealed class CompanionInteractBehavior : ICompanionJob
 {
@@ -15,8 +15,6 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
     private const float AimToleranceDegrees = 5f;
     private const float ConfirmationSeconds = 1f;
     private const float InteractionTimeoutSeconds = 25f;
-    private const float ApproachCommitSeconds = 0.45f;
-    private const float ApproachNavigationInterval = 0.1f;
 
     private enum InteractionState
     {
@@ -28,22 +26,23 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
 
     private readonly CompanionAttention _attention;
     private readonly CompanionLocomotion _locomotion;
-    private readonly CompanionJumpActuator _jump;
+    private readonly CompanionApproachController _approach;
 
     private CompanionBody _body;
     private InteractionState _state;
-    private CompanionPeckTarget _target;
-    private CompanionPeckActivation _activation;
+    private CompanionAffordanceTarget _target;
+    private CompanionAffordanceActivation _activation;
     private CompanionJobCompletion _completion;
     private Vector3 _targetPoint;
     private float _stateStartedAt;
     private float _alignedAt;
     private bool _authorityCrossed;
     private bool _cancelRequested;
-    private int _approachRecoveries;
-    private float _approachCommitUntil;
-    private Vector3 _approachCommitDirection;
-    private float _nextApproachTick;
+    private string _postAuthorityError;
+    private bool _requiresLocomotion;
+    private string _callId;
+    private long _turnId;
+    private CompanionInteractionIntent _intent;
 
     internal CompanionInteractBehavior(
         CompanionLocomotion locomotion,
@@ -52,7 +51,10 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
     {
         _locomotion = locomotion;
         _attention = attention;
-        _jump = jump;
+        _approach = new CompanionApproachController(
+            locomotion,
+            jump,
+            AgentToolCatalog.InteractWithObject);
     }
 
     public string Name => AgentToolCatalog.InteractWithObject;
@@ -69,18 +71,24 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
 
     public JobResources RequiredFor(CompanionJobRequest request)
     {
-        return request?.PeckTarget?.IsWorldTarget == true
+        var readiness = request?.AffordanceTarget?.GetReadiness(
+            _body,
+            request.InteractionIntent);
+        return readiness?.State ==
+               CompanionAffordanceReadinessState.NeedsApproach
             ? JobResources.Locomotion | JobResources.Gaze | JobResources.Hands
             : JobResources.Gaze | JobResources.Hands;
     }
 
     public JobResources Held => !IsActive
         ? JobResources.None
-        : _target?.IsWorldTarget == true
+        : _requiresLocomotion
             ? JobResources.Locomotion | JobResources.Gaze | JobResources.Hands
             : JobResources.Gaze | JobResources.Hands;
 
     public bool IsActive => _state != InteractionState.Idle;
+
+    public bool MayPublishCompletionWhileActive => false;
 
     public float TimeoutSeconds => InteractionTimeoutSeconds;
 
@@ -107,61 +115,52 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
             return false;
         }
 
-        _target = request == null ? null : request.PeckTarget;
-        string error = null;
-        if (_target == null ||
-            !_target.TryGetCurrentPoint(out _targetPoint, out error))
+        _target = request == null ? null : request.AffordanceTarget;
+        _callId = request == null ? null : request.CallId;
+        _turnId = request == null ? 0L : request.TurnId;
+        _intent = request == null
+            ? CompanionInteractionIntent.Use
+            : request.InteractionIntent;
+        if (_target == null)
         {
             _target = null;
             failure = AgentToolResult.Failure(
-                error ?? "interaction_reference_unavailable");
+                "interaction_reference_unavailable");
             return false;
         }
 
-        var canActivateNow = false;
-        if (_target.IsWorldTarget)
+        var readiness = _target.GetReadiness(_body, _intent);
+        if (readiness.State == CompanionAffordanceReadinessState.Unavailable)
         {
-            CompanionPeckActivation ignoredActivation;
-            string prepareError;
-            canActivateNow = _target.TryPrepare(
-                _body,
-                out ignoredActivation,
-                out prepareError);
-            if (!canActivateNow && !string.Equals(
-                    prepareError,
-                    "interaction_out_of_reach",
-                    System.StringComparison.Ordinal))
-            {
-                _target = null;
-                failure = AgentToolResult.Failure(
-                    prepareError ?? "interaction_unavailable");
-                return false;
-            }
-        }
-        else
-        {
-            canActivateNow = true;
+            _target = null;
+            failure = AgentToolResult.Failure(
+                readiness.Error ?? "interaction_unavailable");
+            return false;
         }
 
-        _state = canActivateNow
-            ? InteractionState.Aligning
-            : InteractionState.Approaching;
+        _targetPoint = readiness.Point;
+        _requiresLocomotion = readiness.State ==
+                              CompanionAffordanceReadinessState.NeedsApproach;
+        _state = _requiresLocomotion
+            ? InteractionState.Approaching
+            : InteractionState.Aligning;
         _stateStartedAt = now;
         _alignedAt = -1f;
         _authorityCrossed = false;
         _cancelRequested = false;
-        _approachRecoveries = 0;
-        _approachCommitUntil = 0f;
-        _approachCommitDirection = Vector3.zero;
+        _postAuthorityError = null;
         if (_target.IsWorldTarget)
-            _locomotion.ResetProgressObservation(now);
+            _approach.Begin(now);
+        else
+            _approach.Reset();
         _attention.SetTarget(GazeChannel.Inspection, _targetPoint);
         Plugin.Logger.LogInfo(
-            $"[INTERACT] STARTED source={_target.SourceLabel}, " +
+            $"[INTERACT] STARTED kind={_target.KindLabel}, source={_target.SourceLabel}, " +
             $"referenceId={_target.ReferenceId}, " +
             $"netId={_target.NetworkId}, target={_targetPoint}, " +
             $"distance={Vector3.Distance(_body.Position, _targetPoint):F2}, " +
-            $"phase={(_state == InteractionState.Approaching ? "approach" : "align")}.");
+            $"phase={(_state == InteractionState.Approaching ? "approach" : "align")}, " +
+            $"callId={CallIdForLog}, turnId={_turnId}.");
         return true;
     }
 
@@ -171,26 +170,32 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
             return;
         if (_body == null || !_body.IsAlive)
         {
-            CompleteFailure("bot_not_spawned");
+            RefreshAuthorityCrossing();
+            if (!_authorityCrossed)
+            {
+                CompleteFailure("bot_not_spawned");
+                return;
+            }
+            RecordPostAuthorityFailure("bot_not_spawned", "body");
+            if (now - _stateStartedAt >= ConfirmationSeconds)
+                CompleteFailure(_postAuthorityError);
             return;
         }
 
-        string pointError;
-        if (!_target.TryGetCurrentPoint(out _targetPoint, out pointError))
+        if (_state == InteractionState.Approaching ||
+            _state == InteractionState.Aligning)
         {
-            CompleteFailure(pointError ?? "interaction_target_unavailable");
-            return;
-        }
-        _attention.SetTarget(GazeChannel.Inspection, _targetPoint);
-
-        if (_state == InteractionState.Approaching)
-        {
-            TickApproach(now);
-            return;
-        }
-        if (_state == InteractionState.Aligning)
-        {
-            TickAlignment(now);
+            string pointError;
+            if (!_target.TryGetCurrentPoint(out _targetPoint, out pointError))
+            {
+                CompleteFailure(pointError ?? "interaction_target_unavailable");
+                return;
+            }
+            _attention.SetTarget(GazeChannel.Inspection, _targetPoint);
+            if (_state == InteractionState.Approaching)
+                TickApproach(now);
+            else
+                TickAlignment(now);
             return;
         }
 
@@ -217,6 +222,7 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
         _completion = null;
         if (!IsActive)
             return;
+        RefreshAuthorityCrossing();
         if (_authorityCrossed)
         {
             _cancelRequested = true;
@@ -235,8 +241,17 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
             EndInteraction();
             return;
         }
-        if (IsActive)
+        if (!IsActive)
+            return;
+        RefreshAuthorityCrossing();
+        if (!_authorityCrossed)
+        {
             CompleteFailure(error ?? "action_execution_failed");
+            return;
+        }
+        RecordPostAuthorityFailure(
+            error ?? "action_execution_failed",
+            "job_failure");
     }
 
     public void Release()
@@ -281,15 +296,15 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
 
     private void TickApproach(float now)
     {
-        if (now < _nextApproachTick)
+        if (!_approach.TryBeginTick(now))
             return;
-        _nextApproachTick = now + ApproachNavigationInterval;
 
-        CompanionPeckActivation ignoredActivation;
-        string prepareError;
-        if (_target.TryPrepare(_body, out ignoredActivation, out prepareError))
+        var readiness = _target.GetReadiness(_body, _intent);
+        if (readiness.State == CompanionAffordanceReadinessState.Ready)
         {
+            _targetPoint = readiness.Point;
             _locomotion.Stop(now);
+            _approach.CancelRecovery();
             _state = InteractionState.Aligning;
             _stateStartedAt = now;
             _alignedAt = -1f;
@@ -298,14 +313,12 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
                 $"distance={Vector3.Distance(_body.Position, _targetPoint):F2}.");
             return;
         }
-        if (!string.Equals(
-                prepareError,
-                "interaction_out_of_reach",
-                System.StringComparison.Ordinal))
+        if (readiness.State == CompanionAffordanceReadinessState.Unavailable)
         {
-            CompleteFailure(prepareError ?? "interaction_unavailable");
+            CompleteFailure(readiness.Error ?? "interaction_unavailable");
             return;
         }
+        _targetPoint = readiness.Point;
 
         var toTarget = _targetPoint - _body.Position;
         var horizontalDistance = new Vector3(toTarget.x, 0f, toTarget.z).magnitude;
@@ -318,160 +331,193 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
 
         var direction = new Vector3(toTarget.x, 0f, toTarget.z) /
                         horizontalDistance;
-        SteeringStatus status;
-        if (now < _approachCommitUntil)
+        var approachStep = _approach.Advance(
+            now,
+            direction,
+            horizontalDistance);
+        if (approachStep.Kind == CompanionApproachStepKind.RecoveryDeferred)
         {
-            _locomotion.CommitTraversalDirection(
-                _approachCommitDirection,
-                horizontalDistance);
+            Plugin.Logger.LogInfo(
+                $"[INTERACT] APPROACH_DEFERRED referenceId={_target.ReferenceId}, " +
+                $"reason={approachStep.Reason}, " +
+                $"recovery={approachStep.RecoveryError}.");
         }
-        else if (!_locomotion.TrySteerToward(
-                     direction,
-                     horizontalDistance,
-                     now,
-                     out status))
+        else if (approachStep.Kind == CompanionApproachStepKind.RecoveryCommitted)
         {
-            _locomotion.Stop(now);
-            if (!TryRecoverApproach(
-                    now,
-                    direction,
-                    horizontalDistance,
-                    "blocked_path"))
-                CompleteFailure("interaction_path_blocked");
-            return;
+            Plugin.Logger.LogInfo(
+                $"[INTERACT] APPROACH_RECOVERY referenceId={_target.ReferenceId}, " +
+                $"reason={approachStep.Reason}, " +
+                $"attempt={approachStep.RecoveryAttempt}.");
         }
-
-        if (_locomotion.ObserveProgress(now) &&
-            !TryRecoverApproach(now, direction, horizontalDistance, "stuck"))
+        else if (approachStep.Kind == CompanionApproachStepKind.Blocked)
         {
+            Plugin.Logger.LogWarning(
+                $"[INTERACT] APPROACH_BLOCKED referenceId={_target.ReferenceId}, " +
+                $"reason={approachStep.Reason}, " +
+                $"recovery={approachStep.RecoveryError ?? "unavailable"}.");
             CompleteFailure("interaction_path_blocked");
         }
     }
 
-    private bool TryRecoverApproach(
-        float now,
-        Vector3 direction,
-        float distance,
-        string reason)
-    {
-        string jumpError;
-        if (!_jump.TryRequestActionRecovery(
-                now,
-                _locomotion.Posture,
-                AgentToolCatalog.InteractWithObject,
-                reason,
-                out jumpError))
-        {
-            if (CompanionJumpActuator.IsDeferredRecoveryError(jumpError))
-            {
-                _locomotion.ResetProgressObservation(now);
-                Plugin.Logger.LogInfo(
-                    $"[INTERACT] APPROACH_DEFERRED referenceId={_target.ReferenceId}, " +
-                    $"reason={reason}, recovery={jumpError}.");
-                return true;
-            }
-
-            Plugin.Logger.LogWarning(
-                $"[INTERACT] APPROACH_BLOCKED referenceId={_target.ReferenceId}, " +
-                $"reason={reason}, recovery={jumpError ?? "unavailable"}.");
-            return false;
-        }
-
-        _approachRecoveries++;
-        _approachCommitUntil = now + ApproachCommitSeconds;
-        _approachCommitDirection = direction;
-        _locomotion.CommitTraversalDirection(direction, distance);
-        _locomotion.ResetProgressObservation(now);
-        Plugin.Logger.LogInfo(
-            $"[INTERACT] APPROACH_RECOVERY referenceId={_target.ReferenceId}, " +
-            $"reason={reason}, attempt={_approachRecoveries}.");
-        return true;
-    }
-
     private void Activate(float now, float lookSeconds)
     {
-        string error;
-        if (!_target.TryPrepare(_body, out _activation, out error))
+        var readiness = _target.GetReadiness(_body, _intent);
+        if (readiness.State ==
+                CompanionAffordanceReadinessState.NeedsApproach &&
+            _requiresLocomotion && _target.IsWorldTarget)
         {
-            CompleteFailure(error ?? "interaction_unavailable");
+            _targetPoint = readiness.Point;
+            _state = InteractionState.Approaching;
+            _stateStartedAt = now;
+            _alignedAt = -1f;
+            _approach.Resume(now);
+            Plugin.Logger.LogInfo(
+                $"[INTERACT] APPROACH_RESUMED " +
+                $"referenceId={_target.ReferenceId}, " +
+                "reason=target_moved_out_of_reach.");
             return;
         }
+        if (readiness.State != CompanionAffordanceReadinessState.Ready)
+        {
+            CompleteFailure(readiness.Error ?? "interaction_unavailable");
+            return;
+        }
+        _targetPoint = readiness.Point;
+        _activation = readiness.Activation;
 
         Plugin.Logger.LogInfo(
-            $"[INTERACT] AUTHORITY_REQUEST referenceId={_target.ReferenceId}, " +
-            $"previousState={_activation.PreviousState}, " +
-            $"expectedState={_activation.ExpectedState}, " +
+            $"[INTERACT] AUTHORITY_REQUEST kind={_target.KindLabel}, " +
+            $"referenceId={_target.ReferenceId}, " +
+            $"{_target.DescribeActivation(_activation)}, " +
             $"lookSeconds={lookSeconds:F2}.");
-        if (!_target.TryActivate(_activation, out error))
+        string error;
+        var activated =
+            _target.TryActivate(_body, _activation, now, out error);
+        RefreshAuthorityCrossing();
+        if (!activated && !_authorityCrossed)
         {
             CompleteFailure(error ?? "interaction_authority_failed");
             return;
         }
 
-        _authorityCrossed = true;
         _state = InteractionState.AwaitingConfirmation;
         _stateStartedAt = now;
+        if (!activated)
+        {
+            RecordPostAuthorityFailure(
+                error ?? "interaction_authority_failed",
+                "activation");
+        }
         TickConfirmation(now);
     }
 
     private void TickConfirmation(float now)
     {
         bool observed;
-        int currentState;
-        int currentActionNumber;
+        string observation;
         string error;
-        if (!_target.TryObserveActivation(
+        var progressed = _target.TryProgressActivation(
+                _body,
                 _activation,
+                now,
                 out observed,
-                out currentState,
-                out currentActionNumber,
-                out error))
+                out observation,
+                out error);
+        RefreshAuthorityCrossing();
+        if (!progressed)
         {
-            CompleteFailure(error ?? "interaction_confirmation_unavailable");
-            return;
+            if (!_authorityCrossed)
+            {
+                CompleteFailure(
+                    error ?? "interaction_confirmation_unavailable");
+                return;
+            }
+            RecordPostAuthorityFailure(
+                error ?? "interaction_confirmation_unavailable",
+                "confirmation");
+            observed = false;
         }
 
         if (observed)
         {
             var referenceId = _target.ReferenceId;
-            var expectedState = _activation.ExpectedState;
+            var kind = _target.KindLabel;
+            var successState = _target.SuccessState(_activation);
+            if (_cancelRequested)
+            {
+                Plugin.Logger.LogInfo(
+                    $"[INTERACT] CANCEL_RECONCILED kind={kind}, " +
+                    $"referenceId={referenceId}, observation={observation}, " +
+                    $"callId={CallIdForLog}, turnId={_turnId}.");
+                EndInteraction();
+                return;
+            }
             _completion = new CompanionJobCompletion
             {
                 Result = AgentToolResult.Success(
                     AgentToolCatalog.InteractWithObject,
-                    _cancelRequested
-                        ? "interaction_completed_before_cancel"
-                        : "interacted",
-                    "switch_state_changed")
+                    "interacted",
+                    successState),
+                HandsTransition = _target.Kind ==
+                    CompanionAffordanceKind.PropHome
+                        ? CompanionTurnHandsTransition.HandsEmpty
+                        : CompanionTurnHandsTransition.None
             };
             Plugin.Logger.LogInfo(
-                $"[INTERACT] CONFIRMED referenceId={referenceId}, " +
-                $"expectedState={expectedState}, currentState={currentState}, " +
-                $"actionNumber={currentActionNumber}, " +
-                $"cancelRequested={_cancelRequested}.");
+                $"[INTERACT] CONFIRMED kind={kind}, referenceId={referenceId}, " +
+                $"observation={observation}, " +
+                $"cancelRequested={_cancelRequested}, callId={CallIdForLog}, " +
+                $"turnId={_turnId}.");
             EndInteraction();
             return;
         }
 
         if (now - _stateStartedAt >= ConfirmationSeconds)
         {
-            CompleteFailure("interaction_not_confirmed");
+            CompleteFailure(
+                _postAuthorityError ?? "interaction_not_confirmed");
         }
+    }
+
+    private void RefreshAuthorityCrossing()
+    {
+        _authorityCrossed |= _activation?.AuthorityCrossed == true;
+    }
+
+    private void RecordPostAuthorityFailure(string error, string phase)
+    {
+        if (_postAuthorityError != null)
+            return;
+        _postAuthorityError = error;
+        Plugin.Logger.LogWarning(
+            $"[INTERACT] RECONCILIATION_PENDING referenceId={_target?.ReferenceId ?? "none"}, " +
+            $"phase={phase}, error={error}, callId={CallIdForLog}, " +
+            $"turnId={_turnId}.");
     }
 
     private void CompleteFailure(string error)
     {
         var referenceId = _target == null ? "none" : _target.ReferenceId;
+        if (_cancelRequested)
+        {
+            Plugin.Logger.LogWarning(
+                $"[INTERACT] CANCEL_RECONCILIATION_FAILED " +
+                $"referenceId={referenceId}, error={error}, " +
+                $"callId={CallIdForLog}, turnId={_turnId}.");
+            EndInteraction();
+            return;
+        }
         _completion = CompanionJobCompletion.Failed(error);
         Plugin.Logger.LogWarning(
             $"[INTERACT] FAILED referenceId={referenceId}, error={error}, " +
-            $"authorityCrossed={_authorityCrossed}.");
+            $"authorityCrossed={_authorityCrossed}, callId={CallIdForLog}, " +
+            $"turnId={_turnId}.");
         EndInteraction();
     }
 
     private void EndInteraction()
     {
-        _jump.CancelActionRecovery(AgentToolCatalog.InteractWithObject);
+        _approach.CancelRecovery();
         if (_target?.IsWorldTarget == true)
             _locomotion.Stop(Time.realtimeSinceStartup);
         _state = InteractionState.Idle;
@@ -482,10 +528,12 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
         _alignedAt = -1f;
         _authorityCrossed = false;
         _cancelRequested = false;
-        _approachRecoveries = 0;
-        _approachCommitUntil = 0f;
-        _approachCommitDirection = Vector3.zero;
-        _nextApproachTick = 0f;
+        _postAuthorityError = null;
+        _requiresLocomotion = false;
+        _approach.Reset();
+        _callId = null;
+        _turnId = 0L;
+        _intent = CompanionInteractionIntent.Use;
         _attention.ClearTarget(GazeChannel.Inspection);
     }
 
@@ -500,9 +548,13 @@ internal sealed class CompanionInteractBehavior : ICompanionJob
         _alignedAt = -1f;
         _authorityCrossed = false;
         _cancelRequested = false;
-        _approachRecoveries = 0;
-        _approachCommitUntil = 0f;
-        _approachCommitDirection = Vector3.zero;
-        _nextApproachTick = 0f;
+        _postAuthorityError = null;
+        _requiresLocomotion = false;
+        _approach.Reset();
+        _callId = null;
+        _turnId = 0L;
     }
+
+    private string CallIdForLog =>
+        string.IsNullOrEmpty(_callId) ? "none" : _callId;
 }

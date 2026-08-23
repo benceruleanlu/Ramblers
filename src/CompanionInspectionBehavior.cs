@@ -20,7 +20,6 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
     // time out on rear references rather than aiming at them.
     private const float MaximumReferenceLookSeconds = 2.00f;
     private const float ReferenceSettleSeconds = 0.10f;
-    private const float ReferenceHoldSeconds = 3.00f;
     private const float ReferenceAimToleranceDegrees = 4f;
 
     // The gaze work is bounded by the constants above at roughly two seconds,
@@ -91,6 +90,9 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
     }
 
     public bool IsActive => _state != InspectionState.Idle;
+
+    public bool MayPublishCompletionWhileActive =>
+        _state == InspectionState.HoldingReference && _completion != null;
 
     public float TimeoutSeconds => InspectionTimeoutSeconds;
 
@@ -171,8 +173,6 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
                 _referencePoint = heldPoint;
             }
             _attention.SetTarget(GazeChannel.Inspection, _referencePoint);
-            if (now - _stateStartedAt >= ReferenceHoldSeconds)
-                EndAttention();
             return;
         }
 

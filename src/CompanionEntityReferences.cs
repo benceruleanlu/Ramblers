@@ -4,20 +4,22 @@ using System.Collections.Generic;
 namespace Ramblers;
 
 /// <summary>
-/// Exact prop identities that were exposed to the model as game context for a
-/// turn. The model may select an ID semantically; deterministic action code
-/// resolves only the matching frozen object and never substitutes a neighbour.
+/// Exact prop and interaction identities exposed as game context for one turn.
+/// The model may select an ID semantically; deterministic action code resolves
+/// only the matching frozen object and never substitutes a neighbour.
 /// </summary>
 internal sealed class CompanionEntityReferenceSet
 {
-    private readonly Dictionary<string, CompanionInteractionTarget> _props =
-        new Dictionary<string, CompanionInteractionTarget>(StringComparer.Ordinal);
-    private readonly Dictionary<string, CompanionPeckTarget> _interactables =
-        new Dictionary<string, CompanionPeckTarget>(StringComparer.Ordinal);
+    private readonly Dictionary<string, CompanionPropTarget> _props =
+        new Dictionary<string, CompanionPropTarget>(StringComparer.Ordinal);
+    private readonly Dictionary<string, CompanionInteractionReference>
+        _interactions =
+            new Dictionary<string, CompanionInteractionReference>(
+                StringComparer.Ordinal);
 
-    internal int Count => _props.Count + _interactables.Count;
+    internal int Count => _props.Count + _interactions.Count;
 
-    internal bool Add(CompanionInteractionTarget target)
+    internal bool Add(CompanionPropTarget target)
     {
         if (target == null || string.IsNullOrEmpty(target.StableId))
             return false;
@@ -27,7 +29,7 @@ internal sealed class CompanionEntityReferenceSet
 
     internal bool TryResolve(
         string stableId,
-        out CompanionInteractionTarget target,
+        out CompanionPropTarget target,
         out string error)
     {
         target = null;
@@ -51,31 +53,31 @@ internal sealed class CompanionEntityReferenceSet
         return true;
     }
 
-    internal bool Add(CompanionPeckTarget target)
+    internal bool Add(CompanionInteractionReference reference)
     {
-        if (target == null || string.IsNullOrEmpty(target.ReferenceId))
+        if (reference == null || string.IsNullOrEmpty(reference.StableId))
             return false;
-        _interactables[target.ReferenceId] = target;
+        _interactions[reference.StableId] = reference;
         return true;
     }
 
     internal bool TryResolveInteraction(
         string stableId,
-        out CompanionPeckTarget target,
+        CompanionAffordanceCandidates candidates,
+        out CompanionAffordanceTarget target,
         out string error)
     {
         target = null;
         error = null;
+        CompanionInteractionReference reference;
         if (string.IsNullOrWhiteSpace(stableId) ||
-            !_interactables.TryGetValue(stableId, out target))
+            !_interactions.TryGetValue(stableId, out reference))
         {
-            target = null;
             error = "object_not_known";
             return false;
         }
 
-        UnityEngine.Vector3 point;
-        if (!target.TryGetCurrentPoint(out point, out error))
+        if (!reference.TryResolve(candidates, out target, out error))
         {
             target = null;
             error = error ?? "object_not_available";
@@ -83,4 +85,5 @@ internal sealed class CompanionEntityReferenceSet
         }
         return true;
     }
+
 }
