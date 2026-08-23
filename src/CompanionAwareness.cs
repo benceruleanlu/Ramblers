@@ -17,6 +17,8 @@ internal sealed class CompanionAwarenessTurnContext
     internal int NearbyPropCount;
     internal int NearbyPlayerCount;
     internal int RememberedPropCount;
+    internal int NearbyInteractableCount;
+    internal int RememberedInteractableCount;
     internal float VisualAgeSeconds = -1f;
     internal CompanionEntityReferenceSet EntityReferences;
     internal long DeliveredThroughEventSequence;
@@ -126,9 +128,31 @@ internal sealed class CompanionAwareness
         public string current_bearing_from_companion { get; set; }
     }
 
+    private sealed class NearbyInteractablePayload
+    {
+        public string id { get; set; }
+        public string name { get; set; }
+        public string kind { get; set; }
+        public float distance_from_companion_m { get; set; }
+        public float distance_from_human_m { get; set; }
+        public float height_from_companion_m { get; set; }
+        public string bearing_from_companion { get; set; }
+    }
+
+    private sealed class RememberedInteractablePayload
+    {
+        public string id { get; set; }
+        public string name { get; set; }
+        public string kind { get; set; }
+        public float last_seen_seconds_ago { get; set; }
+        public float current_distance_from_companion_m { get; set; }
+        public float current_height_from_companion_m { get; set; }
+        public string current_bearing_from_companion { get; set; }
+    }
+
     private sealed class RememberedProp
     {
-        internal CompanionInteractionTarget Target;
+        internal CompanionPropTarget Target;
         internal string Name;
         internal float SeenAt;
     }
@@ -144,6 +168,8 @@ internal sealed class CompanionAwareness
     private readonly Queue<JournalEntry> _journal = new Queue<JournalEntry>();
     private readonly Dictionary<string, RememberedProp> _rememberedProps =
         new Dictionary<string, RememberedProp>(StringComparer.Ordinal);
+    private readonly CompanionInteractableDiscovery _interactableDiscovery =
+        new CompanionInteractableDiscovery();
     private readonly LogLatch _passiveFailureLog = new LogLatch();
     private readonly LogLatch _tickFailureLog = new LogLatch();
 
@@ -156,6 +182,7 @@ internal sealed class CompanionAwareness
     private HeldObservation _humanHeld;
     private HeldObservation _companionHeld;
     private bool _companionCarried;
+    private bool _companionCarryingHuman;
     private bool _followRequested;
     private CompanionPosture _posture;
     private string _activeAction;
@@ -194,6 +221,7 @@ internal sealed class CompanionAwareness
         _humanHeld = CaptureHeld(human);
         _companionHeld = CaptureHeld(body?.Character);
         _companionCarried = actions?.IsCarried == true;
+        _companionCarryingHuman = actions?.IsCarryingHuman == true;
         _followRequested = actions?.FollowRequested == true;
         _posture = actions == null
             ? CompanionPosture.Standing
@@ -252,6 +280,17 @@ internal sealed class CompanionAwareness
                     ? "the human picked up the companion"
                     : "the human released the companion");
             _companionCarried = carried;
+        }
+
+        var carryingHuman = _actions?.IsCarryingHuman == true;
+        if (carryingHuman != _companionCarryingHuman)
+        {
+            RecordEvent(
+                now,
+                carryingHuman
+                    ? "the companion picked up the human"
+                    : "the companion released the human");
+            _companionCarryingHuman = carryingHuman;
         }
 
         var followRequested = _actions?.FollowRequested == true;
@@ -409,6 +448,7 @@ internal sealed class CompanionAwareness
 
     internal bool TryTakeTurnContext(
         float now,
+        CompanionAffordanceCandidates affordanceCandidates,
         out CompanionAwarenessTurnContext context,
         out string error)
     {
@@ -437,6 +477,21 @@ internal sealed class CompanionAwareness
             now,
             nearbyPropIds,
             entityReferences);
+        CompanionInteractableObservation[] nearbyInteractableObservations;
+        CompanionInteractableObservation[] rememberedInteractableObservations;
+        _interactableDiscovery.Capture(
+            human,
+            _body,
+            affordanceCandidates,
+            now,
+            entityReferences,
+            out nearbyInteractableObservations,
+            out rememberedInteractableObservations);
+        var nearbyInteractables = ToNearbyInteractables(
+            nearbyInteractableObservations);
+        var rememberedInteractables = ToRememberedInteractables(
+            rememberedInteractableObservations,
+            now);
         var nearbyPlayers = CaptureNearbyPlayers(human);
         var recentEvents = CaptureUndeliveredEvents(now);
         var visualAge = _passiveImageBytes == null
@@ -470,6 +525,7 @@ internal sealed class CompanionAwareness
                 moving = _actions?.IsMoving == true,
                 grounded = IsGrounded(_body.Character),
                 carried_by_human = _actions?.IsCarried == true,
+                carrying_human = _actions?.IsCarryingHuman == true,
                 active_action = _actions?.ActiveJobName ?? "none",
                 jump_queued = _actions?.JumpQueued == true,
                 held_item = ToPayload(CaptureHeld(_body.Character))
@@ -491,6 +547,14 @@ internal sealed class CompanionAwareness
             },
             nearby_props = nearbyProps,
             recently_seen_props = rememberedProps,
+            nearby_interactables = nearbyInteractables,
+            recently_seen_interactables = rememberedInteractables,
+            interactable_discovery = new
+            {
+                bounded = true,
+                capability_boundary =
+                    CompanionInteractableDiscovery.CapabilityBoundary
+            },
             other_nearby_players = nearbyPlayers,
             recent_events = recentEvents,
             visual_memory = new
@@ -530,6 +594,8 @@ internal sealed class CompanionAwareness
             NearbyPropCount = nearbyProps.Length,
             NearbyPlayerCount = nearbyPlayers.Length,
             RememberedPropCount = rememberedProps.Length,
+            NearbyInteractableCount = nearbyInteractables.Length,
+            RememberedInteractableCount = rememberedInteractables.Length,
             EntityReferences = entityReferences,
             DeliveredThroughEventSequence = _nextEventSequence,
             PassiveCapturedAt = attachVisual ? _passiveCapturedAt : -1f,
@@ -560,11 +626,13 @@ internal sealed class CompanionAwareness
         _actions = null;
         _journal.Clear();
         _rememberedProps.Clear();
+        _interactableDiscovery.Clear();
         _nextEventSequence = 0;
         _lastDeliveredEventSequence = 0;
         _humanHeld = default;
         _companionHeld = default;
         _companionCarried = false;
+        _companionCarryingHuman = false;
         _followRequested = false;
         _posture = CompanionPosture.Standing;
         _activeAction = null;
@@ -711,6 +779,65 @@ internal sealed class CompanionAwareness
         return events.ToArray();
     }
 
+    private NearbyInteractablePayload[] ToNearbyInteractables(
+        CompanionInteractableObservation[] observations)
+    {
+        if (observations == null || observations.Length == 0)
+            return new NearbyInteractablePayload[0];
+
+        var payloads = new NearbyInteractablePayload[observations.Length];
+        for (var index = 0; index < observations.Length; index++)
+        {
+            var observation = observations[index];
+            var offset = observation.Point - _body.Position;
+            payloads[index] = new NearbyInteractablePayload
+            {
+                id = observation.Reference.StableId,
+                name = observation.Reference.Name,
+                kind = observation.Reference.Kind,
+                distance_from_companion_m = Round1(
+                    observation.CompanionDistance),
+                distance_from_human_m = Round1(observation.HumanDistance),
+                height_from_companion_m = Round1(offset.y),
+                bearing_from_companion = BearingLabel(
+                    _body.Transform.forward,
+                    offset)
+            };
+        }
+        return payloads;
+    }
+
+    private RememberedInteractablePayload[] ToRememberedInteractables(
+        CompanionInteractableObservation[] observations,
+        float now)
+    {
+        if (observations == null || observations.Length == 0)
+            return new RememberedInteractablePayload[0];
+
+        var payloads =
+            new RememberedInteractablePayload[observations.Length];
+        for (var index = 0; index < observations.Length; index++)
+        {
+            var observation = observations[index];
+            var offset = observation.Point - _body.Position;
+            payloads[index] = new RememberedInteractablePayload
+            {
+                id = observation.Reference.StableId,
+                name = observation.Reference.Name,
+                kind = observation.Reference.Kind,
+                last_seen_seconds_ago = Round1(
+                    Mathf.Max(0f, now - observation.SeenAt)),
+                current_distance_from_companion_m = Round1(
+                    observation.CompanionDistance),
+                current_height_from_companion_m = Round1(offset.y),
+                current_bearing_from_companion = BearingLabel(
+                    _body.Transform.forward,
+                    offset)
+            };
+        }
+        return payloads;
+    }
+
     private NearbyPropPayload[] CaptureNearbyProps(
         PlayerCharacter human,
         float now,
@@ -718,7 +845,7 @@ internal sealed class CompanionAwareness
     {
         var result = new List<NearbyPropPayload>();
         var capturedTargets =
-            new Dictionary<string, CompanionInteractionTarget>(StringComparer.Ordinal);
+            new Dictionary<string, CompanionPropTarget>(StringComparer.Ordinal);
         try
         {
             var props = Prop.allProps;
@@ -755,8 +882,8 @@ internal sealed class CompanionAwareness
                         : prop.isInInventory
                             ? "other_or_inventory"
                             : "none";
-                CompanionInteractionTarget entityTarget;
-                if (CompanionInteractionTarget.TryCaptureProp(
+                CompanionPropTarget entityTarget;
+                if (CompanionPropTarget.TryCaptureProp(
                         prop,
                         out entityTarget))
                 {
@@ -799,7 +926,7 @@ internal sealed class CompanionAwareness
             result.RemoveRange(MaximumNearbyProps, result.Count - MaximumNearbyProps);
         for (var index = 0; index < result.Count; index++)
         {
-            CompanionInteractionTarget target;
+            CompanionPropTarget target;
             if (!capturedTargets.TryGetValue(result[index].id, out target))
                 continue;
             entityReferences.Add(target);
@@ -820,7 +947,7 @@ internal sealed class CompanionAwareness
     {
         var result = new List<RememberedPropPayload>();
         var capturedTargets =
-            new Dictionary<string, CompanionInteractionTarget>(StringComparer.Ordinal);
+            new Dictionary<string, CompanionPropTarget>(StringComparer.Ordinal);
         var expired = new List<string>();
         foreach (var pair in _rememberedProps)
         {
@@ -861,7 +988,7 @@ internal sealed class CompanionAwareness
             result.RemoveRange(MaximumRememberedProps, result.Count - MaximumRememberedProps);
         for (var index = 0; index < result.Count; index++)
         {
-            CompanionInteractionTarget target;
+            CompanionPropTarget target;
             if (capturedTargets.TryGetValue(result[index].id, out target))
                 entityReferences.Add(target);
         }
@@ -1006,7 +1133,7 @@ internal sealed class CompanionAwareness
 
     private static string StablePropId(Prop prop)
     {
-        return CompanionInteractionTarget.StableIdFor(prop);
+        return CompanionPropTarget.StableIdFor(prop);
     }
 
     private static string StablePlayerId(PlayerCharacter player)

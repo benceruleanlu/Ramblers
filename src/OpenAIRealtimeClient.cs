@@ -70,6 +70,7 @@ internal sealed class RealtimeClientEvent
     internal RealtimeClientEventType Type;
     internal RealtimeAudioPacket AudioPacket;
     internal long TurnId;
+    internal bool HasFunctionCallBatch;
 }
 
 internal sealed class RealtimeAudioTruncation
@@ -608,11 +609,14 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                         out completedResponse)
                     ? GetString(completedResponse, "status")
                     : null;
-                QueueFunctionCallBatch(root, completedTurnId);
+                var hasFunctionCallBatch = QueueFunctionCallBatch(
+                    root,
+                    completedTurnId);
                 _clientEvents.Enqueue(new RealtimeClientEvent
                 {
                     Type = RealtimeClientEventType.ResponseCompleted,
-                    TurnId = completedTurnId
+                    TurnId = completedTurnId,
+                    HasFunctionCallBatch = hasFunctionCallBatch
                 });
                 MarkResponseDone(responseStatus);
                 return;
@@ -903,7 +907,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             .Replace("\u00a0", " ");
     }
 
-    private void QueueFunctionCallBatch(JsonElement root, long turnId)
+    private bool QueueFunctionCallBatch(JsonElement root, long turnId)
     {
         JsonElement response;
         JsonElement output;
@@ -911,7 +915,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             !response.TryGetProperty("output", out output) ||
             output.ValueKind != JsonValueKind.Array)
         {
-            return;
+            return false;
         }
 
         JsonElement responseStatus;
@@ -921,7 +925,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
                 "completed",
                 StringComparison.Ordinal))
         {
-            return;
+            return false;
         }
 
         var calls = new List<RealtimeFunctionCall>();
@@ -960,7 +964,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         }
 
         if (calls.Count == 0)
-            return;
+            return false;
 
         var responseId = GetString(response, "id");
         if (string.IsNullOrEmpty(responseId))
@@ -974,6 +978,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             TurnId = turnId,
             Calls = calls.ToArray()
         });
+        return true;
     }
 
     /// <summary>

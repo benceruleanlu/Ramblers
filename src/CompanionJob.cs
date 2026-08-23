@@ -28,13 +28,47 @@ internal enum CompanionKickStrength
 }
 
 /// <summary>
-/// The deliberate horizontal launch intent selected for a kick. The target
-/// prop remains the immutable response-turn referent regardless of direction.
+/// The deliberate launch intent selected for a kick. The target prop remains
+/// the immutable response-turn referent regardless of direction; a referenced
+/// destination is frozen independently at the same turn boundary.
 /// </summary>
 internal enum CompanionKickDirection
 {
     AwayFromCompanion,
-    TowardHuman
+    TowardHuman,
+    TowardReference
+}
+
+/// <summary>
+/// One canonical representation for model arguments and structured telemetry.
+/// Keeping this at the typed boundary prevents routers, jobs, and audits from
+/// inventing different spellings for the same physical intent.
+/// </summary>
+internal static class CompanionKickDirectionProtocol
+{
+    internal static string ToWireValue(
+        this CompanionKickDirection direction)
+    {
+        return direction == CompanionKickDirection.TowardReference
+            ? "toward_reference"
+            : direction == CompanionKickDirection.TowardHuman
+                ? "toward_human"
+                : "away_from_companion";
+    }
+}
+
+/// <summary>
+/// A confirmed hands-state transition produced by a physical job. The turn
+/// reference applies this only after the job has verified the exact native
+/// postcondition, allowing a continuation to compose actions without scanning
+/// the live world for a replacement target.
+/// </summary>
+internal enum CompanionTurnHandsTransition
+{
+    None,
+    HoldingExactProp,
+    HandsEmpty,
+    HoldingExactPlayer
 }
 
 /// <summary>
@@ -46,6 +80,9 @@ internal sealed class CompanionJobCompletion
     internal AgentToolResult Result;
     internal AgentContinuationItem[] Continuation;
     internal bool RetainUntilAssistantAudio;
+    internal CompanionTurnHandsTransition HandsTransition;
+    internal CompanionPropTarget ExactProp;
+    internal CompanionPlayerTarget ExactPlayer;
 
     internal static CompanionJobCompletion Failed(string error)
     {
@@ -53,7 +90,8 @@ internal sealed class CompanionJobCompletion
         {
             Result = AgentToolResult.Failure(error),
             Continuation = null,
-            RetainUntilAssistantAudio = false
+            RetainUntilAssistantAudio = false,
+            HandsTransition = CompanionTurnHandsTransition.None
         };
     }
 }
@@ -75,10 +113,15 @@ internal sealed class CompanionJobHandle
 internal sealed class CompanionJobRequest
 {
     internal string ActionName;
+    internal string CallId;
     internal long TurnId;
-    internal CompanionInteractionTarget InteractionTarget;
+    internal CompanionPropTarget PropTarget;
     internal CompanionInspectionReferent InspectionReferent;
-    internal CompanionPeckTarget PeckTarget;
+    internal CompanionInspectionReferent MoveDestination;
+    internal CompanionInspectionReferent KickDestination;
+    internal CompanionAffordanceTarget AffordanceTarget;
+    internal CompanionPlayerTarget PlayerTarget;
+    internal CompanionInteractionIntent InteractionIntent;
     internal CompanionKickStrength KickStrength;
     internal CompanionKickDirection KickDirection;
 }
@@ -92,13 +135,82 @@ internal sealed class CompanionJobRequest
 internal sealed class CompanionTurnReference
 {
     internal long TurnId;
-    internal CompanionInteractionTarget Target;
+    internal CompanionPropTarget Target;
     internal string CaptureError;
+    internal CompanionPropTarget CompanionHeldTarget;
+    internal string CompanionHeldCaptureError;
     internal CompanionInspectionCandidates InspectionCandidates;
     internal string InspectionCaptureError;
-    internal CompanionPeckCandidates PeckCandidates;
-    internal string PeckCaptureError;
+    internal CompanionAffordanceCandidates AffordanceCandidates;
+    internal string AffordanceCaptureError;
+    internal CompanionPlayerTarget HumanPlayerTarget;
     internal CompanionEntityReferenceSet EntityReferences;
+
+    /// <summary>
+    /// Advances only the transient hands capability after an exact physical
+    /// postcondition. The spoken world reference remains frozen; no camera or
+    /// nearest-entity query is performed here.
+    /// </summary>
+    internal bool TryApply(
+        CompanionJobCompletion completion,
+        out string error)
+    {
+        error = null;
+        if (completion == null || completion.Result == null ||
+            !completion.Result.Ok ||
+            completion.HandsTransition == CompanionTurnHandsTransition.None)
+        {
+            return true;
+        }
+
+        if (completion.HandsTransition ==
+            CompanionTurnHandsTransition.HoldingExactProp)
+        {
+            if (completion.ExactProp == null)
+            {
+                error = "turn_state_transition_invalid";
+                return false;
+            }
+
+            CompanionAffordanceCandidates advanced;
+            if (!CompanionController.TryAdvanceHeldPropCandidates(
+                    AffordanceCandidates,
+                    completion.ExactProp,
+                    out advanced,
+                    out error))
+            {
+                return false;
+            }
+
+            CompanionHeldTarget = completion.ExactProp;
+            CompanionHeldCaptureError = null;
+            AffordanceCandidates = advanced;
+            AffordanceCaptureError = null;
+            return true;
+        }
+
+        if (completion.HandsTransition ==
+            CompanionTurnHandsTransition.HoldingExactPlayer)
+        {
+            if (completion.ExactPlayer == null || HumanPlayerTarget == null ||
+                !completion.ExactPlayer.IsStillTheSamePlayer(
+                    HumanPlayerTarget.Player))
+            {
+                error = "turn_state_transition_invalid";
+                return false;
+            }
+        }
+
+        CompanionHeldTarget = null;
+        CompanionHeldCaptureError =
+            completion.HandsTransition ==
+            CompanionTurnHandsTransition.HoldingExactPlayer
+                ? "companion_held_item_not_prop"
+                : "companion_held_item_unavailable";
+        AffordanceCandidates = AffordanceCandidates?.WithoutCompanionHeldProp(
+            CompanionHeldCaptureError);
+        return true;
+    }
 }
 
 /// <summary>
@@ -129,6 +241,14 @@ internal interface ICompanionJob
 
     bool IsActive { get; }
 
+    /// <summary>
+    /// Whether this job's current completion may be consumed while it still
+    /// owns capabilities. This is a narrow state-dependent exception for a
+    /// successful pickup/carry hold or inspection presentation; reconciliation
+    /// failures and cancellation never use it.
+    /// </summary>
+    bool MayPublishCompletionWhileActive { get; }
+
     /// <summary>How long the agent boundary should wait before giving up.</summary>
     float TimeoutSeconds { get; }
 
@@ -154,4 +274,12 @@ internal interface ICompanionJob
     void Fail(string error, float now);
 
     void Release();
+}
+
+/// <summary>
+/// Marker for jobs whose stock Big Walk action requires a standing pose even
+/// though the companion could otherwise locomote while crouched.
+/// </summary>
+internal interface ICompanionStandingJob
+{
 }

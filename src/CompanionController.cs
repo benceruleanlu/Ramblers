@@ -13,6 +13,8 @@ namespace Ramblers;
 /// </summary>
 internal sealed class CompanionController : MonoBehaviour
 {
+    private const float DetachedJobSettlementMaximumSeconds = 5f;
+
     private readonly CompanionActionCoordinator _actions = new CompanionActionCoordinator();
     private readonly CompanionAwareness _awareness = new CompanionAwareness();
     private readonly LogLatch _verificationLog = new LogLatch();
@@ -22,8 +24,8 @@ internal sealed class CompanionController : MonoBehaviour
     private float _nextPoll;
     private float _verifyAt;
     private bool _hasSpawnedBot;
-    private long _activeJobToken;
-    private string _activeJobName;
+    private readonly CompanionJobLease _jobLease = new CompanionJobLease();
+    private CompanionJobCompletion _completionAwaitingSettlement;
 
     private static CompanionController _activeController;
     private static long _nextJobToken;
@@ -70,9 +72,11 @@ internal sealed class CompanionController : MonoBehaviour
         AgentToolResult failure;
         if (!TryGetCommandTarget(out controller, out failure))
             return failure;
-        controller._activeJobToken = 0;
-        controller._activeJobName = null;
-        return controller._actions.CancelActiveWork(Time.realtimeSinceStartup);
+        var now = Time.realtimeSinceStartup;
+        var result = controller._actions.CancelActiveWork(now);
+        if (controller._jobLease.HasValue)
+            controller._jobLease.MarkCancellationRequested(now);
+        return result;
     }
 
     internal static bool TryBeginJob(
@@ -86,22 +90,36 @@ internal sealed class CompanionController : MonoBehaviour
         if (!TryGetCommandTarget(out controller, out failure))
             return false;
 
+        var now = Time.realtimeSinceStartup;
+        controller.RetireSettledJob(now, "before_begin");
+        if (controller._jobLease.HasValue)
+        {
+            failure = AgentToolResult.Failure(
+                (controller._jobLease.JobName ?? "action") +
+                "_in_progress");
+            return false;
+        }
         float timeoutSeconds;
         if (!controller._actions.TryBeginJob(
                 jobName,
                 request,
-                Time.realtimeSinceStartup,
+                now,
                 out timeoutSeconds,
                 out failure))
         {
             return false;
         }
 
-        controller._activeJobToken = ++_nextJobToken;
-        controller._activeJobName = jobName;
+        var token = ++_nextJobToken;
+        if (!controller._jobLease.TryBegin(token, jobName))
+        {
+            controller._actions.CancelJob(jobName, now);
+            failure = AgentToolResult.Failure("action_lease_unavailable");
+            return false;
+        }
         handle = new CompanionJobHandle
         {
-            Token = controller._activeJobToken,
+            Token = token,
             TimeoutSeconds = timeoutSeconds
         };
         return true;
@@ -112,8 +130,8 @@ internal sealed class CompanionController : MonoBehaviour
     /// returned immutable object to one response turn before any model tool is
     /// allowed to dispatch it.
     /// </summary>
-    internal static bool TryCaptureInteractionTarget(
-        out CompanionInteractionTarget target,
+    internal static bool TryCapturePropTarget(
+        out CompanionPropTarget target,
         out string error)
     {
         target = null;
@@ -134,11 +152,58 @@ internal sealed class CompanionController : MonoBehaviour
             return false;
         }
 
-        return CompanionInteractionTarget.TryResolve(
+        return CompanionPropTarget.TryResolve(
             human,
             body,
             out target,
             out error);
+    }
+
+    /// <summary>
+    /// Freezes the exact prop already in the companion's hands at the utterance
+    /// boundary. This is separate from gaze selection so a request such as
+    /// a goal-directed kick can bind the prop and destination without
+    /// asking one reference token to mean both things.
+    /// </summary>
+    internal static bool TryCaptureCompanionHeldTarget(
+        out CompanionPropTarget target,
+        out string error)
+    {
+        target = null;
+        error = null;
+
+        var controller = _activeController;
+        var body = controller == null ? null : controller._body;
+        if (body == null || !body.IsAlive || !controller._hasSpawnedBot)
+        {
+            error = "bot_not_spawned";
+            return false;
+        }
+
+        var hands = body.Character == null ? null : body.Character.hands;
+        if (hands == null)
+        {
+            error = "hands_unavailable";
+            return false;
+        }
+
+        if (hands.heldProp == null)
+        {
+            error = hands.heldCharacter == null
+                ? "companion_held_item_unavailable"
+                : "companion_held_item_not_prop";
+            return false;
+        }
+
+        if (!CompanionPropTarget.TryCaptureHeldProp(
+                hands.heldProp,
+                out target))
+        {
+            error = "companion_held_item_unavailable";
+            return false;
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -179,8 +244,8 @@ internal sealed class CompanionController : MonoBehaviour
     /// for the current utterance: the human's world reference and the prop
     /// already in the companion's hands.
     /// </summary>
-    internal static bool TryCapturePeckCandidates(
-        out CompanionPeckCandidates candidates,
+    internal static bool TryCaptureAffordanceCandidates(
+        out CompanionAffordanceCandidates candidates,
         out string error)
     {
         candidates = null;
@@ -202,7 +267,7 @@ internal sealed class CompanionController : MonoBehaviour
 
         try
         {
-            return CompanionPeckCandidates.TryCapture(
+            return CompanionAffordanceCandidates.TryCapture(
                 human,
                 body,
                 out candidates,
@@ -218,10 +283,71 @@ internal sealed class CompanionController : MonoBehaviour
     }
 
     /// <summary>
+    /// Materializes the held-item capability after a pickup has confirmed the
+    /// exact prop from this turn. This validates that same identity in the
+    /// companion's hands and never recaptures an arbitrary live prop.
+    /// </summary>
+    internal static bool TryAdvanceHeldPropCandidates(
+        CompanionAffordanceCandidates current,
+        CompanionPropTarget exactProp,
+        out CompanionAffordanceCandidates advanced,
+        out string error)
+    {
+        advanced = null;
+        error = null;
+        var controller = _activeController;
+        var body = controller == null ? null : controller._body;
+        if (body == null || !body.IsAlive || !controller._hasSpawnedBot)
+        {
+            error = "bot_not_spawned";
+            return false;
+        }
+        if (current == null || exactProp == null)
+        {
+            error = "turn_state_transition_invalid";
+            return false;
+        }
+
+        return current.TryWithCompanionHeldProp(
+            body,
+            exactProp,
+            out advanced,
+            out error);
+    }
+
+    internal static bool TryCaptureHumanPlayerTarget(
+        out CompanionPlayerTarget target,
+        out string error)
+    {
+        target = null;
+        error = null;
+        var controller = _activeController;
+        var body = controller == null ? null : controller._body;
+        if (body == null || !body.IsAlive || !controller._hasSpawnedBot)
+        {
+            error = "bot_not_spawned";
+            return false;
+        }
+
+        var human = WorldManager.localPlayerCharacter;
+        if (human == null || human.gameObject == body.GameObject)
+        {
+            error = "human_player_unavailable";
+            return false;
+        }
+        return CompanionPlayerTarget.TryCapture(
+            human,
+            body,
+            out target,
+            out error);
+    }
+
+    /// <summary>
     /// Freezes one compact nonverbal world snapshot for the current utterance
     /// and consumes at most one fresh passive visual-memory frame.
     /// </summary>
     internal static bool TryTakeAwarenessTurnContext(
+        CompanionAffordanceCandidates affordanceCandidates,
         out CompanionAwarenessTurnContext context,
         out string error)
     {
@@ -239,6 +365,7 @@ internal sealed class CompanionController : MonoBehaviour
         {
             return controller._awareness.TryTakeTurnContext(
                 Time.realtimeSinceStartup,
+                affordanceCandidates,
                 out context,
                 out error);
         }
@@ -272,20 +399,61 @@ internal sealed class CompanionController : MonoBehaviour
             return true;
         }
 
-        if (operationToken == 0 || controller._activeJobToken != operationToken)
+        if (!controller._jobLease.Matches(operationToken))
         {
-            // The job this caller was waiting on was cancelled or replaced.
+            // The caller belongs to a stale body or genuinely replaced lease.
+            // Ordinary cancellation retains its matching lease until settlement.
             completion = CompanionJobCompletion.Failed("cancelled");
             return true;
         }
 
+        var now = Time.realtimeSinceStartup;
+        var trackedJobName = controller._jobLease.JobName;
+        if (controller._completionAwaitingSettlement != null)
+        {
+            if (!controller.TryConcludeTrackedJob(
+                    now,
+                    "completion_publication",
+                    false))
+            {
+                completion = null;
+                return false;
+            }
+
+            completion = controller._completionAwaitingSettlement;
+            controller._completionAwaitingSettlement = null;
+            controller.RevalidateCompletionForPublication(
+                ref completion,
+                operationToken,
+                trackedJobName);
+            return true;
+        }
+
         if (!controller._actions.TryTakeJobCompletion(
-                controller._activeJobName,
-                Time.realtimeSinceStartup,
+                controller._jobLease.JobName,
+                now,
                 out completion))
         {
-            return false;
+            if (!controller._actions.IsJobSettled(
+                    controller._jobLease.JobName))
+            {
+                return false;
+            }
+
+            // Cancellation deliberately clears any pre-cancel completion.
+            // Once the exact job has released every capability, synthesize its
+            // terminal model-facing result without detaching the token early.
+            completion = CompanionJobCompletion.Failed("cancelled");
+            Plugin.Logger.LogInfo(
+                $"[ACTION] JOB_CANCEL_SETTLED token={operationToken}, " +
+                $"job={controller._jobLease.JobName ?? "none"}.");
+            controller._actions.ConcludeJob(controller._jobLease.JobName, now);
+            controller.ClearActiveJobTracking();
+            return true;
         }
+
+        if (completion == null)
+            return false;
 
         // Retention is an explicit part of the completion contract. Inspection
         // keeps its gaze while the model begins describing the image; physical
@@ -297,45 +465,143 @@ internal sealed class CompanionController : MonoBehaviour
                                         completion.RetainUntilAssistantAudio;
         if (!retainUntilAssistantAudio)
         {
-            if (completion != null && completion.Result != null &&
-                completion.Result.Ok)
+            controller._completionAwaitingSettlement = completion;
+            completion = null;
+            if (!controller.TryConcludeTrackedJob(
+                    now,
+                    "completion_publication",
+                    false))
             {
-                controller._actions.ConcludeJob(
-                    controller._activeJobName,
-                    Time.realtimeSinceStartup);
+                return false;
             }
-            controller._activeJobToken = 0;
-            controller._activeJobName = null;
+            completion = controller._completionAwaitingSettlement;
+            controller._completionAwaitingSettlement = null;
         }
+        controller.RevalidateCompletionForPublication(
+            ref completion,
+            operationToken,
+            trackedJobName);
         return true;
+    }
+
+    private void RevalidateCompletionForPublication(
+        ref CompanionJobCompletion completion,
+        long operationToken,
+        string jobName)
+    {
+        if (completion == null || completion.Result == null ||
+            !completion.Result.Ok)
+        {
+            return;
+        }
+
+        var hands = _body == null || !_body.IsAlive ||
+                    _body.Character == null
+            ? null
+            : _body.Character.hands;
+        var exactPropHeld = hands != null &&
+                            completion.ExactProp != null &&
+                            completion.ExactProp.IsStillTheSameProp(
+                                hands.heldProp);
+        var exactPlayerHeld = hands != null &&
+                              completion.ExactPlayer != null &&
+                              completion.ExactPlayer.IsStillTheSamePlayer(
+                                  hands.heldCharacter);
+        var handsEmpty = hands != null && hands.heldProp == null &&
+                         hands.heldCharacter == null;
+        if (CompanionJobSettlementProtocol.IsCompletionTransitionCurrent(
+                completion.HandsTransition,
+                exactPropHeld,
+                exactPlayerHeld,
+                handsEmpty))
+        {
+            return;
+        }
+
+        var transition = completion.HandsTransition;
+        Plugin.Logger.LogWarning(
+            $"[ACTION] JOB_COMPLETION_INVALIDATED " +
+            $"token={operationToken}, job={jobName ?? "none"}, " +
+            $"transition={transition}, reason=native_state_changed.");
+        completion = CompanionJobCompletion.Failed(
+            "turn_state_transition_not_confirmed");
     }
 
     internal static void CancelJob(long operationToken)
     {
         var controller = _activeController;
-        if (controller != null && operationToken != 0 &&
-            controller._activeJobToken == operationToken)
+        if (controller != null && controller._jobLease.Matches(operationToken))
         {
+            var now = Time.realtimeSinceStartup;
+            controller._completionAwaitingSettlement = null;
             controller._actions.CancelJob(
-                controller._activeJobName,
-                Time.realtimeSinceStartup);
-            controller._activeJobToken = 0;
-            controller._activeJobName = null;
+                controller._jobLease.JobName,
+                now);
+            controller._jobLease.MarkCancellationRequested(now);
         }
     }
 
-    internal static void ConcludeJob(long operationToken)
+    /// <summary>
+    /// Cancels a job whose realtime client is going away, then transfers the
+    /// settlement wait to the controller so the operation cannot be orphaned.
+    /// </summary>
+    internal static bool DetachJob(long operationToken)
     {
         var controller = _activeController;
-        if (controller != null && operationToken != 0 &&
-            controller._activeJobToken == operationToken)
+        if (controller == null || !controller._jobLease.Matches(operationToken))
         {
-            controller._actions.ConcludeJob(
-                controller._activeJobName,
-                Time.realtimeSinceStartup);
-            controller._activeJobToken = 0;
-            controller._activeJobName = null;
+            return false;
         }
+
+        var now = Time.realtimeSinceStartup;
+        if (!controller._jobLease.CancellationRequested)
+            controller._actions.CancelJob(controller._jobLease.JobName, now);
+        controller._jobLease.MarkDetached(now);
+        Plugin.Logger.LogInfo(
+            $"[ACTION] JOB_SETTLEMENT_DETACHED token={operationToken}, " +
+            $"job={controller._jobLease.JobName ?? "none"}.");
+        return true;
+    }
+
+    internal static bool AbandonJobSettlement(
+        long operationToken,
+        string reason)
+    {
+        var controller = _activeController;
+        if (controller == null || !controller._jobLease.Matches(operationToken))
+        {
+            return false;
+        }
+
+        var jobName = controller._jobLease.JobName;
+        controller._actions.ConcludeJob(jobName, Time.realtimeSinceStartup);
+        if (!controller._actions.IsJobSettled(jobName))
+        {
+            Plugin.Logger.LogError(
+                $"[ACTION] JOB_SETTLEMENT_ABANDON_FAILED token={operationToken}, " +
+                $"job={jobName ?? "none"}, reason={reason ?? "unknown"}.");
+            return false;
+        }
+        controller.ClearActiveJobTracking();
+        Plugin.Logger.LogWarning(
+            $"[ACTION] JOB_SETTLEMENT_ABANDONED token={operationToken}, " +
+            $"job={jobName ?? "none"}, reason={reason ?? "unknown"}, " +
+            "disposition=ownership_returned_to_stock_state.");
+        return true;
+    }
+
+    internal static bool ConcludeJob(long operationToken)
+    {
+        var controller = _activeController;
+        if (controller == null || operationToken == 0 ||
+            !controller._jobLease.Matches(operationToken))
+        {
+            return true;
+        }
+        return controller.TryConcludeTrackedJob(
+            Time.realtimeSinceStartup,
+            "bridge_conclusion",
+            true);
     }
 
     /// <summary>
@@ -451,6 +717,7 @@ internal sealed class CompanionController : MonoBehaviour
         try
         {
             _actions.TickLateFrame(now);
+            ReapDetachedJob(now);
         }
         catch (Exception exception)
         {
@@ -522,8 +789,7 @@ internal sealed class CompanionController : MonoBehaviour
                 networkTransform);
             // A controller can survive a body replacement. Invalidating the
             // active token prevents an old deferred call from targeting it.
-            _activeJobToken = 0;
-            _activeJobName = null;
+            ClearActiveJobTracking();
             _hasSpawnedBot = true;
             _actions.Bind(_body, localPlayer, now);
             try
@@ -566,8 +832,7 @@ internal sealed class CompanionController : MonoBehaviour
         _actions.Release();
         _body = null;
         _hasSpawnedBot = false;
-        _activeJobToken = 0;
-        _activeJobName = null;
+        ClearActiveJobTracking();
         _verificationLog.Reset();
         _awarenessLateLog.Reset();
         Plugin.Logger.LogInfo("[RAMBLERS] Companion left the scene; controller state reset.");
@@ -577,8 +842,7 @@ internal sealed class CompanionController : MonoBehaviour
     {
         if (_activeController == this)
             _activeController = null;
-        _activeJobToken = 0;
-        _activeJobName = null;
+        ClearActiveJobTracking();
 
         try
         {
@@ -590,6 +854,94 @@ internal sealed class CompanionController : MonoBehaviour
         {
             // The network object may already be gone during scene shutdown.
         }
+    }
+
+    private void RetireSettledJob(float now, string reason)
+    {
+        if (!_jobLease.HasValue ||
+            !_actions.IsJobSettled(_jobLease.JobName))
+        {
+            return;
+        }
+
+        var token = _jobLease.Token;
+        var jobName = _jobLease.JobName;
+        CompanionJobCompletion ignored;
+        _actions.TryTakeJobCompletion(jobName, now, out ignored);
+        _actions.ConcludeJob(jobName, now);
+        ClearActiveJobTracking();
+        Plugin.Logger.LogInfo(
+            $"[ACTION] JOB_TOKEN_RETIRED token={token}, " +
+            $"job={jobName ?? "none"}, reason={reason}.");
+    }
+
+    private void ReapDetachedJob(float now)
+    {
+        if (!_jobLease.IsDetached || !_jobLease.HasValue)
+            return;
+
+        if (_actions.IsJobSettled(_jobLease.JobName))
+        {
+            RetireSettledJob(now, "detached_reconciled");
+            return;
+        }
+
+        if (!_jobLease.DetachedSettlementTimedOut(
+                now,
+                DetachedJobSettlementMaximumSeconds))
+        {
+            return;
+        }
+
+        var token = _jobLease.Token;
+        var jobName = _jobLease.JobName;
+        _actions.ConcludeJob(jobName, now);
+        if (!_actions.IsJobSettled(jobName))
+        {
+            Plugin.Logger.LogError(
+                $"[ACTION] JOB_SETTLEMENT_ABANDON_FAILED token={token}, " +
+                $"job={jobName ?? "none"}, reason=detached_timeout.");
+            return;
+        }
+        ClearActiveJobTracking();
+        Plugin.Logger.LogWarning(
+            $"[ACTION] JOB_SETTLEMENT_ABANDONED token={token}, " +
+            $"job={jobName ?? "none"}, reason=detached_timeout, " +
+            "disposition=ownership_returned_to_stock_state.");
+    }
+
+    private void ClearActiveJobTracking()
+    {
+        _jobLease.Clear();
+        _completionAwaitingSettlement = null;
+    }
+
+    private bool TryConcludeTrackedJob(
+        float now,
+        string reason,
+        bool detachOnFailure)
+    {
+        if (!_jobLease.HasValue)
+            return true;
+
+        var token = _jobLease.Token;
+        var jobName = _jobLease.JobName;
+        _actions.ConcludeJob(jobName, now);
+        var settled = _actions.IsJobSettled(jobName);
+        if (!CompanionJobSettlementProtocol.CanReleaseLeaseAfterConclude(
+                settled))
+        {
+            if (detachOnFailure)
+                _jobLease.MarkDetached(now);
+            Plugin.Logger.LogError(
+                $"[ACTION] JOB_CONCLUSION_PENDING token={token}, " +
+                $"job={jobName ?? "none"}, reason={reason}, " +
+                $"detached={detachOnFailure}.");
+            return false;
+        }
+
+        _jobLease.Clear();
+        return true;
     }
 
     private void LogVerification()

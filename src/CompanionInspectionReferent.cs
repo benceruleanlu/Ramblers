@@ -20,14 +20,14 @@ internal sealed class CompanionInspectionCandidates
     private const int MaximumRaycastSteps = 8;
 
     private readonly Vector3 _gazePoint;
-    private readonly CompanionInteractionTarget _heldItem;
+    private readonly CompanionPropTarget _heldItem;
 
     private CompanionInspectionCandidates(
         bool gazeAvailable,
         Vector3 gazePoint,
         bool gazeRayHit,
         string gazeCaptureError,
-        CompanionInteractionTarget heldItem,
+        CompanionPropTarget heldItem,
         string heldItemCaptureError)
     {
         GazeAvailable = gazeAvailable;
@@ -60,7 +60,7 @@ internal sealed class CompanionInspectionCandidates
             return false;
         }
 
-        CompanionInteractionTarget heldItem = null;
+        CompanionPropTarget heldItem = null;
         string heldItemError;
         if (human.hands == null)
         {
@@ -72,7 +72,7 @@ internal sealed class CompanionInspectionCandidates
                 ? "human_held_item_unavailable"
                 : "human_held_item_not_prop";
         }
-        else if (!CompanionInteractionTarget.TryCaptureHeldProp(
+        else if (!CompanionPropTarget.TryCaptureHeldProp(
                      human.hands.heldProp,
                      out heldItem))
         {
@@ -220,13 +220,13 @@ internal sealed class CompanionInspectionCandidates
 internal sealed class CompanionInspectionReferent
 {
     private readonly Vector3 _frozenPoint;
-    private readonly CompanionInteractionTarget _movingTarget;
+    private readonly CompanionPropTarget _movingTarget;
 
     private CompanionInspectionReferent(
         CompanionInspectionSource source,
         Vector3 frozenPoint,
         bool gazeRayHit,
-        CompanionInteractionTarget movingTarget)
+        CompanionPropTarget movingTarget)
     {
         Source = source;
         _frozenPoint = frozenPoint;
@@ -259,7 +259,7 @@ internal sealed class CompanionInspectionReferent
     }
 
     internal static CompanionInspectionReferent FromHeldItem(
-        CompanionInteractionTarget target)
+        CompanionPropTarget target)
     {
         return new CompanionInspectionReferent(
             CompanionInspectionSource.HumanHeldItem,
@@ -275,5 +275,15 @@ internal sealed class CompanionInspectionReferent
 
         point = _frozenPoint;
         return true;
+    }
+
+    internal static string GetFrozenPointReferenceId(Vector3 point)
+    {
+        return string.Format(
+            System.Globalization.CultureInfo.InvariantCulture,
+            "location:{0:R}:{1:R}:{2:R}",
+            point.x,
+            point.y,
+            point.z);
     }
 }

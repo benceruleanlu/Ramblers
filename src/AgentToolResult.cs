@@ -73,6 +73,7 @@ internal sealed class AgentToolResult
             (error.IndexOf("reference", System.StringComparison.Ordinal) >= 0 ||
              error.IndexOf("not_found", System.StringComparison.Ordinal) >= 0 ||
              error.IndexOf("_not_known", System.StringComparison.Ordinal) >= 0 ||
+             error.IndexOf("ambiguous", System.StringComparison.Ordinal) >= 0 ||
              error.IndexOf("target_lost", System.StringComparison.Ordinal) >= 0))
         {
             return "could_not_identify_object";

@@ -303,10 +303,58 @@ internal sealed class BreadcrumbTrail
         return total + Vector3.Distance(previous, to);
     }
 
+    /// <summary>
+    /// Approaches a recorded jump or drop at its actual waypoint, then switches
+    /// to the human's recorded travel tangent only inside the bounded traversal
+    /// corridor (or while that exact marker has an active commit). Replaying a
+    /// distant tangent can point away from the marker when the companion joined
+    /// the route from the side, which looks like pathfinding progress while the
+    /// remaining route grows longer.
+    /// </summary>
+    internal static Vector3 ResolveTraversalApproachDirection(
+        Vector3 from,
+        BreadcrumbPoint point,
+        bool traversalCommitted,
+        bool commitActive,
+        float jumpApproachDistance,
+        float dropApproachDistance,
+        out bool usingTravelDirection)
+    {
+        var toPoint = point.Position - from;
+        toPoint.y = 0f;
+        usingTravelDirection = false;
+        if (!point.RequiresJump && !point.RequiresDrop)
+            return toPoint;
+
+        var approachDistance = point.RequiresDrop
+            ? dropApproachDistance
+            : jumpApproachDistance;
+        var insideTraversalCorridor = toPoint.magnitude <= approachDistance;
+        if (point.TravelDirection.sqrMagnitude >= 0.0001f &&
+            ((!traversalCommitted && insideTraversalCorridor) ||
+             (traversalCommitted && commitActive)))
+        {
+            usingTravelDirection = true;
+            return point.TravelDirection;
+        }
+
+        return toPoint;
+    }
+
     internal static float HorizontalDistance(Vector3 from, Vector3 to)
     {
         var delta = to - from;
         delta.y = 0f;
         return delta.magnitude;
+    }
+
+    internal static bool ShouldReleasePriorTraversalCommit(
+        int selectedBreadcrumbSequence,
+        int committedTraversalSequence,
+        bool bodyGrounded)
+    {
+        return bodyGrounded &&
+               committedTraversalSequence != 0 &&
+               committedTraversalSequence != selectedBreadcrumbSequence;
     }
 }

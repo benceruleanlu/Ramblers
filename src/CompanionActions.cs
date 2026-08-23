@@ -33,6 +33,8 @@ internal sealed class CompanionActionCoordinator
     private readonly CompanionPostureActuator _posture = new CompanionPostureActuator();
     private readonly CompanionJumpActuator _jump = new CompanionJumpActuator();
     private readonly ICompanionJob[] _jobs;
+    private CompanionBody _body;
+    private PlayerCharacter _human;
 
     internal CompanionActionCoordinator()
     {
@@ -42,15 +44,19 @@ internal sealed class CompanionActionCoordinator
         _jobs = new ICompanionJob[]
         {
             new CompanionInspectionBehavior(_attention),
+            new CompanionMoveToLocationBehavior(_locomotion, _attention, _jump),
             new CompanionInteractBehavior(_locomotion, _attention, _jump),
             new CompanionPickupBehavior(_locomotion, _attention, _jump),
-            new CompanionKickBehavior(_attention)
+            new CompanionPlayerCarryBehavior(_locomotion, _attention, _jump),
+            new CompanionKickBehavior(_locomotion, _attention, _jump)
         };
     }
 
     internal bool FollowRequested => _follow.IsRequested;
     internal string FollowStateLabel => _follow.StateLabel;
     internal bool IsCarried => _follow.IsCarried;
+    internal bool IsCarryingHuman =>
+        CompanionFollowBehavior.IsBodyCarryingHuman(_body, CurrentHuman);
     internal CompanionPosture Posture => _posture.Current;
     internal bool JumpQueued => _jump.IsQueued;
     internal bool IsMoving =>
@@ -59,6 +65,8 @@ internal sealed class CompanionActionCoordinator
 
     internal void Bind(CompanionBody body, PlayerCharacter human, float now)
     {
+        _body = body;
+        _human = human;
         _locomotion.ResolveGaitSpeeds(body.Character);
         _locomotion.Bind(body, now);
         _attention.Bind(body, now);
@@ -81,6 +89,11 @@ internal sealed class CompanionActionCoordinator
     {
         for (var index = 0; index < _jobs.Length; index++)
             _jobs[index].Tick(now);
+        if (_posture.SynchronizeFromGame())
+        {
+            _locomotion.SetPosture(_posture.Current);
+            _attention.SetBodyTurnAllowed(BodyTurnAllowed);
+        }
         // The idle habit publishes underneath whatever a job is claiming, so it
         // resolves by channel priority rather than by asking what else is running.
         _ambientGaze.Tick(now, _locomotion.LastMovementIntent);
@@ -128,7 +141,11 @@ internal sealed class CompanionActionCoordinator
     internal AgentToolResult SetPosture(CompanionPosture posture, float now)
     {
         var locomotionHolder = FindHolder(JobResources.Locomotion);
-        if (posture == CompanionPosture.Sitting && locomotionHolder != null)
+        var conflictsWithLocomotionJob =
+            posture == CompanionPosture.Sitting ||
+            (posture != CompanionPosture.Standing &&
+             locomotionHolder is ICompanionStandingJob);
+        if (conflictsWithLocomotionJob && locomotionHolder != null)
         {
             return AgentToolResult.Failure(
                 locomotionHolder.ActiveName + "_in_progress");
@@ -151,7 +168,7 @@ internal sealed class CompanionActionCoordinator
     /// skips its head-yaw drain while PlayerSitter reports sitting, so a seated
     /// player looks around with their head alone.
     /// </summary>
-    private bool BodyTurnAllowed => _posture.Current != CompanionPosture.Sitting;
+    private bool BodyTurnAllowed => !_posture.BlocksBodyTurn;
 
     /// <summary>
     /// Reports whether the human and companion are mid-conversation, which pins
@@ -247,8 +264,11 @@ internal sealed class CompanionActionCoordinator
             return false;
         if (!job.TryBegin(now, request, out failure))
             return false;
-        if ((job.RequiredFor(request) & JobResources.Locomotion) != 0 &&
-            _posture.BlocksMovement &&
+        var requiresLocomotion =
+            (job.RequiredFor(request) & JobResources.Locomotion) != 0;
+        var requiresStanding = job is ICompanionStandingJob;
+        if (requiresLocomotion &&
+            (_posture.BlocksMovement || requiresStanding) &&
             !TryAutoStand(job.ActiveName, now, out failure))
         {
             job.Cancel(now);
@@ -268,11 +288,24 @@ internal sealed class CompanionActionCoordinator
     {
         completion = null;
         var job = FindJob(jobName);
-        if (job == null || !job.TryTakeCompletion(out completion))
+        if (job == null ||
+            !CompanionJobSettlementProtocol.CanPublishCompletion(
+                job.IsActive,
+                job.Held != JobResources.None,
+                job.MayPublishCompletionWhileActive) ||
+            !job.TryTakeCompletion(out completion))
             return false;
 
         RefreshMovementGate(now);
         return true;
+    }
+
+    internal bool IsJobSettled(string jobName)
+    {
+        var job = FindJob(jobName);
+        return job == null || CompanionJobSettlementProtocol.IsSettled(
+            job.IsActive,
+            job.Held != JobResources.None);
     }
 
     internal void ConcludeJob(string jobName, float now)
@@ -310,6 +343,8 @@ internal sealed class CompanionActionCoordinator
         _posture.Release();
         _locomotion.Release();
         _attention.Release();
+        _body = null;
+        _human = null;
     }
 
     internal void StopQuietly()
@@ -386,7 +421,8 @@ internal sealed class CompanionActionCoordinator
         out AgentToolResult failure)
     {
         failure = null;
-        if (_posture.Current == CompanionPosture.Standing)
+        if (_posture.Current == CompanionPosture.Standing &&
+            !_posture.NativePoseActive)
             return true;
 
         var standResult = _posture.Set(CompanionPosture.Standing);
@@ -409,7 +445,9 @@ internal sealed class CompanionActionCoordinator
     }
 
     private bool MovementAllowed =>
-        !_posture.BlocksMovement && FindHolder(JobResources.Locomotion) == null;
+        !_posture.BlocksMovement &&
+        FindHolder(JobResources.Locomotion) == null &&
+        !IsCarryingHuman;
 
     private string MovementBlocker
     {
@@ -418,7 +456,24 @@ internal sealed class CompanionActionCoordinator
             if (_posture.BlocksMovement)
                 return "posture";
             var holder = FindHolder(JobResources.Locomotion);
-            return holder == null ? null : holder.Name;
+            if (holder != null)
+                return holder.Name;
+            return IsCarryingHuman
+                ? "carrying_player"
+                : null;
+        }
+    }
+
+    private PlayerCharacter CurrentHuman
+    {
+        get
+        {
+            var human = WorldManager.localPlayerCharacter;
+            if (human == null)
+                human = _human;
+            return human == null || (_body != null && human == _body.Character)
+                ? null
+                : human;
         }
     }
 }

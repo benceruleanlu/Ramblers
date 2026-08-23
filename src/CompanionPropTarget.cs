@@ -9,7 +9,7 @@ namespace Ramblers;
 /// own transform, but it may never reacquire a different object with a raycast
 /// or nearest-item search.
 /// </summary>
-internal sealed class CompanionInteractionTarget
+internal sealed class CompanionPropTarget
 {
     internal const float MaximumHumanReferenceDistance = 40f;
 
@@ -20,7 +20,7 @@ internal sealed class CompanionInteractionTarget
     private readonly uint _networkId;
     private readonly Vector3 _localHitPoint;
 
-    private CompanionInteractionTarget(Prop prop, Vector3 hitPoint)
+    private CompanionPropTarget(Prop prop, Vector3 hitPoint)
     {
         Prop = prop;
         ReferenceId = prop.GetInstanceID();
@@ -52,7 +52,7 @@ internal sealed class CompanionInteractionTarget
     /// </summary>
     internal static bool TryCaptureProp(
         Prop prop,
-        out CompanionInteractionTarget target)
+        out CompanionPropTarget target)
     {
         target = null;
         if (prop == null || prop.gameObject == null ||
@@ -61,7 +61,7 @@ internal sealed class CompanionInteractionTarget
             return false;
         }
 
-        target = new CompanionInteractionTarget(prop, prop.transform.position);
+        target = new CompanionPropTarget(prop, prop.transform.position);
         return true;
     }
 
@@ -72,7 +72,7 @@ internal sealed class CompanionInteractionTarget
     /// </summary>
     internal static bool TryCaptureHeldProp(
         Prop prop,
-        out CompanionInteractionTarget target)
+        out CompanionPropTarget target)
     {
         target = null;
         if (prop == null || prop.gameObject == null ||
@@ -81,7 +81,7 @@ internal sealed class CompanionInteractionTarget
             return false;
         }
 
-        target = new CompanionInteractionTarget(
+        target = new CompanionPropTarget(
             prop,
             prop.transform.position);
         return true;
@@ -90,7 +90,7 @@ internal sealed class CompanionInteractionTarget
     internal static bool TryResolve(
         PlayerCharacter human,
         CompanionBody body,
-        out CompanionInteractionTarget target,
+        out CompanionPropTarget target,
         out string error)
     {
         target = null;
@@ -153,7 +153,7 @@ internal sealed class CompanionInteractionTarget
                 return false;
             }
 
-            target = new CompanionInteractionTarget(prop, hit.point);
+            target = new CompanionPropTarget(prop, hit.point);
             return true;
         }
 

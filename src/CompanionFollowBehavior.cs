@@ -72,13 +72,17 @@ internal sealed class CompanionFollowBehavior
     private float _humanJumpPeakY;
     private bool _pendingHumanDrop;
     private bool _bodyIsCarried;
+    private bool _bodyCarriesHuman;
     private int _currentBreadcrumbSequence;
     private int _jumpCommittedSequence;
     private int _jumpAttemptsForBreadcrumb;
     private int _dropCommittedSequence;
     private float _directTraversalUntil;
     private Vector3 _committedTraversalDirection;
+    private int _committedTraversalSequence;
     private Vector3 _lastRouteDirection;
+    private string _lastRouteMode = "waypoint";
+    private float _lastTargetHorizontalDistance;
 
     internal CompanionFollowBehavior(
         CompanionLocomotion locomotion,
@@ -93,6 +97,7 @@ internal sealed class CompanionFollowBehavior
     /// <summary>Whether a follow intent is outstanding, suspended or not.</summary>
     internal bool IsRequested => _followRequested;
     internal bool IsCarried => _bodyIsCarried;
+    internal bool IsCarryingHuman => _bodyCarriesHuman;
     internal string StateLabel => _state.ToString().ToLowerInvariant();
 
     internal void Bind(
@@ -113,6 +118,7 @@ internal sealed class CompanionFollowBehavior
         _nextTrailSample = now + TrailSampleInterval;
         _trail.Clear();
         _bodyIsCarried = false;
+        _bodyCarriesHuman = false;
         ResetTraversalState(human);
         if (human == null)
             return;
@@ -424,6 +430,7 @@ internal sealed class CompanionFollowBehavior
         {
             _directTraversalUntil = 0f;
             _committedTraversalDirection = Vector3.zero;
+            _committedTraversalSequence = 0;
             _locomotion.ResetProgressObservation(now);
             Plugin.Logger.LogInfo(
                 "[FOLLOW] ROUTE_SHORTCUT reason=later_breadcrumb_nearby " +
@@ -435,12 +442,13 @@ internal sealed class CompanionFollowBehavior
             _trail.Add(routeEndpoint, false, false);
 
         var breadcrumb = SelectTraversalLookahead(botPosition);
-        SelectBreadcrumb(breadcrumb);
+        SelectBreadcrumb(breadcrumb, now);
         _currentTarget = breadcrumb.Position;
         var toTarget = _currentTarget - botPosition;
         var targetVerticalDelta = toTarget.y;
         toTarget.y = 0f;
         var targetHorizontalDistance = toTarget.magnitude;
+        _lastTargetHorizontalDistance = targetHorizontalDistance;
         var targetDistance = Vector3.Distance(botPosition, _currentTarget);
         var desiredDirection = ResolveRouteDirection(
             botPosition,
@@ -466,8 +474,13 @@ internal sealed class CompanionFollowBehavior
         var previousAngle = _locomotion.LastSteeringAngle;
         SteeringStatus status;
         if (now >= _directTraversalUntil)
+        {
             _committedTraversalDirection = Vector3.zero;
+            _committedTraversalSequence = 0;
+        }
         var usedTraversalCommit = now < _directTraversalUntil;
+        if (usedTraversalCommit && !IsBodyGrounded)
+            _lastRouteMode = "airborne_commit";
         if (!usedTraversalCommit)
         {
             var jumpReason = breadcrumb.RequiresJump &&
@@ -501,6 +514,7 @@ internal sealed class CompanionFollowBehavior
                 _directTraversalUntil,
                 now + DropDirectionCommitSeconds);
             _committedTraversalDirection = desiredDirection;
+            _committedTraversalSequence = breadcrumb.Sequence;
             usedTraversalCommit = true;
             if (_dropCommittedSequence != breadcrumb.Sequence)
             {
@@ -652,15 +666,35 @@ internal sealed class CompanionFollowBehavior
              breadcrumb.Sequence == _jumpCommittedSequence) ||
             (breadcrumb.RequiresDrop &&
              breadcrumb.Sequence == _dropCommittedSequence);
-        if ((breadcrumb.RequiresJump || breadcrumb.RequiresDrop) &&
-            (!traversalCommitted || now < _directTraversalUntil) &&
-            breadcrumb.TravelDirection.sqrMagnitude >= 0.0001f)
+        bool usingTravelDirection;
+        var direction = BreadcrumbTrail.ResolveTraversalApproachDirection(
+            botPosition,
+            breadcrumb,
+            traversalCommitted,
+            traversalCommitted && now < _directTraversalUntil,
+            JumpApproachDistance,
+            DropCommitApproachDistance,
+            out usingTravelDirection);
+        _lastRouteMode = usingTravelDirection
+            ? traversalCommitted ? "transition_commit" : "transition_tangent"
+            : breadcrumb.RequiresJump || breadcrumb.RequiresDrop
+                ? "transition_approach"
+                : "waypoint";
+        if (usingTravelDirection && !traversalCommitted)
         {
-            return breadcrumb.TravelDirection;
+            var tangentDistance = BreadcrumbTrail.HorizontalDistance(
+                botPosition,
+                breadcrumb.Position);
+            var tangentCorridor = breadcrumb.RequiresDrop
+                ? DropCommitApproachDistance
+                : JumpApproachDistance;
+            Plugin.Logger.LogInfo(
+                "[FOLLOW] ROUTE_TANGENT " +
+                $"breadcrumb={breadcrumb.Sequence}, " +
+                $"kind={(breadcrumb.RequiresDrop ? "drop" : "jump")}, " +
+                $"horizontalDistance={tangentDistance.ToString("F3", System.Globalization.CultureInfo.InvariantCulture)}, " +
+                $"corridor={tangentCorridor.ToString("F3", System.Globalization.CultureInfo.InvariantCulture)}.");
         }
-
-        var direction = breadcrumb.Position - botPosition;
-        direction.y = 0f;
         if (direction.sqrMagnitude >= 0.0001f)
             return direction;
 
@@ -670,28 +704,66 @@ internal sealed class CompanionFollowBehavior
             direction = next.Position - botPosition;
             direction.y = 0f;
             if (direction.sqrMagnitude >= 0.0001f)
+            {
+                _lastRouteMode = "lookahead";
                 return direction;
+            }
         }
 
         if (_lastRouteDirection.sqrMagnitude >= 0.0001f)
+        {
+            _lastRouteMode = "last_direction";
             return _lastRouteDirection;
+        }
 
         direction = humanPosition - botPosition;
         direction.y = 0f;
         if (direction.sqrMagnitude >= 0.0001f)
+        {
+            _lastRouteMode = "human_fallback";
             return direction;
+        }
 
+        _lastRouteMode = "body_fallback";
         direction = _body.Transform.forward;
         direction.y = 0f;
         return direction;
     }
 
-    private void SelectBreadcrumb(BreadcrumbPoint breadcrumb)
+    private void SelectBreadcrumb(BreadcrumbPoint breadcrumb, float now)
     {
         if (_currentBreadcrumbSequence == breadcrumb.Sequence)
+        {
+            if (BreadcrumbTrail.ShouldReleasePriorTraversalCommit(
+                    breadcrumb.Sequence,
+                    _committedTraversalSequence,
+                    IsBodyGrounded))
+            {
+                Plugin.Logger.LogInfo(
+                    "[FOLLOW] TRAVERSAL_COMMIT_RELEASED " +
+                    $"reason=landed_after_target_change, " +
+                    $"owner={_committedTraversalSequence}, " +
+                    $"target={breadcrumb.Sequence}.");
+                _directTraversalUntil = 0f;
+                _committedTraversalDirection = Vector3.zero;
+                _committedTraversalSequence = 0;
+            }
             return;
+        }
 
         _currentBreadcrumbSequence = breadcrumb.Sequence;
+        // A jump/drop marker can be retired while its body is still airborne.
+        // Keep that exact bounded direction through landing, but never let a
+        // grounded follower carry an old marker's tangent into the next target.
+        var preserveAirborneCommit = !IsBodyGrounded &&
+                                     now < _directTraversalUntil &&
+                                     _committedTraversalDirection.sqrMagnitude >= 0.0001f;
+        if (!preserveAirborneCommit)
+        {
+            _directTraversalUntil = 0f;
+            _committedTraversalDirection = Vector3.zero;
+            _committedTraversalSequence = 0;
+        }
         _jumpCommittedSequence = 0;
         _jumpAttemptsForBreadcrumb = 0;
         _dropCommittedSequence = 0;
@@ -736,6 +808,7 @@ internal sealed class CompanionFollowBehavior
         _committedTraversalDirection = direction.sqrMagnitude < 0.0001f
             ? breadcrumb.TravelDirection
             : direction.normalized;
+        _committedTraversalSequence = breadcrumb.Sequence;
         _locomotion.ResetProgressObservation(now);
         Plugin.Logger.LogInfo(
             "[FOLLOW] JUMP_COMMIT " +
@@ -843,7 +916,10 @@ internal sealed class CompanionFollowBehavior
         _dropCommittedSequence = 0;
         _directTraversalUntil = 0f;
         _committedTraversalDirection = Vector3.zero;
+        _committedTraversalSequence = 0;
         _lastRouteDirection = Vector3.zero;
+        _lastRouteMode = "waypoint";
+        _lastTargetHorizontalDistance = 0f;
     }
 
     private void RecordHumanTrail()
@@ -895,29 +971,54 @@ internal sealed class CompanionFollowBehavior
     private bool UpdateCarryState(float now)
     {
         var human = GetHumanPlayer();
-        var heldCharacter = human?.hands == null
-            ? null
-            : human.hands.heldCharacter;
-        var isCarried = heldCharacter != null &&
-                        heldCharacter.gameObject == _body.GameObject;
-        if (isCarried == _bodyIsCarried)
-            return isCarried;
+        var isCarried = IsHumanCarryingBody(_body, human);
+        var isCarryingHuman = IsBodyCarryingHuman(_body, human);
+        if (isCarried == _bodyIsCarried &&
+            isCarryingHuman == _bodyCarriesHuman)
+        {
+            return isCarried || isCarryingHuman;
+        }
 
+        var wasCarryingHuman = _bodyCarriesHuman;
+        var wasSuspended = _state == FollowState.Suspended;
         _bodyIsCarried = isCarried;
-        if (isCarried)
+        _bodyCarriesHuman = isCarryingHuman;
+        if (isCarried || isCarryingHuman)
         {
             var discardedBreadcrumbs = _trail.Count;
             _trail.Clear();
             _humanJumpInProgress = false;
             _pendingHumanDrop = false;
-            if (_jump.IsQueued)
-                _jump.Cancel("companion was picked up");
-            StopForState(FollowState.Carried, now);
+            _jump.CancelFollow(isCarried
+                ? "companion was picked up"
+                : "companion picked up the human");
+            var carriedState = isCarried
+                ? FollowState.Carried
+                : FollowState.Suspended;
+            if (!wasSuspended)
+            {
+                StopForState(carriedState, now);
+            }
+            else
+            {
+                // Follow had already yielded locomotion to a job. Update only
+                // follow-owned state; the active job retains its movement and
+                // any action-owned recovery jump.
+                _directTraversalUntil = 0f;
+                _committedTraversalDirection = Vector3.zero;
+                _committedTraversalSequence = 0;
+                _state = carriedState;
+            }
+            _attention.ClearTarget(GazeChannel.Follow);
+            _suspensionReason = isCarryingHuman
+                ? "carrying_player"
+                : null;
             Plugin.Logger.LogInfo(
-                "[FOLLOW] CARRY_STARTED " +
-                "carrier=local_human, " +
+                (isCarried
+                    ? "[FOLLOW] CARRY_STARTED carrier=local_human, "
+                    : "[FOLLOW] PLAYER_CARRY_STARTED carrier=companion, ") +
                 $"discardedBreadcrumbs={discardedBreadcrumbs}, " +
-                "movementPaused=true.");
+                "followIntentRetained=true, movementPaused=true.");
             return true;
         }
 
@@ -926,11 +1027,13 @@ internal sealed class CompanionFollowBehavior
             _trail.Clear();
             _trail.Add(human.transform.position, false, false);
             ResetTraversalState(human);
-            _state = FollowState.Waiting;
-            _followAt = now;
-            _nextNavigationTick = now;
-            _attention.ResumeAt(now);
-            _locomotion.ResetProgressObservation(now);
+            // Keep the intent suspended until the coordinator re-evaluates its
+            // live movement gate. A directed movement job may still own
+            // locomotion at the exact frame a carry link clears.
+            _state = FollowState.Suspended;
+            _suspensionReason = wasCarryingHuman
+                ? "carrying_player"
+                : "carried";
         }
         else
         {
@@ -939,10 +1042,61 @@ internal sealed class CompanionFollowBehavior
         }
 
         Plugin.Logger.LogInfo(
-            "[FOLLOW] CARRY_RELEASED " +
+            (wasCarryingHuman
+                ? "[FOLLOW] PLAYER_CARRY_RELEASED "
+                : "[FOLLOW] CARRY_RELEASED ") +
             $"bot={_body.Position}, human={human?.transform.position}, " +
             $"routeRebased={_followRequested && human != null}.");
         return false;
+    }
+
+    /// <summary>
+    /// Exact inverse of the ordinary carry check: the companion's stock hands
+    /// currently hold the controller-bound human. Follow intent remains latent
+    /// during this relationship so the attached passenger cannot become a
+    /// self-generated breadcrumb route.
+    /// </summary>
+    internal static bool IsBodyCarryingHuman(
+        CompanionBody body,
+        PlayerCharacter human)
+    {
+        if (body == null || !body.IsAlive || human == null ||
+            human.gameObject == body.GameObject)
+        {
+            return false;
+        }
+
+        var grabPose = body.Character?.registry?.grabPose;
+        var poser = human.poser;
+        return body.Character?.hands?.heldCharacter == human ||
+               (poser != null && poser.playerHoldingMe == body.Character) ||
+               (grabPose != null && poser != null &&
+                poser.currentPose == grabPose) ||
+               (grabPose != null && grabPose.occupant == human);
+    }
+
+    /// <summary>
+    /// The corresponding exact native relationship when the controller-bound
+    /// human carries the companion. All stock links participate so navigation
+    /// cannot resume during a partial pose teardown.
+    /// </summary>
+    internal static bool IsHumanCarryingBody(
+        CompanionBody body,
+        PlayerCharacter human)
+    {
+        if (body == null || !body.IsAlive || human == null ||
+            human.gameObject == body.GameObject)
+        {
+            return false;
+        }
+
+        var grabPose = human.registry?.grabPose;
+        var poser = body.Character?.poser;
+        return human.hands?.heldCharacter == body.Character ||
+               (poser != null && poser.playerHoldingMe == human) ||
+               (grabPose != null && poser != null &&
+                poser.currentPose == grabPose) ||
+               (grabPose != null && grabPose.occupant == body.Character);
     }
 
     private PlayerCharacter GetHumanPlayer()
@@ -962,6 +1116,7 @@ internal sealed class CompanionFollowBehavior
         {
             _directTraversalUntil = 0f;
             _committedTraversalDirection = Vector3.zero;
+            _committedTraversalSequence = 0;
         }
         _state = state;
     }
@@ -1010,12 +1165,14 @@ internal sealed class CompanionFollowBehavior
             $"state={_state}, elapsed={now - _followStartedAt:F2}, " +
             $"position={_body.Position}, humanDistance={humanDistance:F2}, " +
             $"target={_currentTarget}, targetDistance={targetDistance:F2}, " +
+            $"targetHorizontalDistance={_lastTargetHorizontalDistance:F2}, " +
             $"trailDistance={_lastTrailDistance:F2}, " +
             $"commandedSpeed={_locomotion.LastCommandedSpeed:F2}, " +
             $"gait={_locomotion.DescribeGait()}, posture={CompanionPostureActuator.Describe(_locomotion.Posture)}, " +
             $"bodyYaw={_attention.LastBodyYaw:F1}, targetYaw={_attention.LastTargetYaw:F1}, " +
             $"headState={_attention.HeadState}, breadcrumbs={_trail.Count}, " +
             $"breadcrumb={_currentBreadcrumbSequence}, " +
+            $"routeMode={_lastRouteMode}, " +
             $"jumpTarget={_jumpCommittedSequence}, " +
             $"dropTarget={_dropCommittedSequence}, carried={_bodyIsCarried}, " +
             $"humanJumpInProgress={_humanJumpInProgress}, " +
@@ -1044,6 +1201,7 @@ internal sealed class CompanionFollowBehavior
         _humanAtSpawn = null;
         _followRequested = false;
         _bodyIsCarried = false;
+        _bodyCarriesHuman = false;
         _suspensionReason = null;
         _state = FollowState.Idle;
         _lastTrailDistance = 0f;

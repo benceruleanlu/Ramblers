@@ -21,8 +21,6 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
     private const float DropRetrySeconds = 0.50f;
     private const float PickupTimeoutSecondsValue = 25f;
     private const float DropTimeoutSecondsValue = 5f;
-    private const float ApproachCommitSeconds = 0.45f;
-    private const float ApproachNavigationInterval = 0.1f;
 
     private enum PickupState
     {
@@ -33,16 +31,15 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
         HoldingItem,
         DroppingItem,
         ReconcilingFailure,
-        Cancelling,
-        Faulted
+        Cancelling
     }
 
     private readonly CompanionAttention _attention;
     private readonly CompanionLocomotion _locomotion;
-    private readonly CompanionJumpActuator _jump;
+    private readonly CompanionApproachController _approach;
 
     private CompanionBody _body;
-    private CompanionInteractionTarget _target;
+    private CompanionPropTarget _target;
     private PickupState _state;
     private float _stateStartedAt;
     private bool _holdGaze;
@@ -51,10 +48,6 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
     private float _dropAbsentSince = -1f;
     private string _activeActionName;
     private CompanionJobCompletion _completion;
-    private int _approachRecoveries;
-    private float _approachCommitUntil;
-    private Vector3 _approachCommitDirection;
-    private float _nextApproachTick;
 
     internal CompanionPickupBehavior(
         CompanionLocomotion locomotion,
@@ -63,7 +56,10 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
     {
         _locomotion = locomotion;
         _attention = attention;
-        _jump = jump;
+        _approach = new CompanionApproachController(
+            locomotion,
+            jump,
+            AgentToolCatalog.PickUpItem);
     }
 
     public string Name => AgentToolCatalog.PickUpItem;
@@ -107,7 +103,6 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
                 case PickupState.DroppingItem:
                 case PickupState.ReconcilingFailure:
                 case PickupState.Cancelling:
-                case PickupState.Faulted:
                     return JobResources.Hands;
                 default:
                     return JobResources.Locomotion |
@@ -118,6 +113,10 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
     }
 
     public bool IsActive => _state != PickupState.Idle;
+
+    public bool MayPublishCompletionWhileActive =>
+        _state == PickupState.HoldingItem &&
+        _completion?.Result?.Ok == true;
 
     public float TimeoutSeconds => IsExplicitDrop
         ? DropTimeoutSecondsValue
@@ -146,7 +145,7 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
                 AgentToolCatalog.DropItem,
                 System.StringComparison.Ordinal))
         {
-            return TryBeginDrop(now, out failure);
+            return TryBeginDrop(now, request, out failure);
         }
 
         if (request != null &&
@@ -166,7 +165,7 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
             return false;
         }
 
-        _target = request == null ? null : request.InteractionTarget;
+        _target = request == null ? null : request.PropTarget;
         if (_target == null)
         {
             failure = AgentToolResult.Failure("human_reference_not_captured");
@@ -212,10 +211,7 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
         _activeActionName = AgentToolCatalog.PickUpItem;
         _holdGaze = true;
         ResetDropTracking();
-        _approachRecoveries = 0;
-        _approachCommitUntil = 0f;
-        _approachCommitDirection = Vector3.zero;
-        _locomotion.ResetProgressObservation(now);
+        _approach.Begin(now);
         _attention.SetTarget(GazeChannel.Manipulation, targetPoint);
         Plugin.Logger.LogInfo(
             $"[ACTION] PICKUP_STARTED referenceId={_target.ReferenceId}, " +
@@ -226,7 +222,10 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
         return true;
     }
 
-    private bool TryBeginDrop(float now, out AgentToolResult failure)
+    private bool TryBeginDrop(
+        float now,
+        CompanionJobRequest request,
+        out AgentToolResult failure)
     {
         failure = null;
         if (_completion != null)
@@ -241,9 +240,37 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
             return false;
         }
 
+        var requestedTarget = request == null ? null : request.PropTarget;
+        if (requestedTarget == null)
+        {
+            failure = AgentToolResult.Failure(
+                "companion_held_item_unavailable");
+            return false;
+        }
+        if (!requestedTarget.IsStillTheSameProp(requestedTarget.Prop))
+        {
+            failure = AgentToolResult.Failure("held_item_unavailable");
+            return false;
+        }
+        if (_state == PickupState.HoldingItem &&
+            (_target == null ||
+             !_target.IsStillTheSameProp(requestedTarget.Prop)))
+        {
+            EnterIdentityFault("held_target_mismatch", false);
+            failure = AgentToolResult.Failure(
+                "held_item_identity_mismatch");
+            return false;
+        }
+
+        // The utterance-boundary target is the only prop this parameterless
+        // native command may release. Never derive a new target from live hands.
+        _target = requestedTarget;
+
         var hands = GetHands();
         if (hands == null)
         {
+            if (_state == PickupState.Idle)
+                _target = null;
             failure = AgentToolResult.Failure("hands_unavailable");
             return false;
         }
@@ -253,6 +280,8 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
         {
             if (_state == PickupState.HoldingItem)
                 EndAction();
+            else
+                _target = null;
             failure = AgentToolResult.Failure(
                 hands.heldCharacter == null
                     ? "hands_empty"
@@ -260,21 +289,14 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
             return false;
         }
 
-        if (_state == PickupState.HoldingItem)
+        if (!_target.IsStillTheSameProp(heldProp))
         {
-            if (_target == null || !_target.IsStillTheSameProp(heldProp))
-            {
+            if (_state == PickupState.HoldingItem)
                 EnterIdentityFault("held_target_mismatch", false);
-                failure = AgentToolResult.Failure(
-                    "held_item_identity_mismatch");
-                return false;
-            }
-        }
-        else if (!CompanionInteractionTarget.TryCaptureHeldProp(
-                     heldProp,
-                     out _target))
-        {
-            failure = AgentToolResult.Failure("held_item_unavailable");
+            else
+                _target = null;
+            failure = AgentToolResult.Failure(
+                "held_item_identity_mismatch");
             return false;
         }
 
@@ -294,7 +316,8 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
         _attention.ClearTarget(GazeChannel.Manipulation);
         Plugin.Logger.LogInfo(
             $"[ACTION] DROP_STARTED referenceId={ReferenceIdForLog}, " +
-            $"netId={_target.NetworkId}.");
+            $"netId={_target.NetworkId}, stableId={_target.StableId}, " +
+            $"callId={request.CallId ?? "none"}, turnId={request.TurnId}.");
 
         // The operation remains pending even if the host call throws: once the
         // call boundary is crossed its outcome is ambiguous, so Tick reconciles
@@ -308,7 +331,6 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
         switch (_state)
         {
             case PickupState.Idle:
-            case PickupState.Faulted:
                 return;
             case PickupState.HoldingItem:
                 TickHolding();
@@ -333,6 +355,7 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
 
     public bool TryTakeCompletion(out CompanionJobCompletion completion)
     {
+        RevalidateQueuedHoldCompletion();
         completion = _completion;
         if (completion == null)
             return false;
@@ -340,9 +363,34 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
         return true;
     }
 
+    private void RevalidateQueuedHoldCompletion()
+    {
+        if (_completion?.Result?.Ok != true ||
+            _completion.HandsTransition !=
+                CompanionTurnHandsTransition.HoldingExactProp)
+        {
+            return;
+        }
+
+        var hands = GetHands();
+        if (hands != null && _target != null &&
+            _target.IsStillTheSameProp(hands.heldProp))
+        {
+            return;
+        }
+
+        Plugin.Logger.LogWarning(
+            $"[ACTION] PICKUP_COMPLETION_INVALIDATED " +
+            $"referenceId={ReferenceIdForLog}, " +
+            "reason=exact_prop_not_held_at_consumption.");
+        _completion = CompanionJobCompletion.Failed(
+            "pickup_not_retained");
+        EndAction();
+    }
+
     public void Conclude(float now)
     {
-        if (_state != PickupState.HoldingItem)
+        if (_state == PickupState.Idle)
             return;
 
         var referenceId = ReferenceIdForLog;
@@ -373,14 +421,6 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
             return;
         }
 
-        if (_state == PickupState.Faulted)
-        {
-            Plugin.Logger.LogWarning(explicitDrop
-                ? "[ACTION] DROP_CANCEL_BLOCKED reason=target_identity_fault."
-                : "[ACTION] PICKUP_CANCEL_BLOCKED reason=target_identity_fault.");
-            return;
-        }
-
         _state = PickupState.Cancelling;
         _stateStartedAt = now;
         _holdGaze = false;
@@ -395,7 +435,7 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
 
     public void Fail(string error, float now)
     {
-        if (_state == PickupState.Idle || _state == PickupState.Faulted)
+        if (_state == PickupState.Idle)
             return;
 
         if (_state == PickupState.AligningTarget ||
@@ -439,7 +479,13 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
 
         if (!IsWithinPickupReach(targetPoint))
         {
-            CompleteFailure("item_out_of_reach");
+            _state = PickupState.ApproachingTarget;
+            _stateStartedAt = now;
+            _approach.Resume(now);
+            Plugin.Logger.LogInfo(
+                $"[ACTION] PICKUP_APPROACH_RESUMED " +
+                $"referenceId={ReferenceIdForLog}, " +
+                "reason=target_moved_out_of_reach.");
             return;
         }
 
@@ -487,9 +533,8 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
 
     private void TickApproach(float now)
     {
-        if (now < _nextApproachTick)
+        if (!_approach.TryBeginTick(now))
             return;
-        _nextApproachTick = now + ApproachNavigationInterval;
 
         if (_body == null || !_body.IsAlive)
         {
@@ -526,6 +571,7 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
             PickupApproachStopDistance)
         {
             _locomotion.Stop(now);
+            _approach.CancelRecovery();
             _state = PickupState.AligningTarget;
             _stateStartedAt = now;
             Plugin.Logger.LogInfo(
@@ -543,74 +589,32 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
         }
 
         var direction = toTarget / horizontalDistance;
-        SteeringStatus status;
-        if (now < _approachCommitUntil)
+        var approachStep = _approach.Advance(
+            now,
+            direction,
+            horizontalDistance);
+        if (approachStep.Kind == CompanionApproachStepKind.RecoveryDeferred)
         {
-            _locomotion.CommitTraversalDirection(
-                _approachCommitDirection,
-                horizontalDistance);
+            Plugin.Logger.LogInfo(
+                $"[ACTION] PICKUP_APPROACH_DEFERRED referenceId={ReferenceIdForLog}, " +
+                $"reason={approachStep.Reason}, " +
+                $"recovery={approachStep.RecoveryError}.");
         }
-        else if (!_locomotion.TrySteerToward(
-                     direction,
-                     horizontalDistance,
-                     now,
-                     out status))
+        else if (approachStep.Kind == CompanionApproachStepKind.RecoveryCommitted)
         {
-            _locomotion.Stop(now);
-            if (!TryRecoverApproach(
-                    now,
-                    direction,
-                    horizontalDistance,
-                    "blocked_path"))
-                CompleteFailure("item_path_blocked");
-            return;
+            Plugin.Logger.LogInfo(
+                $"[ACTION] PICKUP_APPROACH_RECOVERY referenceId={ReferenceIdForLog}, " +
+                $"reason={approachStep.Reason}, " +
+                $"attempt={approachStep.RecoveryAttempt}.");
         }
-
-        if (_locomotion.ObserveProgress(now) &&
-            !TryRecoverApproach(now, direction, horizontalDistance, "stuck"))
+        else if (approachStep.Kind == CompanionApproachStepKind.Blocked)
         {
-            CompleteFailure("item_path_blocked");
-        }
-    }
-
-    private bool TryRecoverApproach(
-        float now,
-        Vector3 direction,
-        float distance,
-        string reason)
-    {
-        string jumpError;
-        if (!_jump.TryRequestActionRecovery(
-                now,
-                _locomotion.Posture,
-                AgentToolCatalog.PickUpItem,
-                reason,
-                out jumpError))
-        {
-            if (CompanionJumpActuator.IsDeferredRecoveryError(jumpError))
-            {
-                _locomotion.ResetProgressObservation(now);
-                Plugin.Logger.LogInfo(
-                    $"[ACTION] PICKUP_APPROACH_DEFERRED referenceId={ReferenceIdForLog}, " +
-                    $"reason={reason}, recovery={jumpError}.");
-                return true;
-            }
-
             Plugin.Logger.LogWarning(
                 $"[ACTION] PICKUP_APPROACH_BLOCKED referenceId={ReferenceIdForLog}, " +
-                $"reason={reason}, recovery={jumpError ?? "unavailable"}.");
-            return false;
+                $"reason={approachStep.Reason}, " +
+                $"recovery={approachStep.RecoveryError ?? "unavailable"}.");
+            CompleteFailure("item_path_blocked");
         }
-
-        _approachRecoveries++;
-        _approachCommitUntil = now + ApproachCommitSeconds;
-        _approachCommitDirection = direction;
-        _locomotion.CommitTraversalDirection(direction, distance);
-        _locomotion.ResetProgressObservation(now);
-        Plugin.Logger.LogInfo(
-            $"[ACTION] PICKUP_APPROACH_RECOVERY referenceId={ReferenceIdForLog}, " +
-            $"reason={reason}, attempt={_approachRecoveries}.");
-        return true;
     }
 
     private void ExecutePickup(float now, Vector3 targetPoint)
@@ -712,7 +716,10 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
                 Result = AgentToolResult.Success(
                     AgentToolCatalog.PickUpItem,
                     "picked_up",
-                    "holding_item")
+                    "holding_item"),
+                HandsTransition =
+                    CompanionTurnHandsTransition.HoldingExactProp,
+                ExactProp = _target
             };
             Plugin.Logger.LogInfo(
                 $"[ACTION] PICKUP_CONFIRMED referenceId={ReferenceIdForLog}, " +
@@ -745,6 +752,13 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
         var heldProp = hands.heldProp;
         if (heldProp == null)
         {
+            // Holding completion is intentionally publishable while this job
+            // remains active, but the coordinator may not have consumed it
+            // yet. Do not publish a stale success if the exact prop was
+            // released during that window.
+            if (_completion?.Result?.Ok == true)
+                _completion = CompanionJobCompletion.Failed(
+                    "pickup_not_retained");
             Plugin.Logger.LogInfo(
                 $"[ACTION] PICKUP_RELEASED referenceId={ReferenceIdForLog}.");
             EndAction();
@@ -805,10 +819,11 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
 
         _completion = new CompanionJobCompletion
         {
-            Result = AgentToolResult.Success(
-                AgentToolCatalog.DropItem,
-                "dropped",
-                "hands_empty")
+                Result = AgentToolResult.Success(
+                    AgentToolCatalog.DropItem,
+                    "dropped",
+                    "hands_empty"),
+                HandsTransition = CompanionTurnHandsTransition.HandsEmpty
         };
         Plugin.Logger.LogInfo(
             $"[ACTION] DROP_CONFIRMED referenceId={ReferenceIdForLog}.");
@@ -994,19 +1009,17 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
 
     private void EnterIdentityFault(string error, bool reportFailure)
     {
-        if (reportFailure && _completion == null)
+        if ((reportFailure && _completion == null) ||
+            _completion?.Result?.Ok == true)
             _completion = CompanionJobCompletion.Failed(error);
-        _state = PickupState.Faulted;
-        _holdGaze = false;
-        ResetDropTracking();
-        _attention.ClearTarget(GazeChannel.Manipulation);
         Plugin.Logger.LogError(IsExplicitDrop
             ? $"[ACTION] DROP_IDENTITY_FAULT error={error}, " +
-              $"referenceId={ReferenceIdForLog}. Hands remain blocked; " +
-              "no command will target a different prop."
+              $"referenceId={ReferenceIdForLog}. No command targeted a " +
+              "different prop; ownership returned to stock hands state."
             : $"[ACTION] PICKUP_IDENTITY_FAULT error={error}, " +
-              $"referenceId={ReferenceIdForLog}. Hands remain blocked; " +
-              "no command will target a different prop.");
+              $"referenceId={ReferenceIdForLog}. No command targeted a " +
+              "different prop; ownership returned to stock hands state.");
+        EndAction();
     }
 
     private int ReferenceIdForLog => _target == null ? 0 : _target.ReferenceId;
@@ -1018,7 +1031,7 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
 
     private void EndAction()
     {
-        _jump.CancelActionRecovery(AgentToolCatalog.PickUpItem);
+        _approach.CancelRecovery();
         // Explicit drop reserves Hands only and may run concurrently with
         // follow, so it must never clear locomotion it does not own.
         if (_locomotion != null && !IsExplicitDrop)
@@ -1029,10 +1042,7 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
         _activeActionName = null;
         _holdGaze = false;
         ResetDropTracking();
-        _approachRecoveries = 0;
-        _approachCommitUntil = 0f;
-        _approachCommitDirection = Vector3.zero;
-        _nextApproachTick = 0f;
+        _approach.Reset();
         _attention.ClearTarget(GazeChannel.Manipulation);
     }
 
@@ -1051,10 +1061,7 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
         _activeActionName = null;
         _holdGaze = false;
         _completion = null;
-        _approachRecoveries = 0;
-        _approachCommitUntil = 0f;
-        _approachCommitDirection = Vector3.zero;
-        _nextApproachTick = 0f;
+        _approach.Reset();
         ResetDropTracking();
     }
 }

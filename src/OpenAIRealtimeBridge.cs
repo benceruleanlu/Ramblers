@@ -11,6 +11,7 @@ namespace Ramblers;
 internal sealed class RealtimeAgentBridge : MonoBehaviour
 {
     private const float ReconnectDelay = 5f;
+    private const float CancellationSettlementMaximumSeconds = 5f;
 
     private sealed class PendingToolCall
     {
@@ -25,12 +26,19 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         internal string ResponseId;
         internal long TurnId;
         internal PendingToolCall[] Calls;
+        internal SequentialToolBatchCursor Cursor;
         internal int JobIndex = -1;
         internal long JobToken;
         internal float StartedAt;
         internal float TimeoutSeconds;
         internal AgentContinuationItem[] Continuation;
         internal bool RetainJobUntilAssistantAudio;
+        internal bool Interrupted;
+        internal bool CancellationRequested;
+        internal float CancellationStartedAt;
+        internal string CancellationError;
+        internal string CancellationReason;
+        internal bool SettlementAbandoned;
     }
 
     private readonly GameVoiceInput _gameVoice = new GameVoiceInput();
@@ -39,7 +47,6 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
     private readonly Dictionary<long, CompanionTurnReference> _turnReferences =
         new Dictionary<long, CompanionTurnReference>();
     private readonly HashSet<long> _completedTurnIds = new HashSet<long>();
-    private readonly HashSet<long> _toolBatchTurnsThisFrame = new HashSet<long>();
     private OpenAIRealtimeClient _client;
     private PendingToolBatch _pendingToolBatch;
     private float _nextConnectAt;
@@ -132,7 +139,6 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             _userSpeaking = false;
             _turnReferences.Clear();
             _completedTurnIds.Clear();
-            _toolBatchTurnsThisFrame.Clear();
             _gameVoice.Stop(_client);
             _gameVoiceOutput.Stop();
             _client.Dispose();
@@ -220,8 +226,17 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
                 {
                     ReleaseLingeringJob("response_completed_without_audio");
                 }
-                if (clientEvent.TurnId > 0)
+                // The producer records whether this exact response contained a
+                // function-call batch. That causal fact is stable across the
+                // client's separate event and batch queues; frame timing is not.
+                // Keep the turn through any number of tool continuations and
+                // release it only on a terminal response with no tool batch.
+                if (clientEvent.TurnId > 0 &&
+                    !TurnReferenceRetentionPolicy.ShouldRetain(
+                        clientEvent.HasFunctionCallBatch))
+                {
                     _completedTurnIds.Add(clientEvent.TurnId);
+                }
             }
             else if (clientEvent.Type == RealtimeClientEventType.AudioPacket)
             {
@@ -246,13 +261,10 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         if (_client == null)
             return;
 
-        _toolBatchTurnsThisFrame.Clear();
         RealtimeFunctionCallBatch batch;
         while (_pendingToolBatch == null &&
                _client.TryDequeueFunctionCallBatch(out batch))
         {
-            if (batch != null && batch.TurnId > 0)
-                _toolBatchTurnsThisFrame.Add(batch.TurnId);
             BeginToolBatch(batch);
         }
     }
@@ -268,11 +280,6 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         for (var index = 0; index < completed.Length; index++)
         {
             var turnId = completed[index];
-            // A tool continuation is still part of this same user turn. Keep
-            // its frozen referent until a later response completes without a
-            // function-call batch or new speech invalidates it.
-            if (_toolBatchTurnsThisFrame.Contains(turnId))
-                continue;
             _turnReferences.Remove(turnId);
         }
     }
@@ -287,7 +294,11 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         // action is merely queued, invalidation makes dispatch fail closed.
         if (PendingBatchContainsPhysicalAction(_pendingToolBatch))
         {
-            CompanionController.CancelJob(_pendingToolBatch.JobToken);
+            _pendingToolBatch.Interrupted = true;
+            RequestPendingJobCancellation(
+                _pendingToolBatch,
+                "action_interrupted",
+                "human_speech_" + source);
             Plugin.Logger.LogInfo(
                 $"[AGENT] PHYSICAL_CALL_INTERRUPTED source={source}, " +
                 $"turnId={_pendingToolBatch.TurnId}.");
@@ -309,19 +320,38 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             return;
 
         var turnId = ++_nextTurnId;
-        CompanionInteractionTarget target;
+        CompanionPropTarget target;
         string captureError;
-        CompanionController.TryCaptureInteractionTarget(
+        CompanionController.TryCapturePropTarget(
             out target,
             out captureError);
+        CompanionPropTarget companionHeldTarget;
+        string companionHeldCaptureError;
+        CompanionController.TryCaptureCompanionHeldTarget(
+            out companionHeldTarget,
+            out companionHeldCaptureError);
         CompanionInspectionCandidates inspectionCandidates;
         string inspectionCaptureError;
         CompanionController.TryCaptureInspectionCandidates(
             out inspectionCandidates,
             out inspectionCaptureError);
+        CompanionAffordanceCandidates affordanceCandidates;
+        string affordanceCaptureError;
+        Plugin.Logger.LogInfo(
+            $"[AGENT] TURN_INTERACTION_REFERENCE_CAPTURE_STARTED source={source}, " +
+            $"turnId={turnId}.");
+        CompanionController.TryCaptureAffordanceCandidates(
+            out affordanceCandidates,
+            out affordanceCaptureError);
+        CompanionPlayerTarget humanPlayerTarget;
+        string humanPlayerCaptureError;
+        CompanionController.TryCaptureHumanPlayerTarget(
+            out humanPlayerTarget,
+            out humanPlayerCaptureError);
         CompanionAwarenessTurnContext awarenessContext;
         string awarenessCaptureError;
         CompanionController.TryTakeAwarenessTurnContext(
+            affordanceCandidates,
             out awarenessContext,
             out awarenessCaptureError);
         _turnReferences[turnId] = new CompanionTurnReference
@@ -329,10 +359,13 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             TurnId = turnId,
             Target = target,
             CaptureError = captureError,
+            CompanionHeldTarget = companionHeldTarget,
+            CompanionHeldCaptureError = companionHeldCaptureError,
             InspectionCandidates = inspectionCandidates,
             InspectionCaptureError = inspectionCaptureError,
-            PeckCandidates = null,
-            PeckCaptureError = "interaction_context_quarantined",
+            AffordanceCandidates = affordanceCandidates,
+            AffordanceCaptureError = affordanceCaptureError,
+            HumanPlayerTarget = humanPlayerTarget,
             EntityReferences = awarenessContext?.EntityReferences
         };
         var awarenessQueued = false;
@@ -371,6 +404,22 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
                 $"referenceId={target.ReferenceId}, netId={target.NetworkId}.");
         }
 
+        if (companionHeldTarget == null)
+        {
+            Plugin.Logger.LogInfo(
+                $"[AGENT] TURN_HELD_REFERENCE_CAPTURED source={source}, " +
+                $"turnId={turnId}, status=unavailable, " +
+                $"reason={companionHeldCaptureError ?? "companion_held_item_unavailable"}.");
+        }
+        else
+        {
+            Plugin.Logger.LogInfo(
+                $"[AGENT] TURN_HELD_REFERENCE_CAPTURED source={source}, " +
+                $"turnId={turnId}, status=prop, " +
+                $"referenceId={companionHeldTarget.ReferenceId}, " +
+                $"netId={companionHeldTarget.NetworkId}.");
+        }
+
         if (inspectionCandidates == null)
         {
             Plugin.Logger.LogInfo(
@@ -391,6 +440,38 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
                 $"heldNetId={inspectionCandidates.HeldItemNetworkId}.");
         }
 
+        if (affordanceCandidates == null)
+        {
+            Plugin.Logger.LogInfo(
+                $"[AGENT] TURN_INTERACTION_REFERENCE_CAPTURED source={source}, " +
+                $"turnId={turnId}, status=unavailable, " +
+                $"reason={affordanceCaptureError ?? "interaction_reference_not_captured"}.");
+        }
+        else
+        {
+            Plugin.Logger.LogInfo(
+                $"[AGENT] TURN_INTERACTION_REFERENCES_CAPTURED source={source}, " +
+                $"turnId={turnId}, " +
+                $"humanAvailable={affordanceCandidates.HumanReferenceAvailable}, " +
+                $"humanReason={affordanceCandidates.HumanReferenceError ?? "none"}, " +
+                $"humanReferenceId={affordanceCandidates.HumanReferenceId}, " +
+                $"humanKind={affordanceCandidates.HumanReferenceKind}, " +
+                $"humanNetId={affordanceCandidates.HumanReferenceNetworkId}, " +
+                $"heldItemAvailable={affordanceCandidates.CompanionHeldItemAvailable}, " +
+                $"heldItemReason={affordanceCandidates.CompanionHeldItemError ?? "none"}, " +
+                $"heldReferenceId={affordanceCandidates.CompanionHeldItemReferenceId}, " +
+                $"heldKind={affordanceCandidates.CompanionHeldItemKind}, " +
+                $"heldNetId={affordanceCandidates.CompanionHeldItemNetworkId}.");
+        }
+
+        Plugin.Logger.LogInfo(
+            $"[AGENT] TURN_HUMAN_PLAYER_CAPTURED source={source}, " +
+            $"turnId={turnId}, " +
+            $"available={humanPlayerTarget != null}, " +
+            $"referenceId={humanPlayerTarget?.StableId ?? "none"}, " +
+            $"netId={humanPlayerTarget?.NetworkId ?? 0u}, " +
+            $"reason={humanPlayerCaptureError ?? "none"}.");
+
         if (!awarenessQueued)
         {
             Plugin.Logger.LogInfo(
@@ -407,6 +488,8 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
                 $"events={awarenessContext.EventCount}, " +
                 $"nearbyProps={awarenessContext.NearbyPropCount}, " +
                 $"rememberedProps={awarenessContext.RememberedPropCount}, " +
+                $"nearbyInteractables={awarenessContext.NearbyInteractableCount}, " +
+                $"rememberedInteractables={awarenessContext.RememberedInteractableCount}, " +
                 $"actionableEntities={awarenessContext.EntityReferences?.Count ?? 0}, " +
                 $"nearbyPlayers={awarenessContext.NearbyPlayerCount}, " +
                 $"visualAttached={awarenessContext.HasImage}, " +
@@ -428,6 +511,10 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
                      StringComparison.Ordinal) ||
                  string.Equals(
                      name,
+                     AgentToolCatalog.GoToLocation,
+                     StringComparison.Ordinal) ||
+                 string.Equals(
+                     name,
                      AgentToolCatalog.InteractWithObject,
                      StringComparison.Ordinal) ||
                  string.Equals(
@@ -441,6 +528,14 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
                  string.Equals(
                      name,
                      AgentToolCatalog.DropItem,
+                     StringComparison.Ordinal) ||
+                 string.Equals(
+                     name,
+                     AgentToolCatalog.PickUpPlayer,
+                     StringComparison.Ordinal) ||
+                 string.Equals(
+                     name,
+                     AgentToolCatalog.DropPlayer,
                      StringComparison.Ordinal)))
             {
                 return true;
@@ -460,17 +555,34 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             ResponseId = batch.ResponseId,
             TurnId = batch.TurnId,
             Calls = new PendingToolCall[batch.Calls.Length],
-            StartedAt = Time.realtimeSinceStartup
+            Cursor = new SequentialToolBatchCursor(batch.Calls.Length)
         };
-
-        CompanionTurnReference turnReference;
-        _turnReferences.TryGetValue(batch.TurnId, out turnReference);
 
         for (var index = 0; index < batch.Calls.Length; index++)
         {
-            var functionCall = batch.Calls[index];
-            var slot = new PendingToolCall { Call = functionCall };
-            pending.Calls[index] = slot;
+            pending.Calls[index] = new PendingToolCall
+            {
+                Call = batch.Calls[index]
+            };
+        }
+
+        DispatchPendingToolCalls(pending);
+    }
+
+    /// <summary>
+    /// Routes calls strictly in response order. A pending Unity job stops this
+    /// loop; its verified result and any hands transition are consumed before
+    /// the cursor is allowed to expose the next call.
+    /// </summary>
+    private void DispatchPendingToolCalls(PendingToolBatch pending)
+    {
+        int index;
+        while (pending.Cursor.TryBeginNext(out index))
+        {
+            var slot = pending.Calls[index];
+            var functionCall = slot.Call;
+            CompanionTurnReference turnReference;
+            _turnReferences.TryGetValue(pending.TurnId, out turnReference);
 
             AgentToolDispatch dispatch;
             try
@@ -489,40 +601,55 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
 
             if (dispatch.IsPending)
             {
-                // One deferred job at a time. The coordinator refuses a second
-                // while one is running, so a batch cannot reach this branch
-                // twice and silently drop the first job's token.
                 slot.AwaitsJob = true;
                 pending.JobIndex = index;
                 pending.JobToken = dispatch.OperationToken;
+                pending.StartedAt = Time.realtimeSinceStartup;
                 pending.TimeoutSeconds = dispatch.TimeoutSeconds;
+                _pendingToolBatch = pending;
                 Plugin.Logger.LogInfo(
                     $"[AGENT] CALL name={functionCall.Name}, " +
+                    $"callId={functionCall.CallId ?? "none"}, " +
                     $"arguments={functionCall.Arguments}, " +
-                    $"turnId={batch.TurnId}, responseId={batch.ResponseId}, " +
-                    "result=pending");
-                continue;
+                    $"turnId={pending.TurnId}, responseId={pending.ResponseId}, " +
+                    $"sequenceIndex={index}, result=pending");
+                Plugin.Logger.LogInfo(
+                    $"[AGENT] TOOL_BATCH_DEFERRED responseId={pending.ResponseId}, " +
+                    $"turnId={pending.TurnId}, calls={pending.Calls.Length}, " +
+                    $"waitingIndex={index}.");
+                return;
             }
 
-            slot.ResultJson = dispatch.Result.ToJson();
+            var result = dispatch.Result ??
+                         AgentToolResult.Failure("action_execution_failed");
+            slot.ResultJson = result.ToJson();
             LogToolResult(
                 functionCall,
                 slot.ResultJson,
-                dispatch.Result.Error,
-                batch.TurnId,
-                batch.ResponseId);
+                result.Error,
+                pending.TurnId,
+                pending.ResponseId);
+            if (!pending.Cursor.TryCompleteActive(index))
+            {
+                Plugin.Logger.LogError(
+                    $"[AGENT] TOOL_BATCH_SEQUENCE_FAULT " +
+                    $"responseId={pending.ResponseId}, turnId={pending.TurnId}, " +
+                    $"activeIndex={pending.Cursor.ActiveIndex}, completedIndex={index}.");
+                FailUndispatchedCalls(pending, "tool_batch_sequence_failed");
+                CompleteToolBatch(pending);
+                return;
+            }
+            if (ShouldAbortRemainderAfterFailure(functionCall, result) &&
+                pending.Cursor.HasUndispatched)
+            {
+                FailUndispatchedCalls(pending, "previous_action_failed");
+                CompleteToolBatch(pending);
+                return;
+            }
         }
 
-        if (pending.JobIndex < 0)
-        {
+        if (pending.Cursor.IsComplete)
             CompleteToolBatch(pending);
-            return;
-        }
-
-        _pendingToolBatch = pending;
-        Plugin.Logger.LogInfo(
-            $"[AGENT] TOOL_BATCH_DEFERRED responseId={pending.ResponseId}, " +
-            $"turnId={pending.TurnId}, calls={pending.Calls.Length}.");
     }
 
     private void PollPendingToolBatch()
@@ -536,42 +663,309 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
                 pending.JobToken,
                 out completion))
         {
-            var result = completion?.Result ??
-                         AgentToolResult.Failure("action_execution_failed");
-            var slot = pending.Calls[pending.JobIndex];
+            FinishPendingJob(pending, completion);
+            return;
+        }
+
+        var now = Time.realtimeSinceStartup;
+        if (!pending.CancellationRequested)
+        {
+            if (now - pending.StartedAt < pending.TimeoutSeconds)
+                return;
+
+            RequestPendingJobCancellation(
+                pending,
+                "job_timed_out",
+                "job_timeout");
+            return;
+        }
+
+        if (!CompanionJobSettlementProtocol.HasCancellationSettlementTimedOut(
+                true,
+                now - pending.CancellationStartedAt,
+                CancellationSettlementMaximumSeconds))
+        {
+            return;
+        }
+
+        var abandoned = CompanionController.AbandonJobSettlement(
+            pending.JobToken,
+            pending.CancellationReason ?? "cancellation_timeout");
+        Plugin.Logger.LogWarning(
+            $"[AGENT] TOOL_BATCH_RECONCILIATION_BOUNDED " +
+            $"responseId={pending.ResponseId}, turnId={pending.TurnId}, " +
+            $"reason={pending.CancellationReason ?? "unknown"}, " +
+            $"ownershipAbandoned={abandoned}.");
+        if (!abandoned)
+            return;
+        pending.SettlementAbandoned = true;
+        FinishPendingJob(
+            pending,
+            CompanionJobCompletion.Failed("cancelled"));
+    }
+
+    private void FinishPendingJob(
+        PendingToolBatch pending,
+        CompanionJobCompletion completion)
+    {
+        if (!ReferenceEquals(_pendingToolBatch, pending))
+            return;
+
+        if (pending.CancellationRequested && pending.SettlementAbandoned)
+        {
+            Plugin.Logger.LogWarning(
+                $"[AGENT] TOOL_BATCH_RECONCILIATION_ABANDONED " +
+                $"responseId={pending.ResponseId}, turnId={pending.TurnId}, " +
+                $"reason={pending.CancellationReason ?? "unknown"}, " +
+                "disposition=ownership_returned_to_stock_state.");
+        }
+        else if (pending.CancellationRequested)
+        {
+            Plugin.Logger.LogInfo(
+                $"[AGENT] TOOL_BATCH_RECONCILED responseId={pending.ResponseId}, " +
+                $"turnId={pending.TurnId}, " +
+                $"reason={pending.CancellationReason ?? "unknown"}.");
+        }
+
+        var result = pending.CancellationRequested
+            ? AgentToolResult.Failure(
+                pending.CancellationError ?? "action_interrupted")
+            : completion?.Result ??
+              AgentToolResult.Failure("action_execution_failed");
+        var slot = pending.Calls[pending.JobIndex];
+        slot.ResultJson = result.ToJson();
+        slot.AwaitsJob = false;
+        if (!pending.CancellationRequested)
+            AppendContinuation(pending, completion?.Continuation);
+        var transitionApplied = pending.CancellationRequested ||
+                                TryApplyTurnTransition(
+                                    pending,
+                                    result,
+                                    completion);
+        LogToolResult(
+            slot.Call,
+            slot.ResultJson,
+            result.Error,
+            pending.TurnId,
+            pending.ResponseId);
+
+        var completedIndex = pending.JobIndex;
+        if (!pending.Cursor.TryCompleteActive(completedIndex))
+        {
+            Plugin.Logger.LogError(
+                $"[AGENT] TOOL_BATCH_SEQUENCE_FAULT " +
+                $"responseId={pending.ResponseId}, turnId={pending.TurnId}, " +
+                $"activeIndex={pending.Cursor.ActiveIndex}, " +
+                $"completedIndex={completedIndex}.");
+            CompleteCurrentJobBeforeNextCall(pending);
+            FailUndispatchedCalls(pending, "tool_batch_sequence_failed");
+            CompleteToolBatch(pending);
+            return;
+        }
+
+        if (pending.CancellationRequested)
+        {
+            var timedOut = string.Equals(
+                pending.CancellationError,
+                "job_timed_out",
+                StringComparison.Ordinal);
+            CompleteCurrentJobBeforeNextCall(pending);
+            if (pending.Cursor.HasUndispatched)
+            {
+                FailUndispatchedCalls(
+                    pending,
+                    timedOut
+                        ? "previous_action_timed_out"
+                        : "action_interrupted");
+            }
+            if (timedOut)
+            {
+                Plugin.Logger.LogWarning(
+                    $"[AGENT] TOOL_BATCH_TIMEOUT responseId={pending.ResponseId}, " +
+                    $"turnId={pending.TurnId}, settlement=complete.");
+            }
+            CompleteToolBatch(pending);
+            return;
+        }
+
+        var retainPresentation =
+            completion?.RetainUntilAssistantAudio == true;
+        if (PresentationRetentionPolicy.MustEndBatchBeforeNextCall(
+                retainPresentation,
+                pending.Cursor.HasUndispatched))
+        {
+            FailUndispatchedCalls(pending, "presentation_requires_new_turn");
+            pending.RetainJobUntilAssistantAudio = true;
+            Plugin.Logger.LogInfo(
+                $"[AGENT] PRESENTATION_SEQUENCE_TERMINATED " +
+                $"responseId={pending.ResponseId}, turnId={pending.TurnId}, " +
+                "reason=continuation_must_observe_presentation.");
+            CompleteToolBatch(pending);
+            return;
+        }
+
+        if (pending.Cursor.HasUndispatched)
+        {
+            CompleteCurrentJobBeforeNextCall(pending);
+            if (ShouldAbortRemainderAfterFailure(slot.Call, result))
+            {
+                FailUndispatchedCalls(pending, "previous_action_failed");
+                CompleteToolBatch(pending);
+                return;
+            }
+            if (!transitionApplied)
+            {
+                FailUndispatchedCalls(
+                    pending,
+                    "turn_state_transition_failed");
+                CompleteToolBatch(pending);
+                return;
+            }
+
+            DispatchPendingToolCalls(pending);
+            return;
+        }
+
+        pending.RetainJobUntilAssistantAudio = retainPresentation;
+        CompleteToolBatch(pending);
+    }
+
+    private static void RequestPendingJobCancellation(
+        PendingToolBatch pending,
+        string resultError,
+        string reason)
+    {
+        if (pending == null || pending.CancellationRequested)
+            return;
+
+        pending.CancellationRequested = true;
+        pending.CancellationStartedAt = Time.realtimeSinceStartup;
+        pending.CancellationError = resultError;
+        pending.CancellationReason = reason;
+        CompanionController.CancelJob(pending.JobToken);
+        Plugin.Logger.LogInfo(
+            $"[AGENT] TOOL_BATCH_RECONCILIATION_STARTED " +
+            $"responseId={pending.ResponseId}, turnId={pending.TurnId}, " +
+            $"waitingIndex={pending.JobIndex}, reason={reason}.");
+    }
+
+    private bool TryApplyTurnTransition(
+        PendingToolBatch pending,
+        AgentToolResult result,
+        CompanionJobCompletion completion)
+    {
+        if (!result.Ok || completion == null ||
+            completion.HandsTransition == CompanionTurnHandsTransition.None)
+        {
+            return true;
+        }
+
+        CompanionTurnReference turnReference;
+        if (!_turnReferences.TryGetValue(pending.TurnId, out turnReference) ||
+            turnReference == null)
+        {
+            Plugin.Logger.LogWarning(
+                $"[AGENT] TURN_STATE_ADVANCE_FAILED turnId={pending.TurnId}, " +
+                $"transition={completion.HandsTransition}, " +
+                "error=turn_reference_invalidated.");
+            return false;
+        }
+
+        string transitionError;
+        if (!turnReference.TryApply(completion, out transitionError))
+        {
+            Plugin.Logger.LogWarning(
+                $"[AGENT] TURN_STATE_ADVANCE_FAILED turnId={pending.TurnId}, " +
+                $"transition={completion.HandsTransition}, " +
+                $"error={transitionError ?? "unknown"}.");
+            return false;
+        }
+
+        Plugin.Logger.LogInfo(
+            $"[AGENT] TURN_STATE_ADVANCED turnId={pending.TurnId}, " +
+            $"transition={completion.HandsTransition}.");
+        return true;
+    }
+
+    private static bool ShouldAbortRemainderAfterFailure(
+        RealtimeFunctionCall call,
+        AgentToolResult result)
+    {
+        // The model composes “pick me up and take me there” as two ordered
+        // calls. Walking without the passenger after pickup failed would turn
+        // that causal sequence into a different action.
+        return result != null && !result.Ok &&
+               string.Equals(
+                   call?.Name,
+                   AgentToolCatalog.PickUpPlayer,
+                   StringComparison.Ordinal);
+    }
+
+    private static void AppendContinuation(
+        PendingToolBatch pending,
+        AgentContinuationItem[] continuation)
+    {
+        if (continuation == null || continuation.Length == 0)
+            return;
+        if (pending.Continuation == null || pending.Continuation.Length == 0)
+        {
+            pending.Continuation = continuation;
+            return;
+        }
+
+        var combined = new AgentContinuationItem[
+            pending.Continuation.Length + continuation.Length];
+        Array.Copy(
+            pending.Continuation,
+            0,
+            combined,
+            0,
+            pending.Continuation.Length);
+        Array.Copy(
+            continuation,
+            0,
+            combined,
+            pending.Continuation.Length,
+            continuation.Length);
+        pending.Continuation = combined;
+    }
+
+    private static void CompleteCurrentJobBeforeNextCall(
+        PendingToolBatch pending)
+    {
+        if (pending.JobToken != 0)
+            CompanionController.ConcludeJob(pending.JobToken);
+        pending.JobIndex = -1;
+        pending.JobToken = 0;
+        pending.StartedAt = 0f;
+        pending.TimeoutSeconds = 0f;
+        pending.RetainJobUntilAssistantAudio = false;
+        pending.CancellationRequested = false;
+        pending.CancellationStartedAt = 0f;
+        pending.CancellationError = null;
+        pending.CancellationReason = null;
+        pending.SettlementAbandoned = false;
+    }
+
+    private static void FailUndispatchedCalls(
+        PendingToolBatch pending,
+        string error)
+    {
+        int index;
+        while (pending.Cursor.TryBeginNext(out index))
+        {
+            var slot = pending.Calls[index];
+            var result = AgentToolResult.Failure(error);
             slot.ResultJson = result.ToJson();
-            slot.AwaitsJob = false;
-            pending.Continuation = completion?.Continuation;
-            pending.RetainJobUntilAssistantAudio =
-                completion?.RetainUntilAssistantAudio == true;
             LogToolResult(
                 slot.Call,
                 slot.ResultJson,
                 result.Error,
                 pending.TurnId,
                 pending.ResponseId);
-            CompleteToolBatch(pending);
-            return;
+            if (!pending.Cursor.TryCompleteActive(index))
+                return;
         }
-
-        if (Time.realtimeSinceStartup - pending.StartedAt < pending.TimeoutSeconds)
-            return;
-
-        CompanionController.CancelJob(pending.JobToken);
-        var timedOutSlot = pending.Calls[pending.JobIndex];
-        var timeoutResult = AgentToolResult.Failure("job_timed_out");
-        timedOutSlot.ResultJson = timeoutResult.ToJson();
-        timedOutSlot.AwaitsJob = false;
-        LogToolResult(
-            timedOutSlot.Call,
-            timedOutSlot.ResultJson,
-            timeoutResult.Error,
-            pending.TurnId,
-            pending.ResponseId);
-        Plugin.Logger.LogWarning(
-            $"[AGENT] TOOL_BATCH_TIMEOUT responseId={pending.ResponseId}, " +
-            $"turnId={pending.TurnId}.");
-        CompleteToolBatch(pending);
     }
 
     private void CompleteToolBatch(PendingToolBatch pending)
@@ -656,6 +1050,7 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
     {
         Plugin.Logger.LogInfo(
             $"[AGENT] CALL name={functionCall?.Name}, " +
+            $"callId={functionCall?.CallId ?? "none"}, " +
             $"arguments={functionCall?.Arguments}, turnId={turnId}, " +
             $"responseId={responseId}, " +
             $"result={resultJson}, " +
@@ -666,10 +1061,35 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
     {
         if (_pendingToolBatch == null)
             return;
-        CompanionController.CancelJob(_pendingToolBatch.JobToken);
+        var pending = _pendingToolBatch;
+        if (!pending.CancellationRequested)
+        {
+            RequestPendingJobCancellation(
+                pending,
+                "action_interrupted",
+                "client_replaced");
+        }
+        var ownershipTransferred = CompanionController.DetachJob(
+            pending.JobToken);
+        if (ownershipTransferred)
+        {
+            Plugin.Logger.LogInfo(
+                $"[AGENT] TOOL_BATCH_RECONCILIATION_DETACHED " +
+                $"responseId={pending.ResponseId}, turnId={pending.TurnId}, " +
+                $"token={pending.JobToken}, " +
+                $"reason={pending.CancellationReason ?? "client_replaced"}.");
+        }
+        else
+        {
+            Plugin.Logger.LogInfo(
+                $"[AGENT] TOOL_BATCH_RECONCILED responseId={pending.ResponseId}, " +
+                $"turnId={pending.TurnId}, reason=client_replaced, " +
+                "disposition=no_live_job_lease.");
+        }
         Plugin.Logger.LogInfo(
-            $"[AGENT] TOOL_BATCH_CANCELLED responseId={_pendingToolBatch.ResponseId}, " +
-            $"turnId={_pendingToolBatch.TurnId}.");
+            $"[AGENT] TOOL_BATCH_CANCELLED responseId={pending.ResponseId}, " +
+            $"turnId={pending.TurnId}, " +
+            $"settlement={(ownershipTransferred ? "detached" : "no_live_lease")}.");
         _pendingToolBatch = null;
         _continuationHeld = false;
         _heldContinuationTurnId = 0;
@@ -710,7 +1130,6 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         _userSpeaking = false;
         _turnReferences.Clear();
         _completedTurnIds.Clear();
-        _toolBatchTurnsThisFrame.Clear();
         _gameVoice.Stop(_client);
         _gameVoiceOutput.Stop();
         if (_client == null)
