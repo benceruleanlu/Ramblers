@@ -88,9 +88,13 @@ Assert-Contains $trail 'break;' `
 Assert-Order $follow 'if (UpdateCarryState(now))' `
     'ObserveHumanTraversal();' `
     "carry state must pause route recording before a carried body can append stale points"
-Assert-Contains $follow 'human.hands.heldCharacter' `
+Assert-Contains $follow 'human.hands?.heldCharacter == body.Character' `
     "follow must detect the stock player-carry relationship"
-Assert-Contains $follow '"[FOLLOW] CARRY_STARTED "' `
+Assert-Contains $follow '_jump.CancelFollow(isCarried' `
+    "carry transitions must cancel only follow-owned recovery jumps"
+Assert-Contains $follow 'if (!wasSuspended)' `
+    "carry transitions must not stop locomotion already owned by a job"
+Assert-Contains $follow '"[FOLLOW] CARRY_STARTED carrier=local_human, "' `
     "pickup must visibly invalidate the old route"
 Assert-Contains $follow '"[FOLLOW] CARRY_RELEASED "' `
     "release must visibly rebase follow at the new location"
@@ -125,10 +129,41 @@ Assert-Contains $follow '"[FOLLOW] ROUTE_SHORTCUT reason=later_breadcrumb_nearby
     "route-loop collapse must be visible in runtime evidence"
 Assert-Contains $follow '_locomotion.ResetProgressObservation(now);' `
     "a new shortcut target must begin a fresh stuck-observation window"
-Assert-Contains $follow 'return breadcrumb.TravelDirection;' `
-    "jump and drop commitment must follow the human's recorded route tangent"
-Assert-Contains $follow '(!traversalCommitted || now < _directTraversalUntil)' `
+Assert-Contains $trail 'internal static Vector3 ResolveTraversalApproachDirection(' `
+    "traversal approach selection must be isolated for executable regression coverage"
+Assert-Contains $trail '(!traversalCommitted && insideTraversalCorridor)' `
+    "a distant uncommitted marker must be approached by waypoint rather than tangent"
+Assert-Contains $trail '(traversalCommitted && commitActive)' `
+    "only the exact active traversal commitment may replay a distant tangent"
+Assert-Contains $trail 'return point.TravelDirection;' `
+    "a near or actively committed marker must retain the human route tangent"
+Assert-Contains $follow 'BreadcrumbTrail.ResolveTraversalApproachDirection(' `
+    "follow must use the corridor-bounded traversal resolver"
+Assert-Contains $follow 'traversalCommitted && now < _directTraversalUntil' `
     "an expired traversal commitment must steer back to its point instead of running forever"
+$selectBreadcrumb = $follow.Substring(
+    $follow.IndexOf('private void SelectBreadcrumb', [System.StringComparison]::Ordinal))
+$newBreadcrumbSelection = $selectBreadcrumb.Substring(
+    $selectBreadcrumb.IndexOf(
+        '_currentBreadcrumbSequence = breadcrumb.Sequence;',
+        [System.StringComparison]::Ordinal))
+Assert-Contains $selectBreadcrumb 'var preserveAirborneCommit = !IsBodyGrounded &&' `
+    "a target change in midair must retain its bounded landing direction"
+Assert-Order $newBreadcrumbSelection 'if (!preserveAirborneCommit)' `
+    '_directTraversalUntil = 0f;' `
+    "a grounded target change must clear the preceding marker's direction commit"
+Assert-Contains $selectBreadcrumb 'BreadcrumbTrail.ShouldReleasePriorTraversalCommit(' `
+    "the first grounded tick must recognize a commit owned by the previous marker"
+Assert-Contains $trail 'ShouldReleasePriorTraversalCommit(' `
+    "landing cleanup must be an executable pure transition invariant"
+Assert-Contains $selectBreadcrumb 'reason=landed_after_target_change' `
+    "landing cleanup of a previous marker commitment must be visible in logs"
+Assert-Contains $follow '[FOLLOW] ROUTE_TANGENT ' `
+    "every uncommitted tangent decision must be logged between status samples"
+Assert-Contains $follow '$"routeMode={_lastRouteMode}, "' `
+    "runtime evidence must identify waypoint approach versus traversal tangent"
+Assert-Contains $follow '$"targetHorizontalDistance={_lastTargetHorizontalDistance:F2}, "' `
+    "runtime evidence must expose the corridor distance used to permit a tangent"
 Assert-Contains $follow '_jump.TryRequestTraversal(' `
     "recorded route traversal must queue a deterministic grounded jump"
 Assert-NotContains $follow 'if (!status.DirectGroundLimited &&' `
@@ -200,5 +235,5 @@ Assert-NotContains $locomotion 'AddForce' `
     "locomotion must continue through the stock remote-player motor"
 
 Write-Host "Traversal-follow protocol checks passed."
-Write-Host "  Proven: carry rebasing, 3D jump/drop route retention, traversal lookahead/tangents, slope-aware steering, non-vetoed bounded recovery, stock motor/jump paths, no teleport."
+Write-Host "  Proven: carry rebasing, 3D jump/drop route retention, corridor-bounded traversal tangents, stale-commit clearing, slope-aware steering, non-vetoed bounded recovery, stock motor/jump paths, no teleport."
 Write-Host "  Not proven by this static check: live route quality, visible jump timing, ledge choice, or eventual arrival."

@@ -78,13 +78,25 @@ $router = Read-Source "src\AgentToolRouter.cs"
 $bridge = Read-Source "src\OpenAIRealtimeBridge.cs"
 $jobs = Read-Source "src\CompanionJob.cs"
 $actions = Read-Source "src\CompanionActions.cs"
-$target = Read-Source "src\CompanionInteractionTarget.cs"
+$target = Read-Source "src\CompanionPropTarget.cs"
 $pickup = Read-Source "src\CompanionPickupBehavior.cs"
+$dropRouterStart = $router.IndexOf(
+    'private static AgentToolDispatch ExecuteDropItemJob',
+    [System.StringComparison]::Ordinal)
+$dropRouterEnd = $router.IndexOf(
+    'private static AgentToolDispatch ExecuteDropPlayerJob',
+    $dropRouterStart,
+    [System.StringComparison]::Ordinal)
+$dropRouter = $router.Substring(
+    $dropRouterStart,
+    $dropRouterEnd - $dropRouterStart)
 
 Assert-Contains $catalog 'internal const string DropItem = "drop_item";' `
     "the allowlist must expose drop_item"
 Assert-Contains $router 'case AgentToolCatalog.DropItem:' `
     "the router must dispatch drop_item"
+Assert-Contains $router 'return ExecuteDropItemJob(' `
+    "drop_item must cross its exact-target router boundary"
 Assert-Contains $router 'request.ActionName = jobName;' `
     "the shared held-item job must receive the selected operation"
 Assert-Contains $jobs 'JobResources RequiredFor(CompanionJobRequest request);' `
@@ -99,9 +111,33 @@ Assert-Contains $pickup 'if (_locomotion != null && !IsExplicitDrop)' `
     "drop completion must not stop locomotion it never reserved"
 
 Assert-Contains $target 'TryCaptureHeldProp(' `
-    "drop must freeze the prop already in the companion's hands"
-Assert-Contains $pickup 'CompanionInteractionTarget.TryCaptureHeldProp(' `
-    "drop must carry the frozen held prop into its job"
+    "the turn boundary must be able to freeze the exact held prop"
+Assert-Contains $bridge 'TryCaptureCompanionHeldTarget(' `
+    "the utterance boundary must freeze the companion-held prop"
+Assert-Contains $jobs 'internal CompanionPropTarget CompanionHeldTarget;' `
+    "the response turn must retain the frozen companion-held target"
+Assert-Contains $jobs 'internal CompanionPropTarget PropTarget;' `
+    "the typed job request must carry the frozen prop"
+Assert-Contains $dropRouter 'var propTarget = turnReference?.CompanionHeldTarget;' `
+    "drop routing must select only the utterance-frozen held target"
+Assert-Contains $dropRouter 'turnReference?.CompanionHeldCaptureError ??' `
+    "a missing frozen target must preserve its boundary failure"
+Assert-Contains $dropRouter '[ENTITY] TARGET_RESOLVED action={AgentToolCatalog.DropItem}' `
+    "drop target resolution must be observable before dispatch"
+Assert-Contains $dropRouter 'target=companion_held_item, referenceId={propTarget.ReferenceId}' `
+    "drop target telemetry must identify the frozen prop"
+Assert-Contains $dropRouter 'callId={callId ?? "none"}' `
+    "drop target telemetry must retain the model call identity"
+Assert-Contains $dropRouter 'PropTarget = propTarget' `
+    "drop must carry the frozen target through the typed job boundary"
+Assert-Contains $pickup 'return TryBeginDrop(now, request, out failure);' `
+    "drop execution must receive the typed request"
+Assert-Contains $pickup 'var requestedTarget = request == null ? null : request.PropTarget;' `
+    "drop execution must require the request-bound prop"
+Assert-Contains $pickup '_target = requestedTarget;' `
+    "drop execution must retain the frozen target for reconciliation"
+Assert-NotContains $pickup 'TryCaptureHeldProp(' `
+    "drop execution must never capture live hands as a new target"
 Assert-Contains $pickup '_target.IsStillTheSameProp(hands.heldProp)' `
     "the host drop command must be gated by exact held-prop identity"
 Assert-Contains $pickup 'ServerDropPropAutomatic(false)' `
@@ -109,6 +145,9 @@ Assert-Contains $pickup 'ServerDropPropAutomatic(false)' `
 Assert-Order $pickup '_target.IsStillTheSameProp(hands.heldProp)' `
     'ServerDropPropAutomatic(false)' `
     "identity validation must appear before the parameterless host drop call"
+Assert-Order $pickup 'var requestedTarget = request == null ? null : request.PropTarget;' `
+    'ServerDropPropAutomatic(false)' `
+    "the frozen request target must be selected before host authority"
 
 Assert-Contains $pickup 'if (heldProp != null)' `
     "drop confirmation must continue while any prop remains held"
@@ -129,5 +168,5 @@ Assert-NotContains $pickup 'nearest' `
     "drop must never use nearest-item fallback"
 
 Write-Host "Held-item drop protocol checks passed."
-Write-Host "  Proven: tool routing, hands-only arbitration, exact held identity, host drop path, stable empty-hands confirmation."
+Write-Host "  Proven: utterance-frozen drop routing, hands-only arbitration, exact held identity, host drop path, stable empty-hands confirmation."
 Write-Host "  Not proven: Unity runtime release or visible held-item state."

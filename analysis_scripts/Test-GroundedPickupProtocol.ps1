@@ -80,8 +80,9 @@ $follow = Read-Source "src\CompanionFollowBehavior.cs"
 $client = Read-Source "src\OpenAIRealtimeClient.cs"
 $router = Read-Source "src\AgentToolRouter.cs"
 $catalog = Read-Source "src\AgentToolCatalog.cs"
-$target = Read-Source "src\CompanionInteractionTarget.cs"
+$target = Read-Source "src\CompanionPropTarget.cs"
 $pickup = Read-Source "src\CompanionPickupBehavior.cs"
+$approach = Read-Source "src\CompanionApproachController.cs"
 $jobContract = Read-Source "src\CompanionJob.cs"
 $controller = Read-Source "src\CompanionController.cs"
 $inspection = Read-Source "src\CompanionInspectionBehavior.cs"
@@ -95,7 +96,7 @@ Assert-Contains $router 'CompanionTurnReference turnReference' `
     "dispatch must receive response-scoped reference context"
 Assert-Contains $router 'turnReference.EntityReferences.TryResolve(' `
     "dispatch must resolve a model-selected context ID"
-Assert-Contains $router 'InteractionTarget = interactionTarget' `
+Assert-Contains $router 'PropTarget = propTarget' `
     "the job request must receive the frozen target"
 Assert-Contains $router '[ENTITY] TARGET_RESOLVED' `
     "runtime evidence must report exact target grounding"
@@ -128,31 +129,43 @@ Assert-Contains $actions 'new CompanionPickupBehavior(_locomotion, _attention, _
     "pickup must share the companion's native locomotion and recovery actuators"
 Assert-Contains $pickup 'PickupState.ApproachingTarget' `
     "out-of-reach pickup must enter a bounded approach phase"
-Assert-Contains $pickup '_locomotion.TrySteerToward(' `
-    "pickup approach must reuse obstacle-aware steering"
-Assert-Contains $pickup 'private const float ApproachNavigationInterval = 0.1f;' `
-    "pickup navigation must run at navigation cadence rather than every frame"
+Assert-Contains $pickup '_approach.Advance(' `
+    "pickup must use the shared approach state machine"
+Assert-Contains $pickup '[ACTION] PICKUP_APPROACH_RESUMED' `
+    "the same exact prop must resume approach if it moves during alignment"
+Assert-Contains $approach '_locomotion.TrySteerToward(' `
+    "shared approaches must reuse obstacle-aware steering"
+Assert-Contains $approach 'private const float NavigationInterval = 0.1f;' `
+    "shared physical navigation must run at navigation cadence rather than every frame"
+Assert-NotContains $pickup '_locomotion.TrySteerToward(' `
+    "pickup must not duplicate shared steering mechanics"
+Assert-NotContains $pickup '_locomotion.ObserveProgress(' `
+    "pickup must not duplicate shared progress observation"
+Assert-NotContains $pickup '_jump.TryRequestActionRecovery(' `
+    "pickup must not duplicate shared recovery mechanics"
 Assert-Contains $follow 'any live movement intent belongs to the action holding that' `
     "suspended follow must not clear pickup's locomotion intent"
 Assert-Contains $follow 'Yield before idle-follow cleanup can clear that job' `
     "stay mode must also yield locomotion to pickup"
-Assert-Contains $pickup '_jump.TryRequestActionRecovery(' `
-    "a stalled pickup approach must have bounded grounded jump recovery"
-Assert-Contains $pickup 'CompanionJumpActuator.IsDeferredRecoveryError(jumpError)' `
+Assert-Contains $approach '_jump.TryRequestActionRecovery(' `
+    "a stalled physical approach must have bounded grounded jump recovery"
+Assert-Contains $approach 'CompanionJumpActuator.IsDeferredRecoveryError(jumpError)' `
     "temporary jump contention must defer pickup instead of failing the job"
 Assert-Contains $pickup '[ACTION] PICKUP_APPROACH_DEFERRED' `
     "deferred recovery must be visible in runtime evidence"
+Assert-Contains $pickup '[ACTION] PICKUP_APPROACH_RECOVERY' `
+    "committed recovery must retain pickup-specific runtime evidence"
 Assert-NotContains $pickup 'MaximumApproachRecoveries' `
     "the existing job timeout must be the single recovery bound"
 Assert-NotContains $pickup 'directGroundLimited ||' `
     "the stock slope signal must not veto pickup recovery"
 Assert-NotContains $pickup 'HasGroundSupportAhead' `
     "an unreliable floor heuristic must not veto pickup recovery"
-Assert-Contains $pickup '_approachCommitDirection = direction;' `
+Assert-Contains $approach '_recoveryDirection = direction;' `
     "pickup recovery must keep one direction through its bounded commitment"
-Assert-Contains $pickup '_approachCommitDirection,' `
+Assert-Contains $approach '_recoveryDirection,' `
     "a moving prop must not redirect an active recovery commitment"
-Assert-Contains $pickup '_jump.CancelActionRecovery(AgentToolCatalog.PickUpItem)' `
+Assert-Contains $pickup '_approach.CancelRecovery();' `
     "cancelled pickup work must remove its queued recovery jump"
 Assert-Contains $pickup '[ACTION] PICKUP_APPROACH_REACHED' `
     "runtime evidence must distinguish successful navigation from pickup"
@@ -162,6 +175,14 @@ Assert-NotContains $pickup 'CompleteFailure("target_alignment_failed")' `
     "custom pickup alignment must not reject an exact stock action"
 Assert-Contains $pickup '[ACTION] PICKUP_JOB_CONCLUDED' `
     "a completed pickup must log release of its job lifecycle"
+Assert-Contains $pickup 'CompanionTurnHandsTransition.HoldingExactProp' `
+    "confirmed pickup must publish an exact hands-state transition"
+Assert-Contains $pickup 'ExactProp = _target' `
+    "the transition must carry the same frozen pickup identity"
+Assert-Contains $bridge 'turnReference.TryApply(' `
+    "the exact pickup transition must be applied before model continuation"
+Assert-Contains $controller 'current.TryWithCompanionHeldProp(' `
+    "turn composition must validate the exact completed prop rather than recapture hands"
 Assert-Order $pickup 'public void Conclude(float now)' `
     '[ACTION] PICKUP_JOB_CONCLUDED' `
     "pickup conclusion must release the completed job while leaving possession in game state"
