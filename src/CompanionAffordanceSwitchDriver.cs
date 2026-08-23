@@ -688,7 +688,6 @@ internal sealed class CompanionWorldSwitchAffordanceDriver :
     private readonly ushort _releaseSwitchTicket;
     private readonly uint _releaseSwitchNetworkId;
     private readonly int _releaseSwitchIndex;
-    private readonly bool _requiresCastableOutcomeValidation;
     private readonly bool _requiresCompanionCarriedByHuman;
 
     private CompanionWorldSwitchAffordanceDriver(
@@ -697,16 +696,14 @@ internal sealed class CompanionWorldSwitchAffordanceDriver :
         TrackedPeckState trackedState,
         CompanionKeyAffordance keyAffordance,
         CompanionAffordanceSource source,
-        bool requiresCastableOutcomeValidation)
+        bool requiresCompanionCarriedByHuman)
         : base(peckSwitch, trackedState, peckSwitch.upSwitch, source)
     {
         _castableTarget = castableTarget;
         _castableInstanceId = castableTarget.GetInstanceID();
         _keyAffordance = keyAffordance;
-        _requiresCastableOutcomeValidation =
-            requiresCastableOutcomeValidation;
         _requiresCompanionCarriedByHuman =
-            !requiresCastableOutcomeValidation;
+            requiresCompanionCarriedByHuman;
 
         var switchReference = peckSwitch.shellReference;
         _switchTicket = switchReference.ticket;
@@ -731,7 +728,25 @@ internal sealed class CompanionWorldSwitchAffordanceDriver :
         CastableOutcome outcome,
         CompanionActorContext actor,
         CompanionAffordanceSource source,
-        bool requiresCastableOutcomeValidation,
+        out ICompanionAffordanceDriver driver,
+        out string error)
+    {
+        return TryCreateWithRelationship(
+            castableTarget,
+            outcome,
+            actor,
+            source,
+            false,
+            out driver,
+            out error);
+    }
+
+    private static bool TryCreateWithRelationship(
+        CastableTarget castableTarget,
+        CastableOutcome outcome,
+        CompanionActorContext actor,
+        CompanionAffordanceSource source,
+        bool requiresCompanionCarriedByHuman,
         out ICompanionAffordanceDriver driver,
         out string error)
     {
@@ -770,7 +785,7 @@ internal sealed class CompanionWorldSwitchAffordanceDriver :
             trackedState,
             keyAffordance,
             source,
-            requiresCastableOutcomeValidation);
+            requiresCompanionCarriedByHuman);
         error = null;
         return true;
     }
@@ -860,12 +875,12 @@ internal sealed class CompanionWorldSwitchAffordanceDriver :
             return false;
         }
 
-        if (!TryCreate(
+        if (!TryCreateWithRelationship(
                 castableTarget,
                 selected,
                 actor,
                 source,
-                false,
+                true,
                 out driver,
                 out error))
         {
@@ -981,35 +996,17 @@ internal sealed class CompanionWorldSwitchAffordanceDriver :
         CompanionActorContext actor,
         out string error)
     {
-        if (_requiresCastableOutcomeValidation)
-        {
-            CastableOutcome outcome;
-            if (actor?.Body == null || !actor.Body.IsAlive ||
-                !_castableTarget.GetCastableOutcome(
-                    actor.Body.Character,
-                 out outcome) ||
-                outcome == null || outcome.peckSwitch == null ||
-                outcome.peckSwitch.GetInstanceID() != SwitchInstanceId ||
-                !CompanionAffordanceProtocol.HasSupportedPrerequisites(
-                    outcome.needsKey,
-                    outcome.needsPocketProp,
-                    true) ||
-                (_keyAffordance == null
-                    ? outcome.needsKey
-                    : !_keyAffordance.MatchesOutcome(outcome)))
-            {
-                error = "interaction_conditions_changed";
-                return false;
-            }
-
-            error = null;
-            return true;
-        }
-
         if (_requiresCompanionCarriedByHuman)
             return TryValidateCarriedSwitchFallback(actor, out error);
-        error = "interaction_conditions_changed";
-        return false;
+
+        // The exact raw outcome already froze this switch, its release switch,
+        // and any supported key prerequisite. Do not rematerialize a
+        // player-filtered CastableOutcome for Rambler before its alignment job
+        // can start. Exact identity remains mandatory here; stock reach,
+        // safety, prerequisite, authority, and receipt checks remain mandatory
+        // immediately before and after native dispatch.
+        error = null;
+        return true;
     }
 
     protected override bool TryValidateBoundRelationship(

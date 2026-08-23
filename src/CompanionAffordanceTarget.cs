@@ -787,7 +787,6 @@ internal sealed class CompanionAffordanceTarget
                     outcome,
                     actor,
                     source,
-                    true,
                     out driver,
                     out error))
             {

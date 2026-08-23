@@ -261,15 +261,17 @@ Assert-Contains $poseDriver 'CompanionAffordanceProtocol.HasSupportedPrerequisit
     "pose commit must reject unsupported key and pocket prerequisites"
 Assert-Contains $homeDriver 'CompanionAffordanceProtocol.HasSupportedPrerequisites(' `
     "home commit must reject unsupported key and pocket prerequisites"
-Assert-Contains $switchDrivers 'outcome.peckSwitch.GetInstanceID() != SwitchInstanceId' `
-    "switch outcome revalidation must preserve the frozen identity"
-Assert-Contains $switchDrivers 'outcome.needsPocketProp,' `
-    "world-switch commit must reject unsupported pocket prerequisites"
+Assert-Contains $switchDrivers 'PeckSwitch.GetInstanceID() != _switchInstanceId' `
+    "switch activation must preserve the frozen primitive identity"
+Assert-NotContains $switchDrivers '_castableTarget.GetCastableOutcome(' `
+    "pre-job switch admission must not rematerialize a player-filtered outcome"
+Assert-Contains $targetWrapper 'outcome.needsPocketProp,' `
+    "world-switch binding must reject unsupported pocket prerequisites"
 Assert-Sequence $switchDrivers @(
     'TryValidateExactComponents(actor, false, out error)',
     'CompanionAffordanceDriverUtility.IsWithinNativeReach(',
     'TryValidateExactComponents(actor, true, out error)') `
-    "switch identity, geometric reach, and dynamic admission must remain ordered"
+    "switch identity and geometric reach must remain ordered through final readiness"
 Assert-Order $poseDriver 'TryValidateExactComponents(actor, false, out error)' `
     'CompanionAffordanceProtocol.ClassifyWorldReadiness(' `
     "pose identity must be checked before approach classification"
@@ -317,8 +319,10 @@ Assert-Contains $targetWrapper 'CARRIED_STRUCTURAL_APPROACH_BLOCKED' `
     "failed carried capture must never fall through to an ordinary locomoting driver"
 Assert-Contains $protocol 'structuralOutcomeCount == 1' `
     "carried fallback must reject ambiguous native outcomes"
-Assert-Contains $switchDrivers '_requiresCastableOutcomeValidation' `
-    "ordinary and structurally captured switches must rematerialize their outcome"
+Assert-NotContains $switchDrivers '_requiresCastableOutcomeValidation' `
+    "ordinary switches must not retain the disproven player-outcome gate"
+Assert-Contains $switchDrivers 'private static bool TryCreateWithRelationship(' `
+    "carried-only switch binding must be explicit instead of a public boolean mode"
 Assert-Contains $switchDrivers '_requiresCompanionCarriedByHuman' `
     "carried-only admission must be revalidated before native authority"
 Assert-Contains $switchDrivers 'actor?.IsHumanCarryingCompanion == true' `
