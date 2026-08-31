@@ -19,8 +19,11 @@ internal sealed class CompanionController : MonoBehaviour
     private float _nextPoll;
     private float _verifyAt;
     private bool _hasSpawnedBot;
-    private readonly CompanionJobLease _jobLease = new CompanionJobLease();
-    private CompanionJobCompletion _completionAwaitingSettlement;
+    private readonly System.Collections.Generic.List<CompanionJobLease> _jobLeases =
+        new System.Collections.Generic.List<CompanionJobLease>();
+    private readonly System.Collections.Generic.Dictionary<long, CompanionJobCompletion>
+        _completionsAwaitingSettlement =
+            new System.Collections.Generic.Dictionary<long, CompanionJobCompletion>();
 
     private static CompanionController _activeController;
     private static long _nextJobToken;
@@ -69,8 +72,8 @@ internal sealed class CompanionController : MonoBehaviour
             return failure;
         var now = Time.realtimeSinceStartup;
         var result = controller._actions.CancelActiveWork(now);
-        if (controller._jobLease.HasValue)
-            controller._jobLease.MarkCancellationRequested(now);
+        for (var index = 0; index < controller._jobLeases.Count; index++)
+            controller._jobLeases[index].MarkCancellationRequested(now);
         return result;
     }
 
@@ -86,14 +89,7 @@ internal sealed class CompanionController : MonoBehaviour
             return false;
 
         var now = Time.realtimeSinceStartup;
-        controller.RetireSettledJob(now, "before_begin");
-        if (controller._jobLease.HasValue)
-        {
-            failure = AgentToolResult.Failure(
-                (controller._jobLease.JobName ?? "action") +
-                "_in_progress");
-            return false;
-        }
+        controller.RetireSettledJobs(now, "before_begin");
         float timeoutSeconds;
         if (!controller._actions.TryBeginJob(
                 jobName,
@@ -106,12 +102,14 @@ internal sealed class CompanionController : MonoBehaviour
         }
 
         var token = ++_nextJobToken;
-        if (!controller._jobLease.TryBegin(token, jobName))
+        var lease = new CompanionJobLease();
+        if (!lease.TryBegin(token, jobName))
         {
             controller._actions.CancelJob(jobName, now);
             failure = AgentToolResult.Failure("action_lease_unavailable");
             return false;
         }
+        controller._jobLeases.Add(lease);
         handle = new CompanionJobHandle
         {
             Token = token,
@@ -365,18 +363,22 @@ internal sealed class CompanionController : MonoBehaviour
             return true;
         }
 
-        if (!controller._jobLease.Matches(operationToken))
+        var lease = controller.FindLease(operationToken);
+        if (lease == null)
         {
-
             completion = CompanionJobCompletion.Failed("cancelled");
             return true;
         }
 
         var now = Time.realtimeSinceStartup;
-        var trackedJobName = controller._jobLease.JobName;
-        if (controller._completionAwaitingSettlement != null)
+        var trackedJobName = lease.JobName;
+        CompanionJobCompletion stashed;
+        if (controller._completionsAwaitingSettlement.TryGetValue(
+                operationToken,
+                out stashed))
         {
-            if (!controller.TryConcludeTrackedJob(
+            if (!controller.TryConcludeLease(
+                    lease,
                     now,
                     "completion_publication",
                     false))
@@ -385,8 +387,8 @@ internal sealed class CompanionController : MonoBehaviour
                 return false;
             }
 
-            completion = controller._completionAwaitingSettlement;
-            controller._completionAwaitingSettlement = null;
+            completion = stashed;
+            controller._completionsAwaitingSettlement.Remove(operationToken);
             controller.RevalidateCompletionForPublication(
                 ref completion,
                 operationToken,
@@ -395,12 +397,11 @@ internal sealed class CompanionController : MonoBehaviour
         }
 
         if (!controller._actions.TryTakeJobCompletion(
-                controller._jobLease.JobName,
+                trackedJobName,
                 now,
                 out completion))
         {
-            if (!controller._actions.IsJobSettled(
-                    controller._jobLease.JobName))
+            if (!controller._actions.IsJobSettled(trackedJobName))
             {
                 return false;
             }
@@ -408,9 +409,9 @@ internal sealed class CompanionController : MonoBehaviour
             completion = CompanionJobCompletion.Failed("cancelled");
             Plugin.Logger.LogInfo(
                 $"[ACTION] JOB_CANCEL_SETTLED token={operationToken}, " +
-                $"job={controller._jobLease.JobName ?? "none"}.");
-            controller._actions.ConcludeJob(controller._jobLease.JobName, now);
-            controller.ClearActiveJobTracking();
+                $"job={trackedJobName ?? "none"}.");
+            controller._actions.ConcludeJob(trackedJobName, now);
+            controller.RemoveLease(lease);
             return true;
         }
 
@@ -423,17 +424,18 @@ internal sealed class CompanionController : MonoBehaviour
                                         completion.RetainUntilAssistantAudio;
         if (!retainUntilAssistantAudio)
         {
-            controller._completionAwaitingSettlement = completion;
+            controller._completionsAwaitingSettlement[operationToken] = completion;
             completion = null;
-            if (!controller.TryConcludeTrackedJob(
+            if (!controller.TryConcludeLease(
+                    lease,
                     now,
                     "completion_publication",
                     false))
             {
                 return false;
             }
-            completion = controller._completionAwaitingSettlement;
-            controller._completionAwaitingSettlement = null;
+            completion = controller._completionsAwaitingSettlement[operationToken];
+            controller._completionsAwaitingSettlement.Remove(operationToken);
         }
         controller.RevalidateCompletionForPublication(
             ref completion,
@@ -488,32 +490,32 @@ internal sealed class CompanionController : MonoBehaviour
     internal static void CancelJob(long operationToken)
     {
         var controller = _activeController;
-        if (controller != null && controller._jobLease.Matches(operationToken))
+        var lease = controller?.FindLease(operationToken);
+        if (lease != null)
         {
             var now = Time.realtimeSinceStartup;
-            controller._completionAwaitingSettlement = null;
-            controller._actions.CancelJob(
-                controller._jobLease.JobName,
-                now);
-            controller._jobLease.MarkCancellationRequested(now);
+            controller._completionsAwaitingSettlement.Remove(operationToken);
+            controller._actions.CancelJob(lease.JobName, now);
+            lease.MarkCancellationRequested(now);
         }
     }
 
     internal static bool DetachJob(long operationToken)
     {
         var controller = _activeController;
-        if (controller == null || !controller._jobLease.Matches(operationToken))
+        var lease = controller?.FindLease(operationToken);
+        if (lease == null)
         {
             return false;
         }
 
         var now = Time.realtimeSinceStartup;
-        if (!controller._jobLease.CancellationRequested)
-            controller._actions.CancelJob(controller._jobLease.JobName, now);
-        controller._jobLease.MarkDetached(now);
+        if (!lease.CancellationRequested)
+            controller._actions.CancelJob(lease.JobName, now);
+        lease.MarkDetached(now);
         Plugin.Logger.LogInfo(
             $"[ACTION] JOB_SETTLEMENT_DETACHED token={operationToken}, " +
-            $"job={controller._jobLease.JobName ?? "none"}.");
+            $"job={lease.JobName ?? "none"}.");
         return true;
     }
 
@@ -522,12 +524,13 @@ internal sealed class CompanionController : MonoBehaviour
         string reason)
     {
         var controller = _activeController;
-        if (controller == null || !controller._jobLease.Matches(operationToken))
+        var lease = controller?.FindLease(operationToken);
+        if (lease == null)
         {
             return false;
         }
 
-        var jobName = controller._jobLease.JobName;
+        var jobName = lease.JobName;
         controller._actions.ConcludeJob(jobName, Time.realtimeSinceStartup);
         if (!controller._actions.IsJobSettled(jobName))
         {
@@ -547,15 +550,34 @@ internal sealed class CompanionController : MonoBehaviour
     internal static bool ConcludeJob(long operationToken)
     {
         var controller = _activeController;
-        if (controller == null || operationToken == 0 ||
-            !controller._jobLease.Matches(operationToken))
+        var lease = controller?.FindLease(operationToken);
+        if (lease == null)
         {
             return true;
         }
-        return controller.TryConcludeTrackedJob(
+        return controller.TryConcludeLease(
+            lease,
             Time.realtimeSinceStartup,
             "bridge_conclusion",
             true);
+    }
+
+    private CompanionJobLease FindLease(long token)
+    {
+        if (token == 0)
+            return null;
+        for (var index = 0; index < _jobLeases.Count; index++)
+        {
+            if (_jobLeases[index].Matches(token))
+                return _jobLeases[index];
+        }
+
+        return null;
+    }
+
+    private void RemoveLease(CompanionJobLease lease)
+    {
+        _jobLeases.Remove(lease);
     }
 
     internal static void SetConversationActive(bool active)
@@ -666,7 +688,7 @@ internal sealed class CompanionController : MonoBehaviour
         try
         {
             _actions.TickLateFrame(now);
-            ReapDetachedJob(now);
+            ReapDetachedJobs(now);
         }
         catch (Exception exception)
         {
@@ -804,83 +826,101 @@ internal sealed class CompanionController : MonoBehaviour
         }
     }
 
-    private void RetireSettledJob(float now, string reason)
+    private void RetireSettledJobs(float now, string reason)
     {
-        if (!_jobLease.HasValue ||
-            !_actions.IsJobSettled(_jobLease.JobName))
+        for (var index = _jobLeases.Count - 1; index >= 0; index--)
         {
-            return;
-        }
+            var lease = _jobLeases[index];
+            if (!lease.HasValue ||
+                _completionsAwaitingSettlement.ContainsKey(lease.Token) ||
+                !_actions.IsJobSettled(lease.JobName))
+            {
+                continue;
+            }
 
-        var token = _jobLease.Token;
-        var jobName = _jobLease.JobName;
+            RetireLeaseAt(index, now, reason);
+        }
+    }
+
+    private void RetireLeaseAt(int index, float now, string reason)
+    {
+        var lease = _jobLeases[index];
+        var token = lease.Token;
+        var jobName = lease.JobName;
         CompanionJobCompletion ignored;
         _actions.TryTakeJobCompletion(jobName, now, out ignored);
         _actions.ConcludeJob(jobName, now);
-        ClearActiveJobTracking();
+        _jobLeases.RemoveAt(index);
+        _completionsAwaitingSettlement.Remove(token);
         Plugin.Logger.LogInfo(
             $"[ACTION] JOB_TOKEN_RETIRED token={token}, " +
             $"job={jobName ?? "none"}, reason={reason}.");
     }
 
-    private void ReapDetachedJob(float now)
+    private void ReapDetachedJobs(float now)
     {
-        if (!_jobLease.IsDetached || !_jobLease.HasValue)
-            return;
-
-        if (_actions.IsJobSettled(_jobLease.JobName))
+        for (var index = _jobLeases.Count - 1; index >= 0; index--)
         {
-            RetireSettledJob(now, "detached_reconciled");
-            return;
-        }
+            var lease = _jobLeases[index];
+            if (!lease.HasValue || !lease.IsDetached)
+                continue;
 
-        if (!_jobLease.DetachedSettlementTimedOut(
-                now,
-                DetachedJobSettlementMaximumSeconds))
-        {
-            return;
-        }
+            if (_actions.IsJobSettled(lease.JobName))
+            {
+                RetireLeaseAt(index, now, "detached_reconciled");
+                continue;
+            }
 
-        var token = _jobLease.Token;
-        var jobName = _jobLease.JobName;
-        _actions.ConcludeJob(jobName, now);
-        if (!_actions.IsJobSettled(jobName))
-        {
-            Plugin.Logger.LogError(
-                $"[ACTION] JOB_SETTLEMENT_ABANDON_FAILED token={token}, " +
-                $"job={jobName ?? "none"}, reason=detached_timeout.");
-            return;
+            if (!lease.DetachedSettlementTimedOut(
+                    now,
+                    DetachedJobSettlementMaximumSeconds))
+            {
+                continue;
+            }
+
+            var token = lease.Token;
+            var jobName = lease.JobName;
+            _actions.ConcludeJob(jobName, now);
+            if (!_actions.IsJobSettled(jobName))
+            {
+                Plugin.Logger.LogError(
+                    $"[ACTION] JOB_SETTLEMENT_ABANDON_FAILED token={token}, " +
+                    $"job={jobName ?? "none"}, reason=detached_timeout.");
+                continue;
+            }
+            _jobLeases.RemoveAt(index);
+            _completionsAwaitingSettlement.Remove(token);
+            Plugin.Logger.LogWarning(
+                $"[ACTION] JOB_SETTLEMENT_ABANDONED token={token}, " +
+                $"job={jobName ?? "none"}, reason=detached_timeout, " +
+                "disposition=ownership_returned_to_stock_state.");
         }
-        ClearActiveJobTracking();
-        Plugin.Logger.LogWarning(
-            $"[ACTION] JOB_SETTLEMENT_ABANDONED token={token}, " +
-            $"job={jobName ?? "none"}, reason=detached_timeout, " +
-            "disposition=ownership_returned_to_stock_state.");
     }
 
     private void ClearActiveJobTracking()
     {
-        _jobLease.Clear();
-        _completionAwaitingSettlement = null;
+        _jobLeases.Clear();
+        _completionsAwaitingSettlement.Clear();
     }
 
-    private bool TryConcludeTrackedJob(
+    private bool TryConcludeLease(
+        CompanionJobLease lease,
         float now,
         string reason,
         bool detachOnFailure)
     {
-        if (!_jobLease.HasValue)
+        if (lease == null || !lease.HasValue)
             return true;
 
-        var token = _jobLease.Token;
-        var jobName = _jobLease.JobName;
+        var token = lease.Token;
+        var jobName = lease.JobName;
         _actions.ConcludeJob(jobName, now);
         var settled = _actions.IsJobSettled(jobName);
         if (!CompanionJobSettlementProtocol.CanReleaseLeaseAfterConclude(
                 settled))
         {
             if (detachOnFailure)
-                _jobLease.MarkDetached(now);
+                lease.MarkDetached(now);
             Plugin.Logger.LogError(
                 $"[ACTION] JOB_CONCLUSION_PENDING token={token}, " +
                 $"job={jobName ?? "none"}, reason={reason}, " +
@@ -888,7 +928,7 @@ internal sealed class CompanionController : MonoBehaviour
             return false;
         }
 
-        _jobLease.Clear();
+        RemoveLease(lease);
         return true;
     }
 

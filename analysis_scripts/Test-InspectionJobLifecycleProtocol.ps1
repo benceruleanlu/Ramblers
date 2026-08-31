@@ -27,11 +27,11 @@ function Assert-NotContains {
     }
 }
 
-Assert-Contains 'var retainForAudio = sent &&' `
+Assert-Contains 'var retainForAudio = pending.AnyOutputSubmitted &&' `
     "a discarded function-output batch must never retain the completed inspection job"
-Assert-Contains 'AgentToolCatalog.InspectReference,' `
-    "new human speech must cancel an in-flight inspection before its stale image can continue"
-Assert-Contains '_lingeringJobTurnId = retainForAudio ? pending.TurnId : 0;' `
+Assert-Contains 'SubmitCallOutput(pending, slot, continuation);' `
+    "a late job result must deliver its continuation with its own call output"
+Assert-Contains '_lingeringJobTurnId = pending.TurnId;' `
     "the presentation hold must bind to its exact response turn"
 Assert-Contains 'PRESENTATION_JOB_RETAINED turnId={pending.TurnId}' `
     "a retained inspection must emit an auditable lifecycle marker"

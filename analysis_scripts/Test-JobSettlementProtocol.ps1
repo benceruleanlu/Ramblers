@@ -47,14 +47,14 @@ Assert-Contains $actions 'CompanionJobSettlementProtocol.CanPublishCompletion(' 
     "the coordinator must gate every completion through the settlement rule"
 Assert-Contains $controller 'controller._actions.IsJobSettled(' `
     "cancelled operations must retain their token until the exact job settles"
-Assert-Contains $controller 'controller._jobLease.MarkCancellationRequested(now);' `
+Assert-Contains $controller 'lease.MarkCancellationRequested(now);' `
     "controller cancellation must update the executable token lease without clearing it"
 Assert-Contains $controller 'completion = CompanionJobCompletion.Failed("cancelled");' `
     "a settled cancellation without a behavior completion must become terminal"
 Assert-Contains $controller 'internal static bool DetachJob(long operationToken)' `
     "client replacement must transfer reconciliation ownership to the controller"
-Assert-Contains $controller 'if (controller._jobLease.HasValue)' `
-    "a live lease must block replacement even when requested capabilities are disjoint"
+Assert-Contains $controller 'FindLease(operationToken);' `
+    "every bridge token operation must resolve its own exact live lease"
 Assert-Contains $bridge 'TOOL_BATCH_RECONCILIATION_STARTED' `
     "cancellation settlement must emit a start marker"
 Assert-Contains $bridge 'TOOL_BATCH_RECONCILED' `
@@ -67,7 +67,7 @@ Assert-Contains $controller 'controller._actions.IsJobSettled(jobName)' `
     "bounded ownership release must verify the job actually released its capabilities"
 Assert-Contains $controller 'CanReleaseLeaseAfterConclude(' `
     "ordinary conclusion must verify settlement before releasing the lease"
-Assert-Contains $controller '_completionAwaitingSettlement' `
+Assert-Contains $controller '_completionsAwaitingSettlement' `
     "a completion must remain private if synchronous conclusion does not settle"
 Assert-Contains $controller 'RevalidateCompletionForPublication(' `
     "every model-visible completion must revalidate its hands transition at consumption"

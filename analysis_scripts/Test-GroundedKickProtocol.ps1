@@ -185,8 +185,8 @@ Assert-Contains $kick 'if (validateCurrentPose && pose != null && !pose.allowKic
     "only current-pose compatibility may wait for auto-stand"
 Assert-Contains $kick 'if (PlayerArms.LegIsBusyKicking(_body.Character))' `
     "kick admission must retain the stock leg-busy lifecycle guard"
-Assert-Contains $bridge 'AgentToolCatalog.KickItem,' `
-    "new human speech must cancel a pending kick through reconciliation"
+Assert-Contains $bridge '"job_timeout");' `
+    "a stalled kick must still reconcile through timeout cancellation"
 Assert-Contains $bridge 'TryCaptureCompanionHeldTarget(' `
     "the response turn must freeze the item already in companion hands"
 Assert-Contains $bridge 'CompanionController.TryCaptureHumanPlayerTarget(' `

@@ -224,10 +224,9 @@ internal sealed class CompanionActionCoordinator
             return false;
         }
 
-        var running = FindActiveJob();
-        if (running != null && !ReferenceEquals(running, job))
+        if (job.IsActive)
         {
-            failure = AgentToolResult.Failure(running.ActiveName + "_in_progress");
+            failure = AgentToolResult.Failure(job.ActiveName + "_in_progress");
             return false;
         }
 
