@@ -1,9 +1,5 @@
 namespace Ramblers;
 
-/// <summary>
-/// Single source of truth for model-visible tool names and JSON schemas.
-/// Unity dispatch and argument validation remain in <see cref="AgentToolRouter"/>.
-/// </summary>
 internal static class AgentToolCatalog
 {
     internal const string SetFollowMode = "set_follow_mode";

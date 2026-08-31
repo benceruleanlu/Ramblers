@@ -1,10 +1,5 @@
 namespace Ramblers;
 
-/// <summary>
-/// The semantic intent for a native primary interaction. Most affordances use
-/// their primary action; a sittable PlayerPose needs an explicit sit intent so
-/// capability data is not mistaken for what the human asked the companion to do.
-/// </summary>
 internal enum CompanionInteractionIntent
 {
     Use,
@@ -18,11 +13,6 @@ internal enum CompanionAffordanceReadinessState
     Unavailable
 }
 
-/// <summary>
-/// Pure transaction rules shared by every switch-like affordance. Keeping these
-/// rules independent of Unity makes same-state receipts and release timing
-/// executable protocol tests rather than source-shape assumptions.
-/// </summary>
 internal static class CompanionAffordanceProtocol
 {
     internal const float SwitchReleaseDelaySeconds = 0.12f;
@@ -85,12 +75,6 @@ internal static class CompanionAffordanceProtocol
                expectedState == previousState;
     }
 
-    /// <summary>
-    /// TrackedPeckState intentionally leaves currentPeckContext unchanged when
-    /// a same-state action is retriggered. With ignoreStateRepeats disabled the
-    /// authoritative dispatch calls PeckManager.ServerRetrigger, so a missing
-    /// action-number mutation is the native receipt rather than a timeout.
-    /// </summary>
     internal static bool IsNativeRetrigger(
         bool ignoreStateRepeats,
         bool hasPreviousContext,
@@ -101,11 +85,6 @@ internal static class CompanionAffordanceProtocol
                expectedState == previousState;
     }
 
-    /// <summary>
-    /// The only CastableOutcome shape whose normal admission may be deferred
-    /// while the companion is physically carried. Key, pocket-item, placement,
-    /// and pose conditions remain exclusively game-owned and are never bypassed.
-    /// </summary>
     internal static bool IsUnconditionedWorldSwitchOutcome(
         bool hasSwitch,
         bool hasPlayerPose,
@@ -117,13 +96,6 @@ internal static class CompanionAffordanceProtocol
                !needsKey && !needsPocketProp;
     }
 
-    /// <summary>
-    /// Ramblers currently binds keys only to the switch primitive that owns
-    /// the stock held-key command. Pocket-item prerequisites have no exact
-    /// companion-side binding yet. Apply this once at the central outcome
-    /// discriminator so near dynamic capture and far structural capture cannot
-    /// disagree about the same native outcome.
-    /// </summary>
     internal static bool HasSupportedPrerequisites(
         bool needsKey,
         bool needsPocketProp,
@@ -168,13 +140,6 @@ internal static class CompanionAffordanceProtocol
                constructibleDriverCount == 1;
     }
 
-    /// <summary>
-    /// Reach is intentionally classified before dynamic CastableOutcome
-    /// availability. An exact far target may approach only while the companion
-    /// owns its locomotion; a human-carried companion must remain in place.
-    /// Ready here means the reach phase passed. Callers still validate the
-    /// dynamic native outcome and its preconditions before activation.
-    /// </summary>
     internal static CompanionAffordanceReadinessState ClassifyWorldReadiness(
         bool exactIdentityAvailable,
         bool pointAvailable,

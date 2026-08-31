@@ -143,8 +143,7 @@ internal abstract class CompanionSwitchAffordanceDriver :
         var body = actor.Body;
         try
         {
-            // Freeze the world context identities before a synchronous key
-            // effect can consume its prop, matching the stock client ordering.
+
             switchActivation.SwitchContextProp = GetSwitchContextProp(actor);
             switchActivation.SwitchContext = new PeckContext(
                 actor.Body.Character,
@@ -219,9 +218,6 @@ internal abstract class CompanionSwitchAffordanceDriver :
             if (!switchActivation.CanDispatchMainSwitch)
                 return true;
 
-            // The key effect can consume the held key and invalidate the old
-            // CastableOutcome. Revalidate exact target/actor authority and the
-            // stock use checks, but do not require that consumed prerequisite.
             if (!TryValidatePostPrerequisiteCommit(actor, out error))
                 return false;
             try
@@ -583,9 +579,6 @@ internal abstract class CompanionSwitchAffordanceDriver :
             activation.DownDispatchedAt = now;
         }
 
-        // Populate the phase receipt before native authority. If the managed
-        // wrapper throws after dispatch, confirmation still has exact evidence
-        // to reconcile instead of treating the transaction as pre-authority.
         activation.MarkAuthorityCrossed();
         DispatchNativeSwitch(
             actor,
@@ -999,12 +992,6 @@ internal sealed class CompanionWorldSwitchAffordanceDriver :
         if (_requiresCompanionCarriedByHuman)
             return TryValidateCarriedSwitchFallback(actor, out error);
 
-        // The exact raw outcome already froze this switch, its release switch,
-        // and any supported key prerequisite. Do not rematerialize a
-        // player-filtered CastableOutcome for Rambler before its alignment job
-        // can start. Exact identity remains mandatory here; stock reach,
-        // safety, prerequisite, authority, and receipt checks remain mandatory
-        // immediately before and after native dispatch.
         error = null;
         return true;
     }

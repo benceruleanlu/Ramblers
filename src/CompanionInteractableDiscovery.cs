@@ -6,10 +6,6 @@ using UnityEngine;
 
 namespace Ramblers;
 
-/// <summary>
-/// One compact context observation whose actionable handle remains the exact
-/// frozen CastableTarget reference rather than a name or position lookup.
-/// </summary>
 internal sealed class CompanionInteractableObservation
 {
     internal CompanionInteractionReference Reference;
@@ -19,11 +15,6 @@ internal sealed class CompanionInteractableObservation
     internal float HumanDistance;
 }
 
-/// <summary>
-/// Bounded interaction discovery over game-owned registries and the exact
-/// human-gaze observation already used by normal interaction capture. This
-/// deliberately has no Resources or whole-scene fallback.
-/// </summary>
 internal sealed class CompanionInteractableDiscovery
 {
     internal const int MaximumNearbyInteractables = 6;

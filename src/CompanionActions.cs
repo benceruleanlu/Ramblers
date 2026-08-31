@@ -16,13 +16,6 @@ internal enum CompanionPosture
     Sitting
 }
 
-/// <summary>
-/// Arbitrates independent companion capabilities. Navigation retains the
-/// human's requested goal while a posture temporarily prevents movement, and
-/// multi-frame jobs are admitted only when the capabilities they claim are
-/// free. Adding an action means adding a job to <see cref="_jobs"/>, not a
-/// branch to this class.
-/// </summary>
 internal sealed class CompanionActionCoordinator
 {
     private readonly CompanionLocomotion _locomotion = new CompanionLocomotion();
@@ -94,13 +87,10 @@ internal sealed class CompanionActionCoordinator
             _locomotion.SetPosture(_posture.Current);
             _attention.SetBodyTurnAllowed(BodyTurnAllowed);
         }
-        // The idle habit publishes underneath whatever a job is claiming, so it
-        // resolves by channel priority rather than by asking what else is running.
+
         _ambientGaze.Tick(now, _locomotion.LastMovementIntent);
         _attention.Tick(now);
-        // A job can release locomotion part-way through its own lifetime, so the
-        // navigation gate is re-evaluated every frame rather than only when a
-        // tool call happens to run.
+
         RefreshMovementGate(now);
     }
 
@@ -162,18 +152,8 @@ internal sealed class CompanionActionCoordinator
         return result;
     }
 
-    /// <summary>
-    /// Whether the companion may turn its body to look at something. Sitting is
-    /// the one posture where it may not: stock PlayerMover.UpdatePerFrameRotation
-    /// skips its head-yaw drain while PlayerSitter reports sitting, so a seated
-    /// player looks around with their head alone.
-    /// </summary>
     private bool BodyTurnAllowed => !_posture.BlocksBodyTurn;
 
-    /// <summary>
-    /// Reports whether the human and companion are mid-conversation, which pins
-    /// the idle gaze to the human for as long as it lasts.
-    /// </summary>
     internal void SetConversationActive(bool active)
     {
         _ambientGaze.SetConversationActive(active);
@@ -191,10 +171,6 @@ internal sealed class CompanionActionCoordinator
         return _jump.Request(now, _posture.Current);
     }
 
-    /// <summary>
-    /// Stops every running job, the queued jump, and any outstanding navigation
-    /// intent. This is the substrate for the model-facing cancel_action tool.
-    /// </summary>
     internal AgentToolResult CancelActiveWork(float now)
     {
         var cancelled = 0;
@@ -248,11 +224,6 @@ internal sealed class CompanionActionCoordinator
             return false;
         }
 
-        // The agent boundary tracks one job at a time, so admitting a second
-        // concurrent job would orphan the first. Lifting this needs a real
-        // token-to-job map there, not a change here. The check reads live job
-        // state rather than a latched flag, so a job that ends on its own timer
-        // always frees the slot.
         var running = FindActiveJob();
         if (running != null && !ReferenceEquals(running, job))
         {
@@ -380,11 +351,6 @@ internal sealed class CompanionActionCoordinator
         return null;
     }
 
-    /// <summary>
-    /// The running job currently holding the given capability, if any. Pairwise
-    /// exclusion checks between specific actions are not needed: every action
-    /// asks this one question about the capability it wants.
-    /// </summary>
     private ICompanionJob FindHolder(JobResources resource)
     {
         for (var index = 0; index < _jobs.Length; index++)

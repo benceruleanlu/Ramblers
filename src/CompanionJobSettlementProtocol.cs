@@ -1,11 +1,5 @@
 namespace Ramblers;
 
-/// <summary>
-/// Pure lifecycle rules shared by the Unity coordinator and executable probes.
-/// A result is model-visible only after the job has released its capabilities,
-/// unless that job explicitly publishes a successful hold for synchronous
-/// conclusion (pickup/carry) or retained presentation (inspection).
-/// </summary>
 internal static class CompanionJobSettlementProtocol
 {
     internal static bool CanPublishCompletion(
@@ -26,11 +20,6 @@ internal static class CompanionJobSettlementProtocol
         return jobIsSettled;
     }
 
-    /// <summary>
-    /// Revalidates the native hands fact represented by a completion at the
-    /// instant it becomes model-visible. This closes the Update/LateUpdate
-    /// window between behavior confirmation and bridge consumption.
-    /// </summary>
     internal static bool IsCompletionTransitionCurrent(
         CompanionTurnHandsTransition transition,
         bool exactPropHeld,
@@ -62,11 +51,6 @@ internal static class CompanionJobSettlementProtocol
     }
 }
 
-/// <summary>
-/// Pure ownership record for the one model-facing job the controller exposes.
-/// Cancellation does not clear this lease; only observed settlement, explicit
-/// conclusion, or verified bounded abandonment does.
-/// </summary>
 internal sealed class CompanionJobLease
 {
     internal long Token { get; private set; }

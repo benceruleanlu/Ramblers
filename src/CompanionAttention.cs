@@ -2,11 +2,6 @@ using UnityEngine;
 
 namespace Ramblers;
 
-/// <summary>
-/// Who the companion's single physical gaze belongs to. Higher values win, so a
-/// deliberate inspection overrides walking-toward and both override the ambient
-/// habit of watching the human.
-/// </summary>
 internal enum GazeChannel
 {
     Follow = 0,
@@ -16,11 +11,6 @@ internal enum GazeChannel
     Inspection = 4
 }
 
-/// <summary>
-/// Owns the companion's single physical gaze. Behaviours publish a target on
-/// their own channel and the highest-priority claim wins, so no two behaviours
-/// ever make competing writes to the replicated head pose.
-/// </summary>
 internal sealed class CompanionAttention
 {
     private const int ChannelCount = 5;
@@ -43,11 +33,6 @@ internal sealed class CompanionAttention
     internal float LastAimYawError => _facing.LastAimYawError;
     internal float LastAimPitchError => _facing.LastAimPitchError;
 
-    /// <summary>
-    /// Whether the given channel currently owns the gaze and has settled within
-    /// tolerance. Asking per channel stops one behaviour from mistaking another
-    /// behaviour's alignment for its own.
-    /// </summary>
     internal bool IsAimWithin(
         GazeChannel channel,
         float yawDegrees,
@@ -58,32 +43,16 @@ internal sealed class CompanionAttention
                _facing.LastAimPitchError <= pitchDegrees;
     }
 
-    /// <summary>
-    /// Whether a higher-priority channel currently owns the gaze. An ambient
-    /// behaviour reads this to hold still while a deliberate action aims,
-    /// rather than running its dwell timers down where nobody can see them.
-    /// </summary>
     internal bool IsOverridden(GazeChannel channel)
     {
         return _activeChannel > (int)channel;
     }
 
-    /// <summary>
-    /// Whether the companion may absorb head yaw into its body. Stock
-    /// PlayerMover.UpdatePerFrameRotation skips that drain entirely while
-    /// PlayerSitter reports sitting, which is the one state where a player can
-    /// hold a sustained head yaw.
-    /// </summary>
     internal void SetBodyTurnAllowed(bool allowed)
     {
         _facing.SetBodyTurnAllowed(allowed);
     }
 
-    /// <summary>
-    /// The direction the head is actually pointing, but only for the channel
-    /// that owns the gaze. Callers that lose the gaze get <see cref="Vector3.zero"/>
-    /// and are expected to fall back to their own target geometry.
-    /// </summary>
     internal Vector3 AimDirectionFor(GazeChannel channel)
     {
         return _activeChannel == (int)channel
@@ -106,8 +75,6 @@ internal sealed class CompanionAttention
             return;
         }
 
-        // A change of owner is a gap in that channel's aiming history, so the
-        // first step after a handover must not be credited with the whole gap.
         if (channel != _activeChannel)
         {
             _facing.ResumeAt(now);
@@ -129,10 +96,6 @@ internal sealed class CompanionAttention
         _claimed[(int)channel] = false;
     }
 
-    /// <summary>
-    /// Re-bases the aiming clock when a behaviour resumes after a pause without
-    /// a change of gaze owner.
-    /// </summary>
     internal void ResumeAt(float now)
     {
         _facing.ResumeAt(now);

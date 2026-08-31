@@ -3,12 +3,6 @@ using UnityEngine;
 
 namespace Ramblers;
 
-/// <summary>
-/// Kicks only the prop frozen at the originating utterance boundary. Big Walk
-/// implements a kick as an authoritative pickup followed by a charged low
-/// held-prop launch, so this job preserves that visible sequence and uses the
-/// game's own normalized charge curve rather than applying a Rigidbody force.
-/// </summary>
 internal sealed class CompanionKickBehavior : ICompanionJob, ICompanionStandingJob
 {
     private const float MinimumTargetLookSeconds = 0.20f;
@@ -377,8 +371,7 @@ internal sealed class CompanionKickBehavior : ICompanionJob, ICompanionStandingJ
         bool targetAlreadyHeld,
         string reason)
     {
-        // Recovery is owned by the approach phase. Never let a queued jump
-        // leak into the deliberate look/charge/release sequence.
+
         _approach.CancelRecovery();
         _state = KickState.AligningTarget;
         _stateStartedAt = now;
@@ -652,10 +645,7 @@ internal sealed class CompanionKickBehavior : ICompanionJob, ICompanionStandingJ
         _stateStartedAt = now;
         try
         {
-            // This is the server-side body of Big Walk's stock pickup/drop
-            // command. A drop record with launch data makes OnSetHeld call the
-            // stock low-held launch path, which supplies kick force, animation,
-            // audio, and replicated prop state.
+
             _body.Networking.UserCode_CmdPickUp__PlayerHeldInformation(
                 dropInformation);
         }
@@ -835,8 +825,7 @@ internal sealed class CompanionKickBehavior : ICompanionJob, ICompanionStandingJ
 
         try
         {
-            // Cancellation is a plain drop, never another kick. The exact held
-            // identity check above is the boundary for this parameterless API.
+
             _body.Networking.ServerDropPropAutomatic(false);
             Plugin.Logger.LogInfo(
                 $"[ACTION] KICK_RECOVERY_DROP_REQUESTED " +
@@ -993,8 +982,7 @@ internal sealed class CompanionKickBehavior : ICompanionJob, ICompanionStandingJ
         if (_body.Character.gestures != null &&
             _body.Character.gestures.isHoldingRaised)
         {
-            // Raised releases use Big Walk's throw settings. Failing closed
-            // here prevents a requested kick from silently becoming a throw.
+
             error = "kick_pose_unavailable";
             return false;
         }
@@ -1079,9 +1067,6 @@ internal sealed class CompanionKickBehavior : ICompanionJob, ICompanionStandingJ
             return false;
         }
 
-        // Native PlayerArms.GetWindUp returns the held duration divided by
-        // maxWindUpDuration, clamped to 1. Waiting the inverse duration here
-        // gives the bot the same charge fraction that ThrowInfo receives.
         duration = tunings.maxWindUpDuration * windUp;
         return true;
     }
@@ -1137,18 +1122,12 @@ internal sealed class CompanionKickBehavior : ICompanionJob, ICompanionStandingJ
                 }
                 _launchDestinationPoint = destinationPoint;
                 _hasLaunchDestinationPoint = true;
-                // PlayerHands.Drop applies kickSettings.angleCurve to the
-                // replicated PlayerHead pitch, then post-multiplies that pitch
-                // onto this launch rotation. Keep only the destination yaw in
-                // the record; including elevation would pitch a raised
-                // destination once here and a second time in stock code.
+
                 launchDirection = destinationPoint - launchPosition;
                 launchDirection.y = 0f;
                 if (launchDirection.sqrMagnitude < 0.0001f)
                 {
-                    // A target directly above/below has no yaw. The deliberate
-                    // gaze still supplies its stock pitch; retain the body yaw
-                    // rather than constructing an undefined rotation.
+
                     launchDirection = _body.Transform.forward;
                     launchDirection.y = 0f;
                 }

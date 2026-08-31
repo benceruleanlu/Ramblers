@@ -4,10 +4,6 @@ using UnityEngine.Rendering;
 
 namespace Ramblers;
 
-/// <summary>
-/// A single bounded visual observation captured from the companion's eyes.
-/// The managed image bytes are safe to hand to the background WebSocket client.
-/// </summary>
 internal sealed class CompanionVisionObservation
 {
     internal byte[] ImageBytes;
@@ -23,23 +19,12 @@ internal sealed class CompanionVisionObservation
     internal bool AlignmentTimedOut;
 }
 
-/// <summary>
-/// Renders one off-screen world frame. Unity camera and texture work remains on
-/// the main thread; no image is written to disk.
-///
-/// Three APIs the obvious implementation would reach for are stripped from Big
-/// Walk's IL2CPP build and would kill the process rather than throw:
-/// <c>Camera.stereoTargetEye</c>'s setter, <c>RenderPipeline.SupportsRenderRequest</c>,
-/// and every <c>ImageConversion</c> encoder. None of them are used here, and
-/// what remains is probed before first use.
-/// </summary>
 internal static class CompanionVisionCapture
 {
     private const int CaptureWidth = 640;
     private const int CaptureHeight = 360;
     private const float EyeForwardOffset = 0.06f;
-    // Far enough forward of the eye to exclude the companion's own head, close
-    // enough to keep a held or nearby object in frame.
+
     private const float NearClipPlane = 0.05f;
 
     private static bool _probed;
@@ -104,17 +89,11 @@ internal static class CompanionVisionCapture
 
         try
         {
-            // A dedicated off-screen camera, rather than borrowing the player's.
-            // Big Walk runs URP with post-processing and HBAO, so rendering the
-            // live camera from a second pose would pollute the temporal history
-            // and exposure state of the player's own view, and it carries the
-            // AudioListener.
+
             cameraObject = new GameObject("Ramblers Vision Camera");
             cameraObject.hideFlags = HideFlags.HideAndDontSave;
             captureCamera = cameraObject.AddComponent<Camera>();
-            // CopyFrom is optional and stripped from the tested game build.
-            // Field of view has its own independently probed fallback so one
-            // missing bulk-copy API does not force the capture to 60 degrees.
+
             if (_canCopyFrom)
                 captureCamera.CopyFrom(sourceCamera);
             if (_canCopyFieldOfView)
@@ -173,7 +152,6 @@ internal static class CompanionVisionCapture
             for (var index = 0; index < expected; index++)
                 rgb[index] = raw[index];
 
-            // Unity reads back with the first row at the bottom of the image.
             var encoded = JpegEncoder.EncodeRgb24(
                 rgb,
                 CaptureWidth,
@@ -221,23 +199,12 @@ internal static class CompanionVisionCapture
         }
     }
 
-    /// <summary>
-    /// Verifies the Unity entry points this capture depends on before first use.
-    ///
-    /// Only four are genuinely required. The rest improve the capture but have
-    /// usable defaults, so a stripped one degrades the image instead of
-    /// disabling the whole capability. Every probe runs — none short-circuit —
-    /// so one run reports the complete picture rather than the first failure.
-    /// </summary>
     private static bool IsCaptureSupported()
     {
         if (_probed)
             return _captureSupported;
         _probed = true;
 
-        // Ground truth for anything the probes report as missing: a non-zero
-        // method count proves the type resolved, so a negative result is a real
-        // strip rather than a failed class lookup.
         UnityApiProbe.DescribeType(
             UnityApiProbe.CoreModule,
             "UnityEngine",
@@ -325,9 +292,7 @@ internal static class CompanionVisionCapture
         RenderTexture destination,
         CompanionBody body)
     {
-        // Without forceRenderingOff the companion may appear in its own frame.
-        // The eye offset and near plane hide most of it, so this degrades the
-        // image rather than invalidating it.
+
         var renderers = _canHideRenderers
             ? body.GameObject.GetComponentsInChildren<Renderer>(true)
             : null;
@@ -344,10 +309,6 @@ internal static class CompanionVisionCapture
                 renderer.forceRenderingOff = true;
             }
 
-            // Camera.Render is a built-in-pipeline entry point and is not
-            // supported under URP. SupportsRenderRequest would be the natural
-            // guard, but it is stripped from this build, so the request is
-            // simply submitted and any failure surfaces as a capture error.
             var request = new RenderPipeline.StandardRequest
             {
                 destination = destination

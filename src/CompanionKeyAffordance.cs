@@ -2,11 +2,6 @@ using Mirror;
 
 namespace Ramblers;
 
-/// <summary>
-/// Frozen native prerequisite for a keyed world affordance. This is not a
-/// puzzle rule: it mirrors CastableOutcome.needsKey for every keyed switch and
-/// preserves the exact held prop and its optional onUseAsKey effect.
-/// </summary>
 internal sealed class CompanionKeyAffordance
 {
     private readonly Prop _prop;
@@ -166,8 +161,6 @@ internal sealed class CompanionKeyAffordance
             actionNumber = actionNumber
         };
 
-        // Record the exact receipt and cross the authority boundary before the
-        // command. A thrown managed wrapper can still have reached native code.
         activation.KeyContext = context;
         activation.PreviousKeyState = previousState;
         activation.PreviousKeyActionNumber = previousActionNumber;

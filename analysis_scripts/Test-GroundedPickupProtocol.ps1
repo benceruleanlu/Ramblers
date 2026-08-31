@@ -143,9 +143,9 @@ Assert-NotContains $pickup '_locomotion.ObserveProgress(' `
     "pickup must not duplicate shared progress observation"
 Assert-NotContains $pickup '_jump.TryRequestActionRecovery(' `
     "pickup must not duplicate shared recovery mechanics"
-Assert-Contains $follow 'any live movement intent belongs to the action holding that' `
+Assert-Contains $follow 'if (_state != FollowState.Suspended)' `
     "suspended follow must not clear pickup's locomotion intent"
-Assert-Contains $follow 'Yield before idle-follow cleanup can clear that job' `
+Assert-Contains $follow 'SetMovementAllowed(false, now, movementBlocker);' `
     "stay mode must also yield locomotion to pickup"
 Assert-Contains $approach '_jump.TryRequestActionRecovery(' `
     "a stalled physical approach must have bounded grounded jump recovery"

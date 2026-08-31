@@ -40,9 +40,6 @@ internal static class SequentialToolBatchCursorProbe
         Require(!cursor.TryBeginNext(out index),
             "cursor dispatched beyond the batch boundary");
 
-        // Both deferred and all-immediate batches retain the turn from explicit
-        // response metadata. Whether their separate queue entry was consumed in
-        // this frame, a prior frame, or a later frame cannot change the result.
         Require(TurnReferenceRetentionPolicy.ShouldRetain(true),
             "tool response did not retain its turn for continuation");
         Require(!TurnReferenceRetentionPolicy.ShouldRetain(false),

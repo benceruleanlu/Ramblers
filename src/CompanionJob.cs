@@ -2,11 +2,6 @@ using System;
 
 namespace Ramblers;
 
-/// <summary>
-/// The companion capabilities a job needs exclusive use of. Every action
-/// declares what it claims, so mutual exclusion is stated once per action
-/// instead of being written out by hand for each pair of actions.
-/// </summary>
 [Flags]
 internal enum JobResources
 {
@@ -16,10 +11,6 @@ internal enum JobResources
     Hands = 1 << 2
 }
 
-/// <summary>
-/// Bounded points on Big Walk's native normalized kick-charge curve. The
-/// corresponding hold time is resolved from PlayerTunings at runtime.
-/// </summary>
 internal enum CompanionKickStrength
 {
     Normal,
@@ -27,11 +18,6 @@ internal enum CompanionKickStrength
     Hard
 }
 
-/// <summary>
-/// The deliberate launch intent selected for a kick. The target prop remains
-/// the immutable response-turn referent regardless of direction; a referenced
-/// destination is frozen independently at the same turn boundary.
-/// </summary>
 internal enum CompanionKickDirection
 {
     AwayFromCompanion,
@@ -39,11 +25,6 @@ internal enum CompanionKickDirection
     TowardReference
 }
 
-/// <summary>
-/// One canonical representation for model arguments and structured telemetry.
-/// Keeping this at the typed boundary prevents routers, jobs, and audits from
-/// inventing different spellings for the same physical intent.
-/// </summary>
 internal static class CompanionKickDirectionProtocol
 {
     internal static string ToWireValue(
@@ -57,12 +38,6 @@ internal static class CompanionKickDirectionProtocol
     }
 }
 
-/// <summary>
-/// A confirmed hands-state transition produced by a physical job. The turn
-/// reference applies this only after the job has verified the exact native
-/// postcondition, allowing a continuation to compose actions without scanning
-/// the live world for a replacement target.
-/// </summary>
 internal enum CompanionTurnHandsTransition
 {
     None,
@@ -71,10 +46,6 @@ internal enum CompanionTurnHandsTransition
     HoldingExactPlayer
 }
 
-/// <summary>
-/// A terminal job outcome: the tool result the model receives, plus any extra
-/// conversation items the job wants delivered alongside it.
-/// </summary>
 internal sealed class CompanionJobCompletion
 {
     internal AgentToolResult Result;
@@ -96,20 +67,12 @@ internal sealed class CompanionJobCompletion
     }
 }
 
-/// <summary>
-/// What the agent boundary needs to keep tracking a job it has just started.
-/// </summary>
 internal sealed class CompanionJobHandle
 {
     internal long Token;
     internal float TimeoutSeconds;
 }
 
-/// <summary>
-/// Immutable context captured before a model-selected job is dispatched. A
-/// physical job receives the exact turn-scoped target through this boundary;
-/// it never asks the live world to reinterpret the human's reference later.
-/// </summary>
 internal sealed class CompanionJobRequest
 {
     internal string ActionName;
@@ -126,12 +89,6 @@ internal sealed class CompanionJobRequest
     internal CompanionKickDirection KickDirection;
 }
 
-/// <summary>
-/// The result of freezing the human's physical and visual references for one
-/// utterance. Failed captures are retained too, so a later tool reports the
-/// original boundary error instead of consulting a newer camera direction or
-/// held object.
-/// </summary>
 internal sealed class CompanionTurnReference
 {
     internal long TurnId;
@@ -146,11 +103,6 @@ internal sealed class CompanionTurnReference
     internal CompanionPlayerTarget HumanPlayerTarget;
     internal CompanionEntityReferenceSet EntityReferences;
 
-    /// <summary>
-    /// Advances only the transient hands capability after an exact physical
-    /// postcondition. The spoken world reference remains frozen; no camera or
-    /// nearest-entity query is performed here.
-    /// </summary>
     internal bool TryApply(
         CompanionJobCompletion completion,
         out string error)
@@ -213,43 +165,23 @@ internal sealed class CompanionTurnReference
     }
 }
 
-/// <summary>
-/// A companion action that runs across frames rather than finishing inside the
-/// tool call. The coordinator arbitrates jobs purely through this interface, so
-/// adding an action does not add branches to the coordinator.
-/// </summary>
 internal interface ICompanionJob
 {
-    /// <summary>The primary model-facing tool name for this job.</summary>
+
     string Name { get; }
 
-    /// <summary>The model-facing name of the operation currently in progress.</summary>
     string ActiveName { get; }
 
-    /// <summary>Whether this job owns the implementation of a tool name.</summary>
     bool Handles(string actionName);
 
-    /// <summary>What this specific operation must claim to start.</summary>
     JobResources RequiredFor(CompanionJobRequest request);
 
-    /// <summary>
-    /// What the job currently holds. This narrows as a job winds down: an
-    /// inspection stops holding locomotion once it has captured, keeping only
-    /// gaze for its settle hold.
-    /// </summary>
     JobResources Held { get; }
 
     bool IsActive { get; }
 
-    /// <summary>
-    /// Whether this job's current completion may be consumed while it still
-    /// owns capabilities. This is a narrow state-dependent exception for a
-    /// successful pickup/carry hold or inspection presentation; reconciliation
-    /// failures and cancellation never use it.
-    /// </summary>
     bool MayPublishCompletionWhileActive { get; }
 
-    /// <summary>How long the agent boundary should wait before giving up.</summary>
     float TimeoutSeconds { get; }
 
     void Bind(CompanionBody body, PlayerCharacter human);
@@ -263,10 +195,6 @@ internal interface ICompanionJob
 
     bool TryTakeCompletion(out CompanionJobCompletion completion);
 
-    /// <summary>
-    /// The model has acted on this job's report. Any hold the job kept past
-    /// completion can be dropped now.
-    /// </summary>
     void Conclude(float now);
 
     void Cancel(float now);
@@ -276,10 +204,6 @@ internal interface ICompanionJob
     void Release();
 }
 
-/// <summary>
-/// Marker for jobs whose stock Big Walk action requires a standing pose even
-/// though the companion could otherwise locomote while crouched.
-/// </summary>
 internal interface ICompanionStandingJob
 {
 }

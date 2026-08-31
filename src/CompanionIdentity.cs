@@ -4,10 +4,6 @@ using LobbyNetworking;
 
 namespace Ramblers;
 
-/// <summary>
-/// How a companion body is recognised, and the synthetic identity it is given in
-/// place of the connection-derived one a real player would carry.
-/// </summary>
 internal static class CompanionIdentity
 {
     public const string ObjectName = "__RamblersHostCompanion";
@@ -25,10 +21,6 @@ internal static class CompanionIdentity
                 (gameObject != null && gameObject.name == ObjectName));
     }
 
-    /// <summary>
-    /// Assigned before NetworkServer.Spawn, because the stock server-side path
-    /// derives these from a connection the companion deliberately does not have.
-    /// </summary>
     public static void Apply(
         PlayerNetworking networking,
         MirrorIgnorancePlayer voiceIdentity)
@@ -53,9 +45,6 @@ internal static class PlayerNetworkingStartPatch
         if (!CompanionIdentity.IsBot(__instance))
             return true;
 
-        // The stock server-side Start path assumes connectionToClient and its
-        // authenticationData are non-null. A server-owned bot intentionally has
-        // neither, so identity is initialized before NetworkServer.Spawn instead.
         Plugin.Logger.LogInfo(
             "[RAMBLERS] Bypassed connection-dependent PlayerNetworking.Start for companion.");
         return false;
@@ -84,11 +73,6 @@ internal static class HouseNetworkTransformIsRestingPatch
         if (!__result || __instance == null)
             return;
 
-        // A connectionless player never receives the normal client interpolation
-        // goal, so the stock getter reports it as permanently resting and
-        // PlayerMover zeros the otherwise valid controlsVelocity. The bot is
-        // server-owned and driven directly by the host, so that remote-only gate
-        // does not apply.
         var networking = __instance.GetComponent<PlayerNetworking>();
         if (CompanionIdentity.IsBot(networking))
             __result = false;

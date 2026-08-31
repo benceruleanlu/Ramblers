@@ -4,10 +4,6 @@ using UnityEngine;
 
 namespace Ramblers;
 
-/// <summary>
-/// Owns the agent lifecycle and keeps Unity work on the main thread. Game voice,
-/// tool validation, and the WebSocket protocol live behind separate boundaries.
-/// </summary>
 internal sealed class RealtimeAgentBridge : MonoBehaviour
 {
     private const float ReconnectDelay = 5f;
@@ -70,9 +66,6 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             return;
         }
 
-        // Drain terminal logs before replacing a stopped client. Otherwise its
-        // CONNECTION_ERROR/CONNECTION_STOPPED evidence disappears with the old
-        // queue and a historical READY can look current to the runtime audit.
         DrainClientEvents();
         EnsureClient();
         var voiceEvents = _gameVoice.Tick(_client);
@@ -84,41 +77,25 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         CleanupCompletedTurnReferences();
         PollPendingToolBatch();
 
-        // Listening never stops for a tool call. Response ordering is held by
-        // the outstanding-batch guard in the client, not by going deaf.
         ReleaseHeldContinuation();
         _gameVoiceOutput.Tick();
 
-        // Speech on either side is what the companion's idle attention yields
-        // to. Sampled after the output tick so playback that just stopped is
-        // not reported as still speaking.
         CompanionController.SetConversationActive(
             IsHumanSpeaking() || _gameVoiceOutput.IsSpeaking);
     }
 
-    /// <summary>
-    /// True while the human is mid-utterance in either turn mode. Semantic VAD
-    /// reports its boundaries as server events; a push-to-talk hold has none, so
-    /// it is read from the capture itself.
-    /// </summary>
     private bool IsHumanSpeaking()
     {
         return _userSpeaking || _gameVoice.IsCapturingManualTurn;
     }
 
-    /// <summary>
-    /// Requests the response a completed tool batch had to hold back. Driving it
-    /// from one place covers a push-to-talk release too short to commit, which
-    /// would otherwise strand the outputs with nothing left to ask for them.
-    /// </summary>
     private void ReleaseHeldContinuation()
     {
         if (!_continuationHeld || _client == null || IsHumanSpeaking())
             return;
 
         _continuationHeld = false;
-        // A continuation request is refused when a newer user response already
-        // owns or is waiting for the response slot.
+
         _client.RequestContinuation(_heldContinuationTurnId);
         Plugin.Logger.LogInfo(
             $"[AGENT] CONTINUATION_RELEASED turnId={_heldContinuationTurnId}.");
@@ -154,16 +131,14 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         {
             try
             {
-                // Steam may have started before the variable was added and can
-                // therefore pass a stale process environment to the game.
+
                 apiKey = Environment.GetEnvironmentVariable(
                     "OPENAI_API_KEY",
                     EnvironmentVariableTarget.User);
             }
             catch (PlatformNotSupportedException)
             {
-                // Big Walk currently targets Windows; retain process-only lookup
-                // if this code is ever exercised elsewhere.
+
             }
         }
 
@@ -212,25 +187,17 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             else if (clientEvent.Type == RealtimeClientEventType.InputSpeechStopped)
             {
                 _userSpeaking = false;
-                // Refused while a tool batch is outstanding, and latched rather
-                // than lost, so this turn is answered once the outputs land.
+
                 CaptureTurnAndRequestResponse("semantic_vad");
             }
             else if (clientEvent.Type == RealtimeClientEventType.ResponseCompleted)
             {
-                // Realtime serializes responses through one slot. A tool
-                // continuation may be folded into a newer waiting human turn,
-                // so the next completion after retention is the terminal
-                // fallback even when its turn id differs from the tool batch.
+
                 if (_concludeJobOnAssistantAudio)
                 {
                     ReleaseLingeringJob("response_completed_without_audio");
                 }
-                // The producer records whether this exact response contained a
-                // function-call batch. That causal fact is stable across the
-                // client's separate event and batch queues; frame timing is not.
-                // Keep the turn through any number of tool continuations and
-                // release it only on a terminal response with no tool batch.
+
                 if (clientEvent.TurnId > 0 &&
                     !TurnReferenceRetentionPolicy.ShouldRetain(
                         clientEvent.HasFunctionCallBatch))
@@ -251,11 +218,6 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// Function calls are drained only after both semantic-VAD events and the
-    /// local push-to-talk edge have been sampled. That ordering makes a queued
-    /// old physical call observe reference invalidation before dispatch.
-    /// </summary>
     private void DrainFunctionCallBatches()
     {
         if (_client == null)
@@ -289,9 +251,6 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         var invalidated = _turnReferences.Count;
         _turnReferences.Clear();
 
-        // If the prior turn's physical action already began, a correction must
-        // cross its exact-target reconciliation path. If a reference-based
-        // action is merely queued, invalidation makes dispatch fail closed.
         if (PendingBatchContainsPhysicalAction(_pendingToolBatch))
         {
             _pendingToolBatch.Interrupted = true;
@@ -569,11 +528,6 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         DispatchPendingToolCalls(pending);
     }
 
-    /// <summary>
-    /// Routes calls strictly in response order. A pending Unity job stops this
-    /// loop; its verified result and any hands transition are consumed before
-    /// the cursor is allowed to expose the next call.
-    /// </summary>
     private void DispatchPendingToolCalls(PendingToolBatch pending)
     {
         int index;
@@ -891,9 +845,7 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         RealtimeFunctionCall call,
         AgentToolResult result)
     {
-        // The model composes “pick me up and take me there” as two ordered
-        // calls. Walking without the passenger after pickup failed would turn
-        // that causal sequence into a different action.
+
         return result != null && !result.Ok &&
                string.Equals(
                    call?.Name,
@@ -983,9 +935,6 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             };
         }
 
-        // Outputs are always submitted. Creating the response is held back while
-        // the human is mid-utterance, so the continuation cannot start talking
-        // over speech the model has not heard the end of yet.
         var humanSpeaking = IsHumanSpeaking();
         var sent = pending.Client != null &&
                    pending.Client.CompleteFunctionCallBatch(
@@ -1021,9 +970,7 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
         if (ReferenceEquals(_pendingToolBatch, pending))
         {
             _pendingToolBatch = null;
-            // Only a completion that explicitly retained a presentation hold
-            // may survive until audio. Physical actions are already concluded
-            // before their output continuation, including tool-only chains.
+
             var retainForAudio = sent &&
                                  pending.RetainJobUntilAssistantAudio &&
                                  continuationCount > 0;

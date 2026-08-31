@@ -14,9 +14,6 @@ internal static class JpegEncoderProtocolProbe
         if (args.Length != 1)
             throw new ArgumentException("Pass one JPEG output path.");
 
-        // Construct the buffer in Unity's bottom-up order. The contrasting
-        // halves make the probe verify orientation after decoding, not merely
-        // that a JPEG parser accepts the byte stream.
         var rgb = new byte[Width * Height * 3];
         for (var rowFromBottom = 0; rowFromBottom < Height; rowFromBottom++)
         {

@@ -1,9 +1,5 @@
 namespace Ramblers;
 
-/// <summary>
-/// Owns persistent replicated posture state for the connectionless remote body.
-/// It writes server SyncVars directly instead of invoking local-player Commands.
-/// </summary>
 internal sealed class CompanionPostureActuator
 {
     private CompanionBody _body;
@@ -68,11 +64,6 @@ internal sealed class CompanionPostureActuator
         _lastNativePoseActive = false;
     }
 
-    /// <summary>
-    /// Reconciles posture after a native game action changes pose or sitting
-    /// state. The coordinator uses the result to refresh locomotion and gaze;
-    /// action implementations do not mutate those subsystems directly.
-    /// </summary>
     internal bool SynchronizeFromGame()
     {
         if (_body == null || !_body.IsAlive)

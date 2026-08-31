@@ -3,12 +3,6 @@ using UnityEngine;
 
 namespace Ramblers;
 
-/// <summary>
-/// One concrete prop selected from the human's view at an utterance boundary.
-/// The object identity is immutable: later action code may follow this prop's
-/// own transform, but it may never reacquire a different object with a raycast
-/// or nearest-item search.
-/// </summary>
 internal sealed class CompanionPropTarget
 {
     internal const float MaximumHumanReferenceDistance = 40f;
@@ -45,11 +39,6 @@ internal sealed class CompanionPropTarget
             : "prop:local:" + prop.GetInstanceID();
     }
 
-    /// <summary>
-    /// Captures an exact context entity without requiring the human to aim at
-    /// it. This is only called for props already selected into bounded world
-    /// context; it performs no nearest-object fallback.
-    /// </summary>
     internal static bool TryCaptureProp(
         Prop prop,
         out CompanionPropTarget target)
@@ -65,11 +54,6 @@ internal sealed class CompanionPropTarget
         return true;
     }
 
-    /// <summary>
-    /// Freezes the exact prop already in the companion's hands. Drop has no
-    /// target parameter at the game API boundary, so this snapshot supplies the
-    /// same managed-object and network-identity guard used by pickup.
-    /// </summary>
     internal static bool TryCaptureHeldProp(
         Prop prop,
         out CompanionPropTarget target)
@@ -161,11 +145,6 @@ internal sealed class CompanionPropTarget
         return false;
     }
 
-    /// <summary>
-    /// Validates the original managed object and, when present, its network
-    /// identity. A moving prop remains the same referent; a replacement object
-    /// at the old point does not.
-    /// </summary>
     internal bool IsStillTheSameProp(Prop candidate)
     {
         if (candidate == null || candidate != Prop ||
@@ -196,11 +175,6 @@ internal sealed class CompanionPropTarget
         return true;
     }
 
-    /// <summary>
-    /// Resolves the same frozen prop for visual inspection. A human-held prop
-    /// may be flagged as inventory by the game, so unlike pickup navigation the
-    /// visual path permits that state while retaining exact identity.
-    /// </summary>
     internal bool TryGetCurrentInspectionPoint(out Vector3 point)
     {
         point = Vector3.zero;

@@ -2,10 +2,6 @@ using System.Collections.Generic;
 
 namespace Ramblers;
 
-/// <summary>
-/// Reports a persistent condition once instead of on every frame it holds.
-/// <see cref="Reset"/> re-arms it so the next occurrence is reported again.
-/// </summary>
 internal sealed class LogLatch
 {
     private bool _fired;
@@ -25,10 +21,6 @@ internal sealed class LogLatch
     }
 }
 
-/// <summary>
-/// Reports a per-frame value only when it differs from the last reported one,
-/// so a steady state is logged on its transitions rather than continuously.
-/// </summary>
 internal sealed class LogChange<T>
 {
     private bool _hasValue;

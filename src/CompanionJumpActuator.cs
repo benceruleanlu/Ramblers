@@ -3,11 +3,6 @@ using UnityEngine;
 
 namespace Ramblers;
 
-/// <summary>
-/// Queues one stock jump calculation for the next physics tick. Big Walk's
-/// public ForceAJump helper rejects non-local players, so the server-owned bot
-/// feeds the stock queued-jump calculation its current rigidbody velocity.
-/// </summary>
 internal sealed class CompanionJumpActuator
 {
     private const float RequestCooldown = 0.5f;
@@ -25,10 +20,6 @@ internal sealed class CompanionJumpActuator
         _nextRequestAt = 0f;
     }
 
-    /// <summary>
-    /// Preflights an explicit jump as though the coordinator had already stood
-    /// the companion. This lets an invalid request leave posture unchanged.
-    /// </summary>
     internal bool CanRequest(float now, out string error)
     {
         error = null;
@@ -67,11 +58,6 @@ internal sealed class CompanionJumpActuator
         return AgentToolResult.Success(AgentToolCatalog.Jump, "queued");
     }
 
-    /// <summary>
-    /// Internal route-replay entry point. The model does not decide when a
-    /// recorded jump is needed; deterministic follow code may queue the same
-    /// stock jump path after validating live ground and posture state.
-    /// </summary>
     internal bool TryRequestTraversal(
         float now,
         CompanionPosture posture,

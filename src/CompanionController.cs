@@ -6,11 +6,6 @@ using UnityEngine;
 
 namespace Ramblers;
 
-/// <summary>
-/// Owns the companion lifecycle: spawning a connectionless copy of the real
-/// player prefab, preserving authority invariants, binding deterministic
-/// actions, and tearing the body down cleanly.
-/// </summary>
 internal sealed class CompanionController : MonoBehaviour
 {
     private const float DetachedJobSettlementMaximumSeconds = 5f;
@@ -125,11 +120,6 @@ internal sealed class CompanionController : MonoBehaviour
         return true;
     }
 
-    /// <summary>
-    /// Captures a physical referent on Unity's main thread. The caller binds the
-    /// returned immutable object to one response turn before any model tool is
-    /// allowed to dispatch it.
-    /// </summary>
     internal static bool TryCapturePropTarget(
         out CompanionPropTarget target,
         out string error)
@@ -159,12 +149,6 @@ internal sealed class CompanionController : MonoBehaviour
             out error);
     }
 
-    /// <summary>
-    /// Freezes the exact prop already in the companion's hands at the utterance
-    /// boundary. This is separate from gaze selection so a request such as
-    /// a goal-directed kick can bind the prop and destination without
-    /// asking one reference token to mean both things.
-    /// </summary>
     internal static bool TryCaptureCompanionHeldTarget(
         out CompanionPropTarget target,
         out string error)
@@ -206,10 +190,6 @@ internal sealed class CompanionController : MonoBehaviour
         return true;
     }
 
-    /// <summary>
-    /// Freezes both visual meanings available to the current utterance: the
-    /// human's gaze point and the exact prop already in their hands.
-    /// </summary>
     internal static bool TryCaptureInspectionCandidates(
         out CompanionInspectionCandidates candidates,
         out string error)
@@ -239,11 +219,6 @@ internal sealed class CompanionController : MonoBehaviour
             out error);
     }
 
-    /// <summary>
-    /// Freezes the exact game-owned primary-interaction candidates available
-    /// for the current utterance: the human's world reference and the prop
-    /// already in the companion's hands.
-    /// </summary>
     internal static bool TryCaptureAffordanceCandidates(
         out CompanionAffordanceCandidates candidates,
         out string error)
@@ -282,11 +257,6 @@ internal sealed class CompanionController : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// Materializes the held-item capability after a pickup has confirmed the
-    /// exact prop from this turn. This validates that same identity in the
-    /// companion's hands and never recaptures an arbitrary live prop.
-    /// </summary>
     internal static bool TryAdvanceHeldPropCandidates(
         CompanionAffordanceCandidates current,
         CompanionPropTarget exactProp,
@@ -342,10 +312,6 @@ internal sealed class CompanionController : MonoBehaviour
             out error);
     }
 
-    /// <summary>
-    /// Freezes one compact nonverbal world snapshot for the current utterance
-    /// and consumes at most one fresh passive visual-memory frame.
-    /// </summary>
     internal static bool TryTakeAwarenessTurnContext(
         CompanionAffordanceCandidates affordanceCandidates,
         out CompanionAwarenessTurnContext context,
@@ -401,8 +367,7 @@ internal sealed class CompanionController : MonoBehaviour
 
         if (!controller._jobLease.Matches(operationToken))
         {
-            // The caller belongs to a stale body or genuinely replaced lease.
-            // Ordinary cancellation retains its matching lease until settlement.
+
             completion = CompanionJobCompletion.Failed("cancelled");
             return true;
         }
@@ -440,9 +405,6 @@ internal sealed class CompanionController : MonoBehaviour
                 return false;
             }
 
-            // Cancellation deliberately clears any pre-cancel completion.
-            // Once the exact job has released every capability, synthesize its
-            // terminal model-facing result without detaching the token early.
             completion = CompanionJobCompletion.Failed("cancelled");
             Plugin.Logger.LogInfo(
                 $"[ACTION] JOB_CANCEL_SETTLED token={operationToken}, " +
@@ -455,10 +417,6 @@ internal sealed class CompanionController : MonoBehaviour
         if (completion == null)
             return false;
 
-        // Retention is an explicit part of the completion contract. Inspection
-        // keeps its gaze while the model begins describing the image; physical
-        // actions release immediately so a tool-only continuation can start the
-        // next action before any assistant audio exists.
         var retainUntilAssistantAudio = completion != null &&
                                         completion.Result != null &&
                                         completion.Result.Ok &&
@@ -541,10 +499,6 @@ internal sealed class CompanionController : MonoBehaviour
         }
     }
 
-    /// <summary>
-    /// Cancels a job whose realtime client is going away, then transfers the
-    /// settlement wait to the controller so the operation cannot be orphaned.
-    /// </summary>
     internal static bool DetachJob(long operationToken)
     {
         var controller = _activeController;
@@ -604,11 +558,6 @@ internal sealed class CompanionController : MonoBehaviour
             true);
     }
 
-    /// <summary>
-    /// Tells the companion whether a conversation is in progress. Unlike the
-    /// action entry points this is ambient state rather than a command, so it is
-    /// silently ignored when there is no body to apply it to.
-    /// </summary>
     internal static void SetConversationActive(bool active)
     {
         var controller = _activeController;
@@ -787,8 +736,7 @@ internal sealed class CompanionController : MonoBehaviour
                 playerNetworking,
                 networkIdentity,
                 networkTransform);
-            // A controller can survive a body replacement. Invalidating the
-            // active token prevents an old deferred call from targeting it.
+
             ClearActiveJobTracking();
             _hasSpawnedBot = true;
             _actions.Bind(_body, localPlayer, now);
@@ -852,7 +800,7 @@ internal sealed class CompanionController : MonoBehaviour
         }
         catch
         {
-            // The network object may already be gone during scene shutdown.
+
         }
     }
 

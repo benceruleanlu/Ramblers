@@ -2,12 +2,6 @@ using UnityEngine;
 
 namespace Ramblers;
 
-/// <summary>
-/// Walks toward one utterance-frozen world point. The model chooses the intent,
-/// while deterministic locomotion owns movement, bounded recovery, arrival,
-/// and cancellation. This composes with native player carry because it neither
-/// picks up nor drops anyone and never changes the persistent follow intent.
-/// </summary>
 internal sealed class CompanionMoveToLocationBehavior :
     ICompanionJob,
     ICompanionStandingJob
@@ -154,9 +148,7 @@ internal sealed class CompanionMoveToLocationBehavior :
         }
         if (horizontalDistance <= 0.0001f)
         {
-            // A point directly above or below is not an arrival and has no
-            // valid planar steering direction. Keep the job lifecycle-bound
-            // without introducing a NaN movement vector or inventing a route.
+
             _locomotion.Stop(now);
             _locomotion.ResetProgressObservation(now);
             return;

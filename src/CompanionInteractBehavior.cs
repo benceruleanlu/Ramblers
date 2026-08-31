@@ -2,11 +2,6 @@ using UnityEngine;
 
 namespace Ramblers;
 
-/// <summary>
-/// One bounded primary interaction with an exact native affordance frozen from
-/// gaze, held state, or private game context. The lifecycle is independent of
-/// puzzle identity: approach, align, revalidate, activate, and confirm.
-/// </summary>
 internal sealed class CompanionInteractBehavior : ICompanionJob
 {
     private const float MinimumLookSeconds = 0.25f;

@@ -1,10 +1,5 @@
 namespace Ramblers;
 
-/// <summary>
-/// Pure ordering state for one Realtime response's function calls. Exactly one
-/// call may be active; the next call cannot be routed until the current call's
-/// immediate result or verified job completion has been consumed.
-/// </summary>
 internal sealed class SequentialToolBatchCursor
 {
     private readonly int _count;

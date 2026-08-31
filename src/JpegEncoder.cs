@@ -4,20 +4,11 @@ using StbImageWriteSharp;
 
 namespace Ramblers;
 
-/// <summary>
-/// Encodes RGB24 pixels as a baseline JPEG without touching Unity's stripped
-/// <c>ImageConversion</c> surface. StbImageWriteSharp is a managed, no-native
-/// port of stb_image_write and is pinned by hash in <c>build.ps1</c>.
-/// </summary>
 internal static class JpegEncoder
 {
     internal const string MediaType = "image/jpeg";
     internal const int DefaultQuality = 82;
 
-    /// <param name="bottomUp">
-    /// True when the first row of <paramref name="rgb"/> is the bottom of the
-    /// image, which is how Unity hands back read-back pixel data.
-    /// </param>
     internal static byte[] EncodeRgb24(
         byte[] rgb,
         int width,

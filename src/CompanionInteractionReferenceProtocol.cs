@@ -13,11 +13,6 @@ internal enum CompanionInteractionStructuralKind
     Multiple
 }
 
-/// <summary>
-/// Pure policy helpers for model-visible interaction references. Keeping ID,
-/// naming, radius, and expiry rules free of Unity makes their boundary
-/// executable without loading the game.
-/// </summary>
 internal static class CompanionInteractionReferenceProtocol
 {
     internal const int MaximumNaturalNameLength = 56;

@@ -37,8 +37,6 @@ Assert-Contains 'PRESENTATION_JOB_RETAINED turnId={pending.TurnId}' `
     "a retained inspection must emit an auditable lifecycle marker"
 Assert-Contains 'if (_concludeJobOnAssistantAudio)' `
     "the next serialized response completion must release a tool-only or folded presentation hold"
-Assert-Contains 'continuation may be folded into a newer waiting human turn' `
-    "release semantics must document why response completion is not tied to the original tool turn"
 Assert-Contains 'ReleaseLingeringJob("response_completed_without_audio")' `
     "no-audio completion must have an explicit fallback release"
 Assert-Contains 'ReleaseLingeringJob("assistant_audio_started")' `

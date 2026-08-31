@@ -10,9 +10,6 @@ internal enum MovementGait
     Run
 }
 
-/// <summary>
-/// Result of one steering tick, reported to the behaviour that asked to move.
-/// </summary>
 internal struct SteeringStatus
 {
     internal bool Moving;
@@ -25,29 +22,13 @@ internal struct SteeringStatus
     internal float SteepScalar;
 }
 
-/// <summary>
-/// Drives the companion's stock remote-player motor: gait selection, obstacle
-/// sweeping, steering around blockages, and stuck observation. It is told a
-/// direction to head and how long the remaining route is; it does not know what
-/// is being approached or why, so every action can share it.
-/// </summary>
 internal sealed class CompanionLocomotion
 {
-    // PlayerNetworking.controlsVelocity is a world-space velocity in metres per
-    // second: PlayerMover.FixedUpdate feeds it through PlayerGround.GetSlopedMoveForce
-    // into the rigidbody for a remote body exactly as it does for a local one, whose
-    // magnitude comes from PlayerMover.GetForwardSpeed(). Movement is therefore
-    // commanded in game speed units, never as a normalized 0-1 intent.
-    // Walking and running are discrete player gaits. The threshold is the midpoint
-    // of the old blend interval, but there is no blended or jogging speed anymore.
-    // A run remains latched until the companion comes to a complete stop; walking
-    // may promote to running while moving, matching the stock player's controls.
+
     internal const float RunStartDistance = 6.75f;
     private const float FallbackWalkSpeed = 3f;
     private const float FallbackRunSpeed = 5.5f;
-    // Movement intent is refreshed on the 10 Hz navigation cadence. Include one
-    // full cadence interval beyond the 0.45s commit window so obstacle preview
-    // still covers motion until the first tick after expiry.
+
     private const float BrakingLookahead = 0.55f;
     private const float ObstacleProbeDistance = 1.5f;
     internal const float MinimumClearance = 0.7f;
@@ -131,10 +112,6 @@ internal sealed class CompanionLocomotion
         return _gait.ToString().ToLowerInvariant();
     }
 
-    /// <summary>
-    /// Reads the walk and sprint speeds from the live prefab before the body is
-    /// spawned, so a failed spawn never leaves stale tunings behind.
-    /// </summary>
     internal void ResolveGaitSpeeds(PlayerCharacter character)
     {
         var tunings = character.tunings;
@@ -198,12 +175,6 @@ internal sealed class CompanionLocomotion
         _lastCommandedSpeed = 0f;
     }
 
-    /// <summary>
-    /// Steers toward <paramref name="desiredDirection"/>, choosing gait from the
-    /// remaining route length. Returns false when no candidate heading had enough
-    /// clearance; the caller decides what a blocked route means and must
-    /// <see cref="Stop"/> if it wants the body to hold still.
-    /// </summary>
     internal bool TrySteerToward(
         Vector3 desiredDirection,
         float pathDistance,
@@ -215,8 +186,6 @@ internal sealed class CompanionLocomotion
         MovementGait requestedGait;
         var gaitSpeed = PreviewMovementSpeed(pathDistance, out requestedGait);
 
-        // Look far enough ahead to stop from the gait being requested. The sweep never
-        // shortens below the walking probe, so obstacle detection is unchanged at walk.
         var probeDistance = Mathf.Max(ObstacleProbeDistance, gaitSpeed * BrakingLookahead);
 
         Vector3 steeringDirection;
@@ -259,9 +228,6 @@ internal sealed class CompanionLocomotion
         _lastSteepScalar = steepScalar;
         CommitMovementGait(requestedGait, pathDistance);
 
-        // Use the exact stock walk or run speed. Only immediate obstacle clearance
-        // may cap it for collision safety; distance to the target never creates a
-        // third, artificial "jog" speed.
         var speed = Mathf.Min(gaitSpeed, clearance / BrakingLookahead);
         _lastCommandedSpeed = speed;
         SetMovementIntent(steeringDirection * speed);
@@ -277,12 +243,6 @@ internal sealed class CompanionLocomotion
         return true;
     }
 
-    /// <summary>
-    /// Keeps forward intent through a bounded traversal or recovery commitment.
-    /// Ordinary steering remains clearance-gated; callers enter this narrow path
-    /// only after committing to a recorded human transition or a bounded recovery,
-    /// where braking at the edge or obstacle would defeat the intended action.
-    /// </summary>
     internal SteeringStatus CommitTraversalDirection(
         Vector3 desiredDirection,
         float pathDistance)
@@ -333,9 +293,6 @@ internal sealed class CompanionLocomotion
         return status;
     }
 
-    /// <summary>
-    /// Brings the body to a complete stop, which also unlatches a run.
-    /// </summary>
     internal void Stop(float now)
     {
         if (_lastMovementIntent.sqrMagnitude > 0f)
@@ -345,9 +302,6 @@ internal sealed class CompanionLocomotion
         ResetProgressObservation(now);
     }
 
-    /// <summary>
-    /// Stop path for use when the body may already be gone; never throws.
-    /// </summary>
     internal void StopQuietly()
     {
         try
@@ -500,8 +454,6 @@ internal sealed class CompanionLocomotion
                 ? 0.35f
                 : 0f;
 
-            // Score on the walking probe window so a longer sweep at running speed
-            // cannot outweigh the turn penalty and change which detour is chosen.
             var score = Mathf.Min(candidateClearance, ObstacleProbeDistance)
                       - turnPenalty
                       + Mathf.Min(candidateGroundResponse, 1f) * 0.25f
@@ -533,12 +485,6 @@ internal sealed class CompanionLocomotion
         return true;
     }
 
-    /// <summary>
-    /// Asks the stock ground solver how much of a candidate heading it would
-    /// actually pass to the rigidbody. Clearance alone cannot identify a steep
-    /// grassy face whose slope limiter reduces an otherwise clear command to
-    /// zero, which is the runtime failure this check is intended to expose.
-    /// </summary>
     private float MeasureGroundResponse(
         Vector3 direction,
         out float steepScalar)
@@ -557,11 +503,6 @@ internal sealed class CompanionLocomotion
         return response.magnitude;
     }
 
-    /// <summary>
-    /// Body-clearance proof used before deleting a breadcrumb route prefix.
-    /// Human-recorded traversal markers remain intact; uncertain floor geometry
-    /// is left to Big Walk's stock player motor rather than a second physics model.
-    /// </summary>
     internal bool CanShortcutSegment(Vector3 destination)
     {
         if (_body == null || !_body.IsAlive)
@@ -633,11 +574,6 @@ internal sealed class CompanionLocomotion
             return probeDistance;
         }
 
-        // Big Walk meshes can expose tiny seams between otherwise continuous
-        // floor pieces. The closest capsule sweep contact at those seams points
-        // upward and is safe to cross; treating it as a wall makes follow pace
-        // in place. Keep this on SweepTest, which is available in this IL2CPP
-        // build, rather than SweepTestAll, which is stripped at runtime.
         if (hit.normal.y >= WalkableSweepNormalY)
         {
             hitDescription = "ignored_walkable:" + DescribeHit(hit);
@@ -700,11 +636,6 @@ internal sealed class CompanionLocomotion
         builder.Append(hitDescription);
     }
 
-    /// <summary>
-    /// Reports whether a body commanded to move failed to make spatial progress
-    /// over the observation window. Vertical motion counts, so a deliberate
-    /// jump or fall cannot be mislabeled as a horizontal stall.
-    /// </summary>
     internal bool ObserveProgress(float now)
     {
         if (_lastCommandedSpeed <= 0.01f)

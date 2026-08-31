@@ -3,11 +3,6 @@ using UnityEngine;
 
 namespace Ramblers;
 
-/// <summary>
-/// The exact local human selected at an utterance boundary. Player-carry jobs
-/// retain this managed object and its network identity for their whole
-/// lifetime; a later player scan can never replace the spoken-about person.
-/// </summary>
 internal sealed class CompanionPlayerTarget
 {
     private readonly NetworkIdentity _networkIdentity;
@@ -37,11 +32,6 @@ internal sealed class CompanionPlayerTarget
             : "player:local:" + player.GetInstanceID();
     }
 
-    /// <summary>
-    /// Freezes the one local human associated with this spoken turn. This is
-    /// deliberately not a nearest-player query: multiplayer additions cannot
-    /// silently change who a later carry command targets.
-    /// </summary>
     internal static bool TryCaptureLocalHuman(
         PlayerCharacter human,
         CompanionBody body,
@@ -80,11 +70,6 @@ internal sealed class CompanionPlayerTarget
         return TryCaptureLocalHuman(human, body, out target, out error);
     }
 
-    /// <summary>
-    /// Validates the original managed character and, when present, its network
-    /// identity. A respawned character is a new target even if it belongs to
-    /// the same user.
-    /// </summary>
     internal bool IsStillTheSamePlayer(PlayerCharacter candidate)
     {
         if (candidate == null || candidate != Player ||
@@ -121,11 +106,6 @@ internal sealed class CompanionPlayerTarget
         return true;
     }
 
-    /// <summary>
-    /// Resolves the companion-owned carry pose used by Big Walk's stock player
-    /// pickup command. The picked-up player enters this pose; the pose is not
-    /// owned by the target player.
-    /// </summary>
     internal bool TryGetCarrierGrabPose(
         CompanionBody body,
         out PlayerPose grabPose,
@@ -150,10 +130,6 @@ internal sealed class CompanionPlayerTarget
         return true;
     }
 
-    /// <summary>
-    /// Runs the same native pose-admission predicate called by
-    /// UserCode_CmdPickUpPlayer. Gameplay conditions remain game-owned.
-    /// </summary>
     internal bool IsPickupAdmittedByGame(
         CompanionBody body,
         out string error)

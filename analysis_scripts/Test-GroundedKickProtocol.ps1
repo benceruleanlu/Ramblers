@@ -124,7 +124,7 @@ Assert-Contains $router '"kick_target_destination_ambiguous"' `
     "goal-directed kick without a separately captured ball must fail explicitly"
 Assert-NotContains $router '[ENTITY] KICK_TARGET_DISAMBIGUATED' `
     "the router must never replace a requested gaze target with a held prop"
-Assert-Order $kickRouter '// One utterance-boundary gaze cannot freeze both the prop and its' `
+Assert-Order $kickRouter '"kick_target_destination_ambiguous"' `
     'CompanionPropTarget propTarget;' `
     "ambiguous target/destination pairs must be rejected before target resolution"
 Assert-Contains $router 'turnReference.EntityReferences.TryResolve(' `
@@ -225,8 +225,6 @@ Assert-NotContains $kick '_jump.TryRequestActionRecovery(' `
     "kick must not duplicate shared recovery mechanics"
 Assert-Contains $kick '_approach.CancelRecovery();' `
     "kick completion and cancellation must clear any queued approach jump"
-Assert-Contains $kick '// Recovery is owned by the approach phase.' `
-    "entering alignment must clear recovery before charge can begin"
 Assert-Contains $approach '_recoveryUntil = 0f;' `
     "entering alignment must clear its obstacle-bypassing direction commitment"
 Assert-Contains $kick '[ACTION] KICK_APPROACH_RECOVERY' `
@@ -265,8 +263,6 @@ Assert-Contains $kick '_destination.TryGetCurrentPoint(out destinationPoint)' `
     "toward-reference requests must resolve the frozen destination"
 Assert-Contains $kick 'launchDirection = destinationPoint - launchPosition;' `
     "the launch heading must aim from the ball toward the frozen destination"
-Assert-Contains $kick '// PlayerHands.Drop applies kickSettings.angleCurve to the' `
-    "the source must document Big Walk's native head-pitch launch seam"
 Assert-Contains $kick 'launchDirection.y = 0f;' `
     "the launch record must not double-apply destination elevation"
 Assert-Contains $kick 'launchDirection = _body.Transform.forward;' `

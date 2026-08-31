@@ -18,11 +18,6 @@ internal enum GameVoiceTickEvents
     ManualTurnSubmitted = 1 << 1
 }
 
-/// <summary>
-/// Adapts Big Walk's voice channel, microphone, and direct attenuation curve
-/// into a continuous Realtime PCM stream. Open-microphone turn boundaries are
-/// owned by server semantic VAD; Big Walk push-to-talk retains manual commits.
-/// </summary>
 internal sealed class GameVoiceInput
 {
     private const int RealtimeSampleRate = 24000;
@@ -54,11 +49,6 @@ internal sealed class GameVoiceInput
     private float _streamAudibility;
     private AnimationCurve _directVoiceAttenuationCurve;
 
-    /// <summary>
-    /// Reports manual push-to-talk edges so the Unity bridge can invalidate an
-    /// older physical reference on press and capture the new one only after a
-    /// successfully committed release.
-    /// </summary>
     internal GameVoiceTickEvents Tick(IAgentAudioSink sink)
     {
         if (sink == null || !sink.IsReady)
@@ -130,12 +120,6 @@ internal sealed class GameVoiceInput
         return tickEvents;
     }
 
-    /// <summary>
-    /// True while a push-to-talk press is capturing audio that has not been
-    /// committed yet. Manual turns are the one mode with no server VAD, so a
-    /// caller that needs to know whether the human is mid-utterance has to read
-    /// it here rather than from speech_started and speech_stopped.
-    /// </summary>
     internal bool IsCapturingManualTurn =>
         _streaming &&
         _hasConfiguredTurnMode &&

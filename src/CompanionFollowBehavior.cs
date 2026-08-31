@@ -4,10 +4,6 @@ using UnityEngine;
 
 namespace Ramblers;
 
-/// <summary>
-/// Long-running breadcrumb-follow goal. It owns navigation state but delegates
-/// body motion and facing to reusable actuators.
-/// </summary>
 internal sealed class CompanionFollowBehavior
 {
     internal const float NavigationInterval = 0.1f;
@@ -94,7 +90,6 @@ internal sealed class CompanionFollowBehavior
         _jump = jump;
     }
 
-    /// <summary>Whether a follow intent is outstanding, suspended or not.</summary>
     internal bool IsRequested => _followRequested;
     internal bool IsCarried => _bodyIsCarried;
     internal bool IsCarryingHuman => _bodyCarriesHuman;
@@ -148,9 +143,6 @@ internal sealed class CompanionFollowBehavior
         if (_body == null || !_body.IsAlive)
             return;
 
-        // A physical job may own locomotion even while follow is explicitly
-        // set to stay. Yield before idle-follow cleanup can clear that job's
-        // velocity; the action coordinator is the authority for this gate.
         if (!movementAllowed)
         {
             if (_followRequested)
@@ -263,11 +255,6 @@ internal sealed class CompanionFollowBehavior
         _locomotion.ResetProgressObservation(now);
     }
 
-    /// <summary>
-    /// Drops the follow intent without reporting a <c>set_follow_mode</c> result,
-    /// so a general cancel can stop navigation without pretending the model
-    /// asked for stay.
-    /// </summary>
     internal void Stop(float now)
     {
         _followRequested = false;
@@ -290,9 +277,7 @@ internal sealed class CompanionFollowBehavior
                 _suspensionReason,
                 nextReason,
                 StringComparison.Ordinal);
-            // Stop only when follow first yields locomotion. Once suspended,
-            // any live movement intent belongs to the action holding that
-            // resource and must not be cleared by the follow behaviour.
+
             if (_state != FollowState.Suspended)
             {
                 StopForState(FollowState.Suspended, now);
@@ -752,9 +737,7 @@ internal sealed class CompanionFollowBehavior
         }
 
         _currentBreadcrumbSequence = breadcrumb.Sequence;
-        // A jump/drop marker can be retired while its body is still airborne.
-        // Keep that exact bounded direction through landing, but never let a
-        // grounded follower carry an old marker's tangent into the next target.
+
         var preserveAirborneCommit = !IsBodyGrounded &&
                                      now < _directTraversalUntil &&
                                      _committedTraversalDirection.sqrMagnitude >= 0.0001f;
@@ -1001,9 +984,7 @@ internal sealed class CompanionFollowBehavior
             }
             else
             {
-                // Follow had already yielded locomotion to a job. Update only
-                // follow-owned state; the active job retains its movement and
-                // any action-owned recovery jump.
+
                 _directTraversalUntil = 0f;
                 _committedTraversalDirection = Vector3.zero;
                 _committedTraversalSequence = 0;
@@ -1027,9 +1008,7 @@ internal sealed class CompanionFollowBehavior
             _trail.Clear();
             _trail.Add(human.transform.position, false, false);
             ResetTraversalState(human);
-            // Keep the intent suspended until the coordinator re-evaluates its
-            // live movement gate. A directed movement job may still own
-            // locomotion at the exact frame a carry link clears.
+
             _state = FollowState.Suspended;
             _suspensionReason = wasCarryingHuman
                 ? "carrying_player"
@@ -1050,12 +1029,6 @@ internal sealed class CompanionFollowBehavior
         return false;
     }
 
-    /// <summary>
-    /// Exact inverse of the ordinary carry check: the companion's stock hands
-    /// currently hold the controller-bound human. Follow intent remains latent
-    /// during this relationship so the attached passenger cannot become a
-    /// self-generated breadcrumb route.
-    /// </summary>
     internal static bool IsBodyCarryingHuman(
         CompanionBody body,
         PlayerCharacter human)
@@ -1075,11 +1048,6 @@ internal sealed class CompanionFollowBehavior
                (grabPose != null && grabPose.occupant == human);
     }
 
-    /// <summary>
-    /// The corresponding exact native relationship when the controller-bound
-    /// human carries the companion. All stock links participate so navigation
-    /// cannot resume during a partial pose teardown.
-    /// </summary>
     internal static bool IsHumanCarryingBody(
         CompanionBody body,
         PlayerCharacter human)

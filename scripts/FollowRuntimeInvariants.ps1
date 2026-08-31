@@ -33,8 +33,6 @@ function Get-FollowTangentViolation {
         )
     }
 
-    # Telemetry is rounded to millimeters, so retain half a millimeter of
-    # comparison tolerance at the inclusive source-code boundary.
     if ($distance -gt $expectedCorridor + [float]0.0005) {
         return (
             "Follow replayed an uncommitted $kind traversal tangent " +

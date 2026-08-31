@@ -6,10 +6,6 @@ using UnityEngine;
 
 namespace Ramblers;
 
-/// <summary>
-/// One nonverbal context item captured for a human utterance. Text is always
-/// present; a recent passive view is attached at most once.
-/// </summary>
 internal sealed class CompanionAwarenessTurnContext
 {
     internal AgentContinuationItem Message;
@@ -28,10 +24,6 @@ internal sealed class CompanionAwarenessTurnContext
         Message?.ImageBytes != null && Message.ImageBytes.Length > 0;
 }
 
-/// <summary>
-/// A natural ambient glance that has visibly settled and can therefore become
-/// passive visual memory without inventing a second, invisible gaze.
-/// </summary>
 internal sealed class CompanionAmbientObservationCandidate
 {
     internal Vector3 TargetPoint;
@@ -39,12 +31,6 @@ internal sealed class CompanionAmbientObservationCandidate
     internal bool Anchored;
 }
 
-/// <summary>
-/// Bounded embodied awareness for the Realtime model. Deterministic C# owns
-/// state collection, identity, event detection, visual cadence and freshness;
-/// the model receives only a compact nonverbal report and decides what matters
-/// conversationally.
-/// </summary>
 internal sealed class CompanionAwareness
 {
     private const int MaximumJournalEntries = 8;
@@ -371,11 +357,6 @@ internal sealed class CompanionAwareness
         RemoveExpiredEvents(now);
     }
 
-    /// <summary>
-    /// Captures at most one frame for a settled natural glance. The interval,
-    /// movement/direction/event novelty gates and one-shot delivery keep this a
-    /// rolling memory rather than a growing ambient video stream.
-    /// </summary>
     internal void TryRememberPassiveView(
         float now,
         CompanionAmbientObservationCandidate candidate)

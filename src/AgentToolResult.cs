@@ -3,10 +3,6 @@ using System.Text.Json.Serialization;
 
 namespace Ramblers;
 
-/// <summary>
-/// A transport-independent result from a validated agent command. The JSON
-/// representation is produced only at the agent boundary.
-/// </summary>
 internal sealed class AgentToolResult
 {
     private AgentToolResult(
@@ -39,9 +35,6 @@ internal sealed class AgentToolResult
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string State { get; }
 
-    // Exact failure codes are developer diagnostics. Sending them to the model
-    // made otherwise-natural replies leak phrases such as "reference" and
-    // "valid target" into the game conversation.
     [JsonIgnore]
     public string Error { get; }
 

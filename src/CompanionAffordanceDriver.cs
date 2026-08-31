@@ -3,10 +3,6 @@ using UnityEngine;
 
 namespace Ramblers;
 
-/// <summary>
-/// Typed admission result for one exact affordance. Only NeedsApproach grants
-/// the interaction job permission to reserve locomotion and retry.
-/// </summary>
 internal sealed class CompanionAffordanceReadiness
 {
     private CompanionAffordanceReadiness(
@@ -56,11 +52,6 @@ internal sealed class CompanionAffordanceReadiness
     }
 }
 
-/// <summary>
-/// Exact actors bound at turn capture. Relationship-sensitive affordances use
-/// these references directly instead of rediscovering a local player through
-/// global world state or borrowing follow-behaviour policy.
-/// </summary>
 internal sealed class CompanionActorContext
 {
     private readonly CompanionBody _body;
@@ -99,11 +90,6 @@ internal sealed class CompanionActorContext
     internal bool IsBoundHumanAvailable =>
         _human != null && _human.GetInstanceID() == _humanInstanceId;
 
-    /// <summary>
-    /// Exact stock relationship when the controller-bound human carries this
-    /// companion. All native links participate so partial pose teardown does
-    /// not silently change carried-affordance admission.
-    /// </summary>
     internal bool IsHumanCarryingCompanion
     {
         get
@@ -230,11 +216,6 @@ internal abstract class CompanionAffordanceActivation
 {
     internal abstract CompanionAffordanceKind Kind { get; }
 
-    /// <summary>
-    /// Sticky transaction boundary. Drivers set this immediately before every
-    /// native command so the owning job can reconcile a command that throws or
-    /// reports failure after the game may already have accepted it.
-    /// </summary>
     internal bool AuthorityCrossed { get; private set; }
 
     internal void MarkAuthorityCrossed()

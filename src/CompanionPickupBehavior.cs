@@ -3,11 +3,6 @@ using UnityEngine;
 
 namespace Ramblers;
 
-/// <summary>
-/// Picks up only the prop frozen at the originating utterance boundary. The
-/// action revalidates that same object immediately before crossing host
-/// authority and confirms that the bot's hands hold that exact prop afterward.
-/// </summary>
 internal sealed class CompanionPickupBehavior : ICompanionJob
 {
     private const float MinimumTargetLookSeconds = 0.20f;
@@ -262,8 +257,6 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
             return false;
         }
 
-        // The utterance-boundary target is the only prop this parameterless
-        // native command may release. Never derive a new target from live hands.
         _target = requestedTarget;
 
         var hands = GetHands();
@@ -319,9 +312,6 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
             $"netId={_target.NetworkId}, stableId={_target.StableId}, " +
             $"callId={request.CallId ?? "none"}, turnId={request.TurnId}.");
 
-        // The operation remains pending even if the host call throws: once the
-        // call boundary is crossed its outcome is ambiguous, so Tick reconciles
-        // against this same held prop and retries only while it remains exact.
         TryIssueExactDrop(now, true);
         return true;
     }
@@ -752,10 +742,7 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
         var heldProp = hands.heldProp;
         if (heldProp == null)
         {
-            // Holding completion is intentionally publishable while this job
-            // remains active, but the coordinator may not have consumed it
-            // yet. Do not publish a stale success if the exact prop was
-            // released during that window.
+
             if (_completion?.Result?.Ok == true)
                 _completion = CompanionJobCompletion.Failed(
                     "pickup_not_retained");
@@ -924,9 +911,7 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
 
         try
         {
-            // ServerDropPropAutomatic has no Prop parameter. The exact held-prop
-            // check immediately above is therefore the identity boundary for
-            // this compensating command.
+
             _body.Networking.ServerDropPropAutomatic(false);
             _dropRequested = true;
             _dropAbsentSince = -1f;
@@ -1032,8 +1017,7 @@ internal sealed class CompanionPickupBehavior : ICompanionJob
     private void EndAction()
     {
         _approach.CancelRecovery();
-        // Explicit drop reserves Hands only and may run concurrently with
-        // follow, so it must never clear locomotion it does not own.
+
         if (_locomotion != null && !IsExplicitDrop)
             _locomotion.Stop(Time.realtimeSinceStartup);
         _state = PickupState.Idle;

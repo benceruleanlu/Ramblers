@@ -3,11 +3,6 @@ using UnityEngine;
 
 namespace Ramblers;
 
-/// <summary>
-/// One recorded point on the human's proven route. A jump hint belongs to the
-/// segment ending at this point, so the follower can replay the takeoff instead
-/// of treating every pair of breadcrumbs as flat walking geometry.
-/// </summary>
 internal readonly struct BreadcrumbPoint
 {
     internal BreadcrumbPoint(
@@ -31,11 +26,6 @@ internal readonly struct BreadcrumbPoint
     internal Vector3 TravelDirection { get; }
 }
 
-/// <summary>
-/// A bounded FIFO of world positions describing a walked route. This is pure
-/// storage and geometry: when to sample a new point, and what to log when the
-/// route is discarded, belong to the behaviour that owns the trail.
-/// </summary>
 internal sealed class BreadcrumbTrail
 {
     private readonly BreadcrumbPoint[] _points;
@@ -59,9 +49,6 @@ internal sealed class BreadcrumbTrail
         _hasLastAdded = false;
     }
 
-    /// <summary>
-    /// Appends a point, evicting the oldest once the trail is full.
-    /// </summary>
     internal BreadcrumbPoint Add(
         Vector3 position,
         bool requiresJump,
@@ -97,9 +84,6 @@ internal sealed class BreadcrumbTrail
         return point;
     }
 
-    /// <summary>
-    /// The oldest remaining point, which is the next one to walk toward.
-    /// </summary>
     internal BreadcrumbPoint Peek()
     {
         return _points[_head];
@@ -127,28 +111,12 @@ internal sealed class BreadcrumbTrail
         return true;
     }
 
-    /// <summary>
-    /// The most recently appended point, used to decide whether the next sample
-    /// is far enough along to be worth recording. Cleared with the trail.
-    /// </summary>
     internal bool TryGetLastAdded(out BreadcrumbPoint point)
     {
         point = _lastAdded;
         return _hasLastAdded;
     }
 
-    /// <summary>
-    /// Removes points reached in both the horizontal and vertical axes. A point
-    /// can also be retired after the body crosses its route-normal plane while
-    /// still inside the route corridor. That second condition prevents a fast
-    /// body from orbiting a waypoint it has already passed without allowing a
-    /// point on another floor to disappear merely because its X/Z projection
-    /// happens to be nearby.
-    ///
-    /// An uncommitted jump marker can pin the head even when its horizontal
-    /// coordinate is already close, preventing the route from deleting its own
-    /// takeoff instruction.
-    /// </summary>
     internal int RemoveReached(
         Vector3 from,
         float horizontalTolerance,
@@ -197,15 +165,6 @@ internal sealed class BreadcrumbTrail
         return removed;
     }
 
-    /// <summary>
-    /// Collapses an obsolete route prefix when the body is already inside the
-    /// arrival corridor of a later breadcrumb. This is the route equivalent of
-    /// taking a proven loop shortcut: the later point was occupied by the human,
-    /// and the body has independently reached the same place and level.
-    ///
-    /// An uncommitted traversal marker stops the scan. Geometric proximity must
-    /// never erase a jump or drop that the body has not performed.
-    /// </summary>
     internal int RemoveThroughLatestNearby(
         Vector3 from,
         float horizontalTolerance,
@@ -280,12 +239,6 @@ internal sealed class BreadcrumbTrail
         return lateralOffset.magnitude <= lateralTolerance;
     }
 
-    /// <summary>
-    /// Three-dimensional length of the route <paramref name="from"/> -> every
-    /// remaining breadcrumb -> <paramref name="to"/>. Vertical separation is
-    /// intentionally retained so stacked floors and ledges cannot collapse into
-    /// the same apparent position.
-    /// </summary>
     internal float MeasureDistance(Vector3 from, Vector3 to)
     {
         if (_count == 0)
@@ -303,14 +256,6 @@ internal sealed class BreadcrumbTrail
         return total + Vector3.Distance(previous, to);
     }
 
-    /// <summary>
-    /// Approaches a recorded jump or drop at its actual waypoint, then switches
-    /// to the human's recorded travel tangent only inside the bounded traversal
-    /// corridor (or while that exact marker has an active commit). Replaying a
-    /// distant tangent can point away from the marker when the companion joined
-    /// the route from the side, which looks like pathfinding progress while the
-    /// remaining route grows longer.
-    /// </summary>
     internal static Vector3 ResolveTraversalApproachDirection(
         Vector3 from,
         BreadcrumbPoint point,

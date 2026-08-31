@@ -1,11 +1,5 @@
 namespace Ramblers;
 
-/// <summary>
-/// The companion's model-facing behavioural instructions: persona, world
-/// context, and cross-cutting rules only. Per-tool routing belongs in
-/// <see cref="AgentToolCatalog"/> descriptions, which ride the session's tool
-/// definitions, so adding a tool should not grow this text.
-/// </summary>
 internal static class AgentPrompt
 {
     internal const string Instructions =

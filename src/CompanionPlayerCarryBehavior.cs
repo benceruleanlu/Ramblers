@@ -3,11 +3,6 @@ using UnityEngine;
 
 namespace Ramblers;
 
-/// <summary>
-/// Picks up and drops the exact local human frozen at the utterance boundary.
-/// Dispatch uses Big Walk's connectionless server-body command path and
-/// confirms the stock carry-pose state before reporting success.
-/// </summary>
 internal sealed class CompanionPlayerCarryBehavior :
     ICompanionJob,
     ICompanionStandingJob
@@ -632,9 +627,7 @@ internal sealed class CompanionPlayerCarryBehavior :
 
         try
         {
-            // This is the server-side body of Big Walk's stock command. The
-            // companion has no client connection, so the generated Cmd wrapper
-            // cannot be its authority boundary.
+
             _body.Networking.UserCode_CmdPickUpPlayer__PlayerCharacter(
                 _target.Player);
         }
@@ -707,10 +700,7 @@ internal sealed class CompanionPlayerCarryBehavior :
         }
         if (!HasAnyExactCarryLink())
         {
-            // The success is allowed to publish while the exact player is
-            // held. If every exact carry link disappears before publication,
-            // replace that queued result rather than advancing the turn with
-            // a stale holding-player transition.
+
             if (_completion?.Result?.Ok == true)
                 _completion = CompanionJobCompletion.Failed(
                     "player_pickup_not_retained");
@@ -837,9 +827,7 @@ internal sealed class CompanionPlayerCarryBehavior :
         _dropIssuedAt = now;
         try
         {
-            // The native drop command has no target argument. Every carry link
-            // is checked against the frozen player immediately above, making
-            // this the exact-identity boundary for the parameterless command.
+
             _body.Networking.UserCode_CmdDropHeldPlayer();
             _releasedSince = -1f;
             Plugin.Logger.LogInfo(explicitDrop
@@ -1025,9 +1013,7 @@ internal sealed class CompanionPlayerCarryBehavior :
 
     private PlayerPose GetCarrierGrabPoseForLinkCheck()
     {
-        // Teardown may deactivate the pose object before all exact native
-        // backlinks clear. Link reconciliation needs the frozen pose identity,
-        // not admission-time activeInHierarchy state.
+
         try
         {
             return _body?.Character?.registry?.grabPose;

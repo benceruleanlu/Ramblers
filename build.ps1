@@ -159,8 +159,6 @@ else {
     $OutputPath = Resolve-FullPath -Path $OutputPath -BasePath $repositoryRoot
 }
 
-# Compile every source under src/. Sorting keeps the compiler argument order
-# stable so /deterministic+ still yields a reproducible assembly.
 $sourceRoot = Join-Path $repositoryRoot "src"
 $sourcePaths = @(
     Get-ChildItem -LiteralPath $sourceRoot -Filter *.cs -Recurse -File |

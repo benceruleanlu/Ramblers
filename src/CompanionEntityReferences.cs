@@ -3,11 +3,6 @@ using System.Collections.Generic;
 
 namespace Ramblers;
 
-/// <summary>
-/// Exact prop and interaction identities exposed as game context for one turn.
-/// The model may select an ID semantically; deterministic action code resolves
-/// only the matching frozen object and never substitutes a neighbour.
-/// </summary>
 internal sealed class CompanionEntityReferenceSet
 {
     private readonly Dictionary<string, CompanionPropTarget> _props =

@@ -5,12 +5,6 @@ using UnityEngine;
 
 namespace Ramblers;
 
-/// <summary>
-/// One model-visible context ID bound to the exact CastableTarget. Its raw
-/// structural kind and identity are frozen without actor prerequisites; tool
-/// routing rematerializes a current typed affordance through the original turn
-/// actor context. It never searches for another component.
-/// </summary>
 internal sealed class CompanionInteractionReference
 {
     private const int MaximumNameHierarchyDepth = 5;
@@ -170,8 +164,7 @@ internal sealed class CompanionInteractionReference
         {
             var outcome = outcomes[index];
             var candidate = CompanionInteractionStructuralKind.None;
-            // Match Big Walk's primary-action precedence without consulting
-            // actor reach, hands, keys, pockets, or other dynamic admission.
+
             if (outcome?.playerPose != null)
             {
                 candidate = CompanionInteractionStructuralKind.PlayerPose;

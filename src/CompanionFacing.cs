@@ -2,21 +2,10 @@ using UnityEngine;
 
 namespace Ramblers;
 
-/// <summary>
-/// Aims the companion at a world point: the whole body turns at Big Walk's stock
-/// rate and whatever yaw the body has not yet absorbed is expressed as head pose.
-/// The point is supplied by the caller, so an action can aim at the speaker, at
-/// its destination, or at an object without this class knowing the difference.
-/// </summary>
 internal sealed class CompanionFacing
 {
     internal const float BodyTurnSpeed = 180f;
 
-    // A deliberate look is mouse motion, not teleportation. Aiming straight at
-    // a new target would put the whole angular error into headState.x on the
-    // first frame, a residual only a fast flick reaches, because the stock
-    // 180 deg/s drain is eating the input the whole time a real hand is moving.
-    // The gain gives the ease-out a hand has on approach; the cap is its peak.
     private const float LookRate = 300f;
     private const float LookApproachGain = 8f;
 
@@ -59,22 +48,11 @@ internal sealed class CompanionFacing
         _lastAimDirection = body.Transform.forward;
     }
 
-    /// <summary>
-    /// Re-bases the update clock when facing resumes after a gap, so the first
-    /// step is not credited with all the time since the last one.
-    /// </summary>
     internal void ResumeAt(float now)
     {
         _lastUpdateAt = now;
     }
 
-    /// <summary>
-    /// Whether head yaw may be absorbed into the body. Stock
-    /// PlayerMover.UpdatePerFrameRotation skips its drain block entirely while
-    /// PlayerSitter.isSittingCorrected is true, so a seated player is the one
-    /// case that can hold a sustained head yaw instead of turning to face
-    /// what they are looking at.
-    /// </summary>
     internal void SetBodyTurnAllowed(bool allowed)
     {
         _bodyTurnAllowed = allowed;
@@ -141,11 +119,6 @@ internal sealed class CompanionFacing
             ? tunings.lowerLookLimit
             : FallbackVerticalLookLimit;
 
-        // PlayerHead's replicated Vector2 is (yaw relative to the body, pitch).
-        // Unity's positive X rotation looks downward, hence the negative pitch.
-        // The aim is wherever the head is currently pointing; look input moves
-        // it toward the target at a bounded rate, exactly as a hand on a mouse
-        // does, and PlayerHead.SetHeadStateLocal accumulates that delta.
         var desiredPitch = -Mathf.Atan2(toTarget.y, horizontalDistance) * Mathf.Rad2Deg;
         var maxLookStep = LookRate * elapsed;
         var aimYaw = bodyYaw + _headState.x;
@@ -159,11 +132,6 @@ internal sealed class CompanionFacing
             lowerLookLimit);
         ApplyLowerCornerLimit(ref headYaw, ref headPitch, sideLookLimit, lowerLookLimit);
 
-        // Stock PlayerMover.UpdatePerFrameRotation subtracts up to 180 degrees
-        // per second from headState.x and adds it to PlayerCharacter.kernal, so
-        // the residual is a lag buffer rather than a pose: it always decays to
-        // zero once the aim settles. That method is local-only, so a
-        // connectionless non-local companion performs the same step here.
         var bodyStep = _bodyTurnAllowed
             ? Mathf.Clamp(headYaw, -BodyTurnSpeed * elapsed, BodyTurnSpeed * elapsed)
             : 0f;
@@ -186,28 +154,16 @@ internal sealed class CompanionFacing
             _lastBodyYaw + headYaw,
             0f) * Vector3.forward;
 
-        // The body rotation is sampled by the already-owned HouseNetworkTransform;
-        // residual head pose uses the stock SyncVar/animator path.
         _body.Character.head.headState = _headState;
         _body.Networking.NetworkheadState = _headState;
     }
 
-    /// <summary>
-    /// One frame of simulated look input: proportional to the error so the aim
-    /// eases onto the target, capped so it never exceeds a plausible hand.
-    /// </summary>
     private static float LookStep(float error, float elapsed, float maxStep)
     {
         var step = Mathf.Clamp(error * LookApproachGain * elapsed, -maxStep, maxStep);
         return Mathf.Abs(step) > Mathf.Abs(error) ? error : step;
     }
 
-    /// <summary>
-    /// PlayerHead.SetHeadStateLocal shrinks the side-look allowance as the head
-    /// pitches down, so looking at the ground and far to the side at once is not
-    /// a pose a player can hold. Reproduced on the same ellipse the stock method
-    /// uses, gated on the same downward-pitch test.
-    /// </summary>
     private static void ApplyLowerCornerLimit(
         ref float headYaw,
         ref float headPitch,

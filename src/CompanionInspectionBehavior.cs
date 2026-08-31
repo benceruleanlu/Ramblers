@@ -2,10 +2,6 @@ using UnityEngine;
 
 namespace Ramblers;
 
-/// <summary>
-/// A bounded shared-attention job: acknowledge the human, visibly turn toward
-/// the turn-bound referent the model selected, then capture one bot-eye frame.
-/// </summary>
 internal sealed class CompanionInspectionBehavior : ICompanionJob
 {
     private const float MinimumHumanGlanceSeconds = 0.30f;
@@ -13,17 +9,10 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
     private const float HumanAimToleranceDegrees = 12f;
     private const float MinimumReferenceLookSeconds = 0.30f;
 
-    // A reference directly behind the companion needs a full half-turn, and the
-    // aim can only advance as fast as the body absorbs it once head yaw
-    // saturates — 180 degrees per second, so about 1.2s worst case. The old
-    // 1.25s budget was set when facing snapped onto its target and would now
-    // time out on rear references rather than aiming at them.
     private const float MaximumReferenceLookSeconds = 2.00f;
     private const float ReferenceSettleSeconds = 0.10f;
     private const float ReferenceAimToleranceDegrees = 4f;
 
-    // The gaze work is bounded by the constants above at roughly two seconds,
-    // so this only has to cover a stalled frame loop.
     private const float InspectionTimeoutSeconds = 5f;
 
     private enum InspectionState
@@ -68,11 +57,6 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
         return JobResources.Locomotion | JobResources.Gaze;
     }
 
-    /// <summary>
-    /// Locomotion is released the moment the frame is captured. The settle hold
-    /// that follows is a gaze commitment only, so a follow request arriving with
-    /// the model's reply is not answered with a suspension the human cannot see.
-    /// </summary>
     public JobResources Held
     {
         get
@@ -347,8 +331,7 @@ internal sealed class CompanionInspectionBehavior : ICompanionJob
                     observation.ImageBytes,
                     observation.MediaType)
             },
-            // Inspection intentionally keeps looking at the referent while the
-            // model begins describing the captured image.
+
             RetainUntilAssistantAudio = true
         };
         _state = InspectionState.HoldingReference;

@@ -8,11 +8,6 @@ internal enum CompanionInspectionSource
     HumanHeldItem
 }
 
-/// <summary>
-/// Both visual referents available at one utterance boundary. The model may
-/// choose which meaning the human expressed, but it cannot ask Unity to select
-/// a new object or cast a newer gaze ray after that choice.
-/// </summary>
 internal sealed class CompanionInspectionCandidates
 {
     private const float MaximumReferenceDistance = 40f;
@@ -212,11 +207,6 @@ internal sealed class CompanionInspectionCandidates
     }
 }
 
-/// <summary>
-/// One model-selected visual referent. A gaze point remains frozen; a held prop
-/// may move, but only that exact managed object and network identity are
-/// followed.
-/// </summary>
 internal sealed class CompanionInspectionReferent
 {
     private readonly Vector3 _frozenPoint;

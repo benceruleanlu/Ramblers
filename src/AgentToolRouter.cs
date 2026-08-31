@@ -4,10 +4,6 @@ using UnityEngine;
 
 namespace Ramblers;
 
-/// <summary>
-/// Validates model-selected tools and arguments before any Unity-side action.
-/// The router translates untrusted JSON into typed companion commands.
-/// </summary>
 internal static class AgentToolRouter
 {
     internal static AgentToolDispatch Execute(
@@ -115,11 +111,6 @@ internal static class AgentToolRouter
         return CompanionController.RequestJump();
     }
 
-    /// <summary>
-    /// Starts a multi-frame companion job. The model's turn stays open until the
-    /// job reports a terminal result, so no branch here is specific to what the
-    /// job actually does.
-    /// </summary>
     private static AgentToolDispatch ExecuteJob(
         string jobName,
         string arguments,
@@ -515,9 +506,6 @@ internal static class AgentToolRouter
                 AgentToolResult.Failure("human_reference_not_captured"));
         }
 
-        // One utterance-boundary gaze cannot freeze both the prop and its
-        // destination. Require the model to name the held/context prop
-        // independently; never reinterpret a requested gaze target.
         if (string.Equals(target, "human_reference", StringComparison.Ordinal) &&
             direction == CompanionKickDirection.TowardReference)
         {

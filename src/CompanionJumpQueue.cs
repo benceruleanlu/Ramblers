@@ -8,11 +8,6 @@ internal enum CompanionJumpQueueOwner
     Action
 }
 
-/// <summary>
-/// Owns the intent attached to the single stock jump queue. Different callers
-/// may request a jump in the same frame, but only compatible callers may treat
-/// an existing queue as their own or cancel it.
-/// </summary>
 internal sealed class CompanionJumpQueue
 {
     internal CompanionJumpQueueOwner Owner { get; private set; }

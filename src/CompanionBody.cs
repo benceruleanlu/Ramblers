@@ -4,11 +4,6 @@ using UnityEngine;
 
 namespace Ramblers;
 
-/// <summary>
-/// The spawned companion's components, resolved once at spawn instead of being
-/// re-queried from the GameObject by every behaviour. This is the handle each
-/// behaviour is given, so none of them need to know how the body was created.
-/// </summary>
 internal sealed class CompanionBody
 {
     internal CompanionBody(
@@ -40,11 +35,6 @@ internal sealed class CompanionBody
 
     internal Vector3 HeadPosition => HeadPositionOf(Character);
 
-    /// <summary>
-    /// Whether a transform belongs to the companion's own hierarchy. Any cast
-    /// that starts at the companion's head needs this to tell a self-hit from a
-    /// real one.
-    /// </summary>
     internal bool Contains(Transform candidate)
     {
         var root = Transform;
@@ -52,10 +42,6 @@ internal sealed class CompanionBody
                (candidate == root || candidate.IsChildOf(root));
     }
 
-    /// <summary>
-    /// A player's eye position, falling back to a nominal standing eye height
-    /// when the character has no camera transform.
-    /// </summary>
     internal static Vector3 HeadPositionOf(PlayerCharacter character)
     {
         return character.cameraTransform == null

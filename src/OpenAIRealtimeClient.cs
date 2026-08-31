@@ -80,10 +80,6 @@ internal sealed class RealtimeAudioTruncation
     internal int AudioEndMilliseconds;
 }
 
-/// <summary>
-/// Pure managed WebSocket client. It exchanges JSON/PCM and queues model
-/// decisions for the Unity main thread; it never touches Unity objects.
-/// </summary>
 internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
 {
     private readonly string _apiKey;
@@ -222,12 +218,6 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         }
     }
 
-    /// <summary>
-    /// Submits a batch's function outputs and continuation items. Pass false for
-    /// <paramref name="requestResponse"/> to leave the response uncreated, which
-    /// the caller does while the human is still speaking. Continuation keeps
-    /// this batch's turn id unless a newer user turn is already pending.
-    /// </summary>
     internal bool CompleteFunctionCallBatch(
         string responseId,
         RealtimeFunctionOutput[] outputs,
@@ -318,11 +308,6 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         return true;
     }
 
-    /// <summary>
-    /// Adds private nonverbal game perception to the default conversation
-    /// without creating a response. The bridge queues this immediately before
-    /// the response.create for the corresponding human utterance.
-    /// </summary>
     internal bool QueueTurnContext(AgentContinuationItem item)
     {
         var content = BuildContinuationContent(item);
@@ -375,7 +360,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         }
         catch (OperationCanceledException)
         {
-            // Normal during shutdown.
+
         }
         catch (Exception exception)
         {
@@ -385,9 +370,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         {
             _ready = false;
             _logs.Enqueue("CONNECTION_STOPPED");
-            // Publish stopped only after the terminal marker is queued. The
-            // bridge observes this volatile write before replacing the client,
-            // so it cannot abandon the marker in the old queue.
+
             _stopped = true;
         }
     }
@@ -441,8 +424,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         {
             type = "semantic_vad",
             eagerness = "auto",
-            // The client owns response.create so a deferred embodied tool can
-            // finish its function outputs and image before one continuation.
+
             create_response = false,
             interrupt_response = true
         };
@@ -598,10 +580,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
 
             if (type == "response.done")
             {
-                // Registering the batch before marking the response done is
-                // load-bearing: TryReserveResponseCreate refuses while a tool
-                // batch is outstanding, which is what stops a queued VAD turn
-                // from starting a response before the outputs are sent.
+
                 var completedTurnId = GetActiveResponseTurnId();
                 JsonElement completedResponse;
                 var responseStatus = root.TryGetProperty(
@@ -645,11 +624,6 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         }
     }
 
-    /// <summary>
-    /// Requests a response for one captured human turn. A newer utterance may
-    /// replace a request that has not yet reserved a response slot; a response
-    /// already in flight retains the id it reserved.
-    /// </summary>
     internal void RequestResponse(long turnId)
     {
         var shouldCreate = false;
@@ -674,19 +648,13 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             QueueResponseCreate();
     }
 
-    /// <summary>
-    /// Releases a held tool continuation without replacing a newer human turn
-    /// that may already be waiting for the same response slot.
-    /// </summary>
     internal void RequestContinuation(long turnId)
     {
         var shouldCreate = false;
         var requestedAt = Stopwatch.GetTimestamp();
         lock (_responseSync)
         {
-            // A newer response reservation already includes the submitted tool
-            // outputs in conversation state. Do not queue a second response for
-            // the older continuation behind it.
+
             if (_responseRequested || _responseActive || _responseCreateQueued)
                 return;
             _responseRequested = true;
@@ -821,11 +789,6 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             (!string.IsNullOrEmpty(message) &&
              message.IndexOf("active response", StringComparison.OrdinalIgnoreCase) >= 0);
 
-        // error.event_id names the client event that caused the failure. The
-        // root event_id is the server's id for the error itself and never
-        // matches a locally minted response.create id, so ignoring the
-        // distinction would strand _responseCreateQueued and stop the agent
-        // from ever creating another response.
         var eventId = GetString(error, "event_id");
 
         lock (_responseSync)
@@ -845,9 +808,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             _responseCreateEventId = null;
             if (activeResponseConflict)
             {
-                // A server-created semantic-VAD response can race its
-                // response.created event. Keep the request pending and retry
-                // only after response.done establishes a free response slot.
+
                 _responseActive = true;
                 _responseRequested = true;
                 _responseRequestedTurnId = _reservedResponseTurnId;
@@ -893,9 +854,6 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         if (string.IsNullOrEmpty(transcript))
             return transcript;
 
-        // Realtime transcripts are valid Unicode, but BepInEx's legacy Windows
-        // console can display UTF-8 smart punctuation as multiple garbled
-        // characters. Normalize only transcript diagnostics at the log boundary.
         return transcript
             .Replace("\u2018", "'")
             .Replace("\u2019", "'")
@@ -981,11 +939,6 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         return true;
     }
 
-    /// <summary>
-    /// Turns one job-supplied item into Realtime message content. This is the
-    /// only place that knows how an image reaches the model, so a job reports an
-    /// observation without the transport learning what produced it.
-    /// </summary>
     private static object[] BuildContinuationContent(AgentContinuationItem item)
     {
         if (item == null)
@@ -1006,9 +959,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             content[next] = new
             {
                 type = "input_image",
-                // Realtime currently maps omitted/auto detail to high. Pin the
-                // intended fidelity so an encoding change cannot also change
-                // how the observation is interpreted.
+
                 detail = "high",
                 image_url = "data:" + item.ImageMediaType + ";base64," +
                             Convert.ToBase64String(item.ImageBytes)
@@ -1094,7 +1045,6 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         {
         }
         _socket.Dispose();
-        // Background loops observe cancellation and finish asynchronously. Their
-        // wait handles remain valid until then, avoiding a shutdown race.
+
     }
 }

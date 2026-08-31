@@ -10,11 +10,6 @@ internal enum CompanionApproachStepKind
     Blocked
 }
 
-/// <summary>
-/// Describes one locomotion/recovery transition without choosing what that
-/// transition means for the action that requested it. The owning behavior
-/// retains action-specific logging, failure codes, and lifecycle decisions.
-/// </summary>
 internal struct CompanionApproachStep
 {
     internal CompanionApproachStepKind Kind;
@@ -23,12 +18,6 @@ internal struct CompanionApproachStep
     internal int RecoveryAttempt;
 }
 
-/// <summary>
-/// Shared planar approach mechanics for physical jobs: navigation cadence,
-/// steering, stuck observation, and a short committed traversal after stock
-/// jump recovery. Target validation, reach, activation, and completion remain
-/// with the action-specific behavior.
-/// </summary>
 internal sealed class CompanionApproachController
 {
     private const float NavigationInterval = 0.1f;
@@ -71,8 +60,7 @@ internal sealed class CompanionApproachController
 
     internal void Resume(float now)
     {
-        // A resumed approach must use the target's current direction. Any
-        // recovery queued by the previous approach phase is now stale.
+
         CancelRecovery();
         _nextNavigationTick = now;
         ResetProgressObservation(now);
@@ -124,9 +112,6 @@ internal sealed class CompanionApproachController
         _recoveryDirection = Vector3.zero;
     }
 
-    // Bookkeeping reset is deliberately separate from jump cancellation:
-    // behavior lifecycle paths retain their prior ownership semantics, while
-    // an approach-to-alignment transition can cancel only its active recovery.
     internal void Reset()
     {
         _recoveryDirection = Vector3.zero;

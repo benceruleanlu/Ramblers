@@ -17,11 +17,6 @@ internal enum CompanionAffordanceKind
     PropHome
 }
 
-/// <summary>
-/// Every exact native primary-action affordance available when an utterance
-/// ends. Model resolution chooses among these frozen identities; execution
-/// never scans for a replacement object.
-/// </summary>
 internal sealed class CompanionAffordanceCandidates
 {
     private readonly CompanionActorContext _actor;
@@ -184,11 +179,6 @@ internal sealed class CompanionAffordanceCandidates
         return target != null;
     }
 
-    /// <summary>
-    /// Resolves an independently frozen context CastableTarget through this
-    /// turn's bound actor context. The caller supplies the capture-time instance
-    /// ID; selection never recasts gaze or substitutes another target.
-    /// </summary>
     internal bool TrySelectExactWorldReference(
         CompanionAffordanceSource source,
         CastableTarget castableTarget,
@@ -323,10 +313,6 @@ internal sealed class CompanionAffordanceCandidates
     }
 }
 
-/// <summary>
-/// Frozen source/reference wrapper. Per-kind lifecycle and native protocol live
-/// behind ICompanionAffordanceDriver implementations.
-/// </summary>
 internal sealed class CompanionAffordanceTarget
 {
     private const float HumanGazeCastDistance =
@@ -438,12 +424,6 @@ internal sealed class CompanionAffordanceTarget
             out error);
     }
 
-    /// <summary>
-    /// Freezes the exact CastableTarget under the human's view independently of
-    /// whether it is actionable from the human's current reach or companion
-    /// hands state. The stock target is preferred; one longer stock-layer gaze
-    /// cast is used only when that field is empty.
-    /// </summary>
     internal static bool TryCaptureHumanReferenceIdentity(
         PlayerCharacter human,
         CompanionBody body,
@@ -735,10 +715,6 @@ internal sealed class CompanionAffordanceTarget
             return false;
         }
 
-        // Preserve the same prerequisite policy on both the dynamic and
-        // structural paths. A key is implemented only for the switch selected
-        // by Big Walk's native precedence; pocket-item use is not yet bound to
-        // an exact companion-owned item or authoritative command.
         var selectedPrimitiveIsSwitch = outcome.playerPose == null &&
                                         outcome.propHome == null &&
                                         outcome.peckSwitch != null;
@@ -753,7 +729,6 @@ internal sealed class CompanionAffordanceTarget
             return false;
         }
 
-        // Preserve PlayerDecisions.UseCastableTarget's native precedence.
         if (outcome.playerPose != null)
         {
             if (!CompanionPlayerPoseAffordanceDriver.TryCreate(
@@ -802,11 +777,6 @@ internal sealed class CompanionAffordanceTarget
         return true;
     }
 
-    /// <summary>
-    /// Context discovery already owns an exact CastableTarget. Resolution uses
-    /// the full turn-bound actor captured with that ID, while discovery itself
-    /// binds only the companion and never invents a human carrier.
-    /// </summary>
     internal static bool TryCaptureWorldOutcome(
         CastableTarget castableTarget,
         CompanionBody body,
