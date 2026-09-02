@@ -75,6 +75,7 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
             CaptureTurnAndRequestResponse("manual_ptt");
         PollPendingToolBatches();
         DrainFunctionCallBatches();
+        InjectUnsolicitedContext();
         CleanupCompletedTurnReferences();
 
         ReleaseHeldContinuation();
@@ -87,6 +88,59 @@ internal sealed class RealtimeAgentBridge : MonoBehaviour
     private bool IsHumanSpeaking()
     {
         return _userSpeaking || _gameVoice.IsCapturingManualTurn;
+    }
+
+    private void InjectUnsolicitedContext()
+    {
+        if (_client == null || !_client.IsReady || IsHumanSpeaking())
+            return;
+
+        CompanionAwarenessTurnContext context;
+        string error;
+        if (!CompanionController.TryTakeUnsolicitedAwarenessContext(
+                Time.realtimeSinceStartup,
+                out context,
+                out error))
+        {
+            return;
+        }
+
+        bool queued;
+        try
+        {
+            queued = _client.QueueUnsolicitedContext(context.Message);
+        }
+        catch (Exception exception)
+        {
+            Plugin.Logger.LogWarning(
+                $"[AWARENESS] EVENT_CONTEXT_QUEUE_FAILED error={exception.Message}");
+            return;
+        }
+        if (!queued)
+        {
+            Plugin.Logger.LogWarning(
+                "[AWARENESS] EVENT_CONTEXT_QUEUE_FAILED error=client_rejected_item");
+            return;
+        }
+
+        CompanionController.ConfirmUnsolicitedAwarenessContextDelivered(context);
+        Plugin.Logger.LogInfo(
+            "[AWARENESS] EVENT_CONTEXT_INJECTED " +
+            $"trigger={CompanionAwarenessInjectionPolicy.TriggerLabel(context.Trigger)}, " +
+            $"humanSpeaking={IsHumanSpeaking()}, " +
+            $"assistantSpeaking={_gameVoiceOutput.IsSpeaking}, " +
+            $"sinceLastPacketSeconds={context.SecondsSinceLastPacket:F1}, " +
+            $"packetsLastMinute={context.PacketsLastMinute + 1}, " +
+            $"events={context.EventCount}, " +
+            $"newProps={context.NearbyPropCount}, " +
+            $"newInteractables={context.NearbyInteractableCount}, " +
+            $"newPlayers={context.NearbyPlayerCount}, " +
+            $"humanChanged={context.HumanChanged}, " +
+            $"companionChanged={context.CompanionChanged}, " +
+            $"textChars={context.Message.Text.Length}.");
+        Plugin.Logger.LogDebug(
+            "[AWARENESS] EVENT_CONTEXT_PAYLOAD " +
+            context.Message.Text.Replace("\n", " "));
     }
 
     private void ReleaseHeldContinuation()

@@ -14,6 +14,7 @@ internal sealed class CompanionController : MonoBehaviour
     private readonly CompanionAwareness _awareness = new CompanionAwareness();
     private readonly LogLatch _verificationLog = new LogLatch();
     private readonly LogLatch _awarenessLateLog = new LogLatch();
+    private readonly LogLatch _unsolicitedFailureLog = new LogLatch();
 
     private CompanionBody _body;
     private float _nextPoll;
@@ -349,6 +350,81 @@ internal sealed class CompanionController : MonoBehaviour
         if (controller == null || context == null)
             return;
         controller._awareness.ConfirmTurnContextDelivered(context);
+    }
+
+    internal static bool TryTakeUnsolicitedAwarenessContext(
+        float now,
+        out CompanionAwarenessTurnContext context,
+        out string error)
+    {
+        context = null;
+        error = null;
+        var controller = _activeController;
+        var body = controller == null ? null : controller._body;
+        if (body == null || !body.IsAlive || !controller._hasSpawnedBot)
+        {
+            error = "bot_not_spawned";
+            return false;
+        }
+        if (!controller._awareness.IsUnsolicitedScanDue(now))
+        {
+            error = "scan_not_due";
+            return false;
+        }
+
+        CompanionAffordanceCandidates candidates = null;
+        var human = WorldManager.localPlayerCharacter;
+        if (human != null && human.gameObject != body.GameObject)
+        {
+            try
+            {
+                string candidateError;
+                CompanionAffordanceCandidates.TryCaptureAmbient(
+                    human,
+                    body,
+                    out candidates,
+                    out candidateError);
+            }
+            catch (Exception exception)
+            {
+                candidates = null;
+                if (controller._unsolicitedFailureLog.ShouldLog())
+                {
+                    Plugin.Logger.LogWarning(
+                        $"[AWARENESS] AMBIENT_REFERENCE_CAPTURE_FAILED error={exception.Message}");
+                }
+            }
+        }
+
+        try
+        {
+            var taken = controller._awareness.TryTakeUnsolicitedContext(
+                now,
+                candidates,
+                out context,
+                out error);
+            controller._unsolicitedFailureLog.Reset();
+            return taken;
+        }
+        catch (Exception exception)
+        {
+            error = "awareness_context_capture_failed";
+            if (controller._unsolicitedFailureLog.ShouldLog())
+            {
+                Plugin.Logger.LogWarning(
+                    $"[AWARENESS] EVENT_CONTEXT_FAILED error={exception.Message}");
+            }
+            return false;
+        }
+    }
+
+    internal static void ConfirmUnsolicitedAwarenessContextDelivered(
+        CompanionAwarenessTurnContext context)
+    {
+        var controller = _activeController;
+        if (controller == null || context == null)
+            return;
+        controller._awareness.ConfirmUnsolicitedContextDelivered(context);
     }
 
     internal static bool TryTakeJobCompletion(

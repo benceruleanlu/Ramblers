@@ -19,6 +19,16 @@ internal sealed class CompanionAwarenessTurnContext
     internal CompanionEntityReferenceSet EntityReferences;
     internal long DeliveredThroughEventSequence;
     internal float PassiveCapturedAt = -1f;
+    internal float CapturedAt = -1f;
+    internal string HumanStateKey;
+    internal string CompanionStateKey;
+    internal string[] SentEntityIds;
+    internal bool Unsolicited;
+    internal CompanionAwarenessInjectionTrigger Trigger;
+    internal float SecondsSinceLastPacket = -1f;
+    internal int PacketsLastMinute;
+    internal bool HumanChanged;
+    internal bool CompanionChanged;
 
     internal bool HasImage =>
         Message?.ImageBytes != null && Message.ImageBytes.Length > 0;
@@ -79,6 +89,30 @@ internal sealed class CompanionAwareness
         public string id { get; set; }
         public string kind { get; set; }
         public string name { get; set; }
+    }
+
+    private sealed class CompanionStatePayload
+    {
+        public string follow_mode { get; set; }
+        public string follow_state { get; set; }
+        public string posture { get; set; }
+        public bool moving { get; set; }
+        public bool grounded { get; set; }
+        public bool carried_by_human { get; set; }
+        public bool carrying_human { get; set; }
+        public string active_action { get; set; }
+        public bool jump_queued { get; set; }
+        public HeldPayload held_item { get; set; }
+    }
+
+    private sealed class HumanStatePayload
+    {
+        public float distance_from_companion_m { get; set; }
+        public float height_from_companion_m { get; set; }
+        public string bearing_from_companion { get; set; }
+        public bool visible_from_companion { get; set; }
+        public bool grounded { get; set; }
+        public HeldPayload held_item { get; set; }
     }
 
     private sealed class NearbyPropPayload
@@ -158,6 +192,15 @@ internal sealed class CompanionAwareness
         new CompanionInteractableDiscovery();
     private readonly LogLatch _passiveFailureLog = new LogLatch();
     private readonly LogLatch _tickFailureLog = new LogLatch();
+    private readonly LogLatch _rateCapLog = new LogLatch();
+    private readonly Dictionary<string, float> _sentEntityAt =
+        new Dictionary<string, float>(StringComparer.Ordinal);
+    private readonly Queue<float> _unsolicitedSentAt = new Queue<float>();
+    private float _lastPacketAt = -1f;
+    private bool _salientEventPending;
+    private float _nextUnsolicitedScanAt;
+    private string _lastSentHumanStateKey;
+    private string _lastSentCompanionStateKey;
 
     private CompanionBody _body;
     private PlayerCharacter _humanAtSpawn;
@@ -222,6 +265,8 @@ internal sealed class CompanionAwareness
         _areaAnchor = Midpoint(bodyPosition, humanPosition);
         _lastAreaTransitionAt = now;
         _nextPassiveCaptureAt = now + PassiveCaptureInitialDelaySeconds;
+        _nextUnsolicitedScanAt =
+            now + CompanionAwarenessInjectionPolicy.ScanIntervalSeconds;
     }
 
     internal void Tick(float now)
@@ -264,7 +309,8 @@ internal sealed class CompanionAwareness
                 now,
                 carried
                     ? "the human picked up the companion"
-                    : "the human released the companion");
+                    : "the human released the companion",
+                true);
             _companionCarried = carried;
         }
 
@@ -275,7 +321,8 @@ internal sealed class CompanionAwareness
                 now,
                 carryingHuman
                     ? "the companion picked up the human"
-                    : "the companion released the human");
+                    : "the companion released the human",
+                true);
             _companionCarryingHuman = carryingHuman;
         }
 
@@ -286,7 +333,8 @@ internal sealed class CompanionAwareness
                 now,
                 followRequested
                     ? "the companion started following the human"
-                    : "the companion stopped following and is staying put");
+                    : "the companion stopped following and is staying put",
+                false);
             _followRequested = followRequested;
         }
 
@@ -297,7 +345,8 @@ internal sealed class CompanionAwareness
         {
             RecordEvent(
                 now,
-                "the companion changed posture to " + PostureLabel(posture));
+                "the companion changed posture to " + PostureLabel(posture),
+                false);
             _posture = posture;
         }
 
@@ -305,9 +354,19 @@ internal sealed class CompanionAwareness
         if (!string.Equals(activeAction, _activeAction, StringComparison.Ordinal))
         {
             if (!string.IsNullOrEmpty(activeAction))
-                RecordEvent(now, "the companion started action " + activeAction);
+            {
+                RecordEvent(
+                    now,
+                    "the companion started action " + activeAction,
+                    false);
+            }
             else if (!string.IsNullOrEmpty(_activeAction))
-                RecordEvent(now, "the companion's " + _activeAction + " action ended");
+            {
+                RecordEvent(
+                    now,
+                    "the companion's " + _activeAction + " action ended",
+                    true);
+            }
             _activeAction = activeAction;
         }
 
@@ -333,12 +392,16 @@ internal sealed class CompanionAwareness
         {
             RecordEvent(
                 now,
-                $"the human and companion became separated by {Round1(separation):F1}m");
+                $"the human and companion became separated by {Round1(separation):F1}m",
+                true);
             _separated = true;
         }
         else if (_separated && separation <= ReunionDistance)
         {
-            RecordEvent(now, "the human and companion came back together");
+            RecordEvent(
+                now,
+                "the human and companion came back together",
+                true);
             _separated = false;
         }
 
@@ -349,7 +412,8 @@ internal sealed class CompanionAwareness
         {
             RecordEvent(
                 now,
-                $"the walk progressed about {Round1(areaDistance):F1}m into a different area");
+                $"the walk progressed about {Round1(areaDistance):F1}m into a different area",
+                true);
             _areaAnchor = midpoint;
             _lastAreaTransitionAt = now;
         }
@@ -487,9 +551,10 @@ internal sealed class CompanionAwareness
             _passiveDelivered = true;
         }
 
-        var companionPosition = _body.Position;
-        var humanPosition = human.transform.position;
-        var humanOffset = humanPosition - companionPosition;
+        string companionStateKey;
+        string humanStateKey;
+        var companionState = CaptureCompanionState(out companionStateKey);
+        var humanState = CaptureHumanState(human, out humanStateKey);
         var visualStatus = attachVisual
             ? "attached_recent_ambient_view"
             : "no_new_visual_frame";
@@ -497,35 +562,8 @@ internal sealed class CompanionAwareness
         {
             schema = "ramblers.game_context.v1",
             captured_at = "human_utterance_boundary",
-            companion = new
-            {
-                follow_mode = _actions?.FollowRequested == true ? "follow" : "stay",
-                follow_state = _actions?.FollowStateLabel ?? "unavailable",
-                posture = PostureLabel(
-                    _actions == null ? CompanionPosture.Standing : _actions.Posture),
-                moving = _actions?.IsMoving == true,
-                grounded = IsGrounded(_body.Character),
-                carried_by_human = _actions?.IsCarried == true,
-                carrying_human = _actions?.IsCarryingHuman == true,
-                active_action = _actions?.ActiveJobName ?? "none",
-                jump_queued = _actions?.JumpQueued == true,
-                held_item = ToPayload(CaptureHeld(_body.Character))
-            },
-            human = new
-            {
-                distance_from_companion_m = Round1(HorizontalMagnitude(humanOffset)),
-                height_from_companion_m = Round1(humanOffset.y),
-                bearing_from_companion = BearingLabel(
-                    _body.Transform.forward,
-                    humanOffset),
-                visible_from_companion = HasLineOfSight(
-                    _body.HeadPosition,
-                    human.transform,
-                    CompanionBody.HeadPositionOf(human),
-                    ResolveLayerMask(human)),
-                grounded = IsGrounded(human),
-                held_item = ToPayload(CaptureHeld(human))
-            },
+            companion = companionState,
+            human = humanState,
             nearby_props = nearbyProps,
             recently_seen_props = rememberedProps,
             nearby_interactables = nearbyInteractables,
@@ -580,7 +618,16 @@ internal sealed class CompanionAwareness
             EntityReferences = entityReferences,
             DeliveredThroughEventSequence = _nextEventSequence,
             PassiveCapturedAt = attachVisual ? _passiveCapturedAt : -1f,
-            VisualAgeSeconds = attachVisual ? visualAge : -1f
+            VisualAgeSeconds = attachVisual ? visualAge : -1f,
+            CapturedAt = now,
+            HumanStateKey = humanStateKey,
+            CompanionStateKey = companionStateKey,
+            SentEntityIds = CollectSentIds(
+                nearbyProps,
+                rememberedProps,
+                nearbyInteractables,
+                rememberedInteractables,
+                nearbyPlayers)
         };
         return true;
     }
@@ -598,6 +645,323 @@ internal sealed class CompanionAwareness
         {
             _passiveDelivered = true;
         }
+        CommitPacket(context);
+    }
+
+    internal bool IsUnsolicitedScanDue(float now)
+    {
+        return _body != null && _body.IsAlive && now >= _nextUnsolicitedScanAt;
+    }
+
+    internal bool TryTakeUnsolicitedContext(
+        float now,
+        CompanionAffordanceCandidates affordanceCandidates,
+        out CompanionAwarenessTurnContext context,
+        out string error)
+    {
+        context = null;
+        error = null;
+        if (_body == null || !_body.IsAlive)
+        {
+            error = "bot_not_spawned";
+            return false;
+        }
+
+        var human = GetHumanPlayer();
+        if (human == null)
+        {
+            error = "human_player_unavailable";
+            return false;
+        }
+
+        _nextUnsolicitedScanAt =
+            now + CompanionAwarenessInjectionPolicy.ScanIntervalSeconds;
+        var packetsLastMinute = CompanionAwarenessInjectionPolicy.CountInWindow(
+            _unsolicitedSentAt,
+            now);
+        var sinceLastPacket = _lastPacketAt < 0f ? -1f : now - _lastPacketAt;
+        string capReason;
+        if (CompanionAwarenessInjectionPolicy.IsRateCapped(
+                now,
+                _lastPacketAt,
+                packetsLastMinute,
+                out capReason))
+        {
+            if (string.Equals(capReason, "minimum_interval", StringComparison.Ordinal))
+            {
+                _nextUnsolicitedScanAt = Mathf.Min(
+                    _nextUnsolicitedScanAt,
+                    _lastPacketAt +
+                    CompanionAwarenessInjectionPolicy.MinimumIntervalSeconds);
+            }
+            if (_rateCapLog.ShouldLog())
+            {
+                Plugin.Logger.LogInfo(
+                    $"[AWARENESS] EVENT_CONTEXT_DEFERRED reason={capReason}, " +
+                    $"salientPending={_salientEventPending}, " +
+                    $"packetsLastMinute={packetsLastMinute}, " +
+                    $"sinceLastPacketSeconds={sinceLastPacket:F1}.");
+            }
+            error = "rate_capped_" + capReason;
+            return false;
+        }
+        _rateCapLog.Reset();
+
+        var entityReferences = new CompanionEntityReferenceSet();
+        var nearbyProps = CaptureNearbyProps(human, now, entityReferences);
+        var nearbyPropIds = new HashSet<string>(StringComparer.Ordinal);
+        for (var index = 0; index < nearbyProps.Length; index++)
+            nearbyPropIds.Add(nearbyProps[index].id);
+        CaptureRememberedProps(now, nearbyPropIds, entityReferences);
+        CompanionInteractableObservation[] nearbyInteractableObservations;
+        CompanionInteractableObservation[] rememberedInteractableObservations;
+        _interactableDiscovery.Capture(
+            human,
+            _body,
+            affordanceCandidates,
+            now,
+            entityReferences,
+            out nearbyInteractableObservations,
+            out rememberedInteractableObservations);
+        var nearbyInteractables = ToNearbyInteractables(
+            nearbyInteractableObservations);
+        var nearbyPlayers = CaptureNearbyPlayers(human);
+        var recentEvents = CaptureUndeliveredEvents(now);
+        string companionStateKey;
+        string humanStateKey;
+        var companionState = CaptureCompanionState(out companionStateKey);
+        var humanState = CaptureHumanState(human, out humanStateKey);
+
+        var newProps = FilterUnsent(nearbyProps, now, prop => prop.id);
+        var newInteractables = FilterUnsent(
+            nearbyInteractables,
+            now,
+            interactable => interactable.id);
+        var newPlayers = FilterUnsent(nearbyPlayers, now, player => player.id);
+        var companionChanged = !string.Equals(
+            companionStateKey,
+            _lastSentCompanionStateKey,
+            StringComparison.Ordinal);
+        var humanChanged = !string.Equals(
+            humanStateKey,
+            _lastSentHumanStateKey,
+            StringComparison.Ordinal);
+        var entityEntered = newProps.Length + newInteractables.Length +
+                            newPlayers.Length > 0;
+        var trigger = CompanionAwarenessInjectionPolicy.SelectTrigger(
+            _salientEventPending,
+            entityEntered,
+            companionChanged || humanChanged,
+            recentEvents.Length > 0,
+            sinceLastPacket < 0f ? float.MaxValue : sinceLastPacket);
+        if (trigger == CompanionAwarenessInjectionTrigger.None)
+        {
+            error = "nothing_salient";
+            return false;
+        }
+
+        var includeState =
+            trigger == CompanionAwarenessInjectionTrigger.SalientEvent;
+        var payload = new Dictionary<string, object>(StringComparer.Ordinal)
+        {
+            ["schema"] = "ramblers.game_context.v1",
+            ["captured_at"] = "unsolicited_" +
+                              CompanionAwarenessInjectionPolicy.TriggerLabel(
+                                  trigger),
+            ["delta_since_last_packet"] = true,
+            ["seconds_since_last_packet"] =
+                sinceLastPacket < 0f ? -1f : Round1(sinceLastPacket)
+        };
+        if (includeState || companionChanged)
+            payload["companion"] = companionState;
+        if (includeState || humanChanged)
+            payload["human"] = humanState;
+        if (newProps.Length > 0)
+            payload["newly_nearby_props"] = newProps;
+        if (newInteractables.Length > 0)
+            payload["newly_nearby_interactables"] = newInteractables;
+        if (newPlayers.Length > 0)
+            payload["newly_nearby_players"] = newPlayers;
+        if (recentEvents.Length > 0)
+            payload["recent_events"] = recentEvents;
+
+        var json = JsonSerializer.Serialize(payload);
+        var text =
+            "[GAME_CONTEXT]\n" +
+            "Private nonverbal game perception that arrived unsolicited while " +
+            "nobody was speaking. It lists only what changed since the last " +
+            "packet. It is not a message and needs no reply now; keep it in " +
+            "mind and use it when it matters.\n" +
+            json;
+        var sentIds = new List<string>();
+        for (var index = 0; index < newProps.Length; index++)
+            sentIds.Add(newProps[index].id);
+        for (var index = 0; index < newInteractables.Length; index++)
+            sentIds.Add(newInteractables[index].id);
+        for (var index = 0; index < newPlayers.Length; index++)
+            sentIds.Add(newPlayers[index].id);
+        context = new CompanionAwarenessTurnContext
+        {
+            Message = AgentContinuationItem.FromText(text),
+            EventCount = recentEvents.Length,
+            NearbyPropCount = newProps.Length,
+            NearbyPlayerCount = newPlayers.Length,
+            NearbyInteractableCount = newInteractables.Length,
+            EntityReferences = entityReferences,
+            DeliveredThroughEventSequence = _nextEventSequence,
+            CapturedAt = now,
+            HumanStateKey = humanStateKey,
+            CompanionStateKey = companionStateKey,
+            SentEntityIds = sentIds.ToArray(),
+            Unsolicited = true,
+            Trigger = trigger,
+            SecondsSinceLastPacket = sinceLastPacket,
+            PacketsLastMinute = packetsLastMinute,
+            HumanChanged = humanChanged,
+            CompanionChanged = companionChanged
+        };
+        return true;
+    }
+
+    internal void ConfirmUnsolicitedContextDelivered(
+        CompanionAwarenessTurnContext context)
+    {
+        if (context == null)
+            return;
+        _lastDeliveredEventSequence = Math.Max(
+            _lastDeliveredEventSequence,
+            context.DeliveredThroughEventSequence);
+        _unsolicitedSentAt.Enqueue(context.CapturedAt);
+        CommitPacket(context);
+    }
+
+    private void CommitPacket(CompanionAwarenessTurnContext context)
+    {
+        if (context.CapturedAt >= 0f)
+            _lastPacketAt = context.CapturedAt;
+        if (context.HumanStateKey != null)
+            _lastSentHumanStateKey = context.HumanStateKey;
+        if (context.CompanionStateKey != null)
+            _lastSentCompanionStateKey = context.CompanionStateKey;
+        if (context.SentEntityIds != null)
+        {
+            for (var index = 0; index < context.SentEntityIds.Length; index++)
+            {
+                var id = context.SentEntityIds[index];
+                if (!string.IsNullOrEmpty(id))
+                    _sentEntityAt[id] = context.CapturedAt;
+            }
+        }
+
+        var expired = new List<string>();
+        foreach (var pair in _sentEntityAt)
+        {
+            if (context.CapturedAt - pair.Value >=
+                CompanionAwarenessInjectionPolicy.EntityResendSeconds)
+            {
+                expired.Add(pair.Key);
+            }
+        }
+        for (var index = 0; index < expired.Count; index++)
+            _sentEntityAt.Remove(expired[index]);
+        _salientEventPending = false;
+    }
+
+    private T[] FilterUnsent<T>(T[] items, float now, Func<T, string> idOf)
+    {
+        if (items == null || items.Length == 0)
+            return items ?? new T[0];
+        var result = new List<T>();
+        for (var index = 0; index < items.Length; index++)
+        {
+            var id = idOf(items[index]);
+            var sentAt = 0f;
+            var sentBefore = !string.IsNullOrEmpty(id) &&
+                             _sentEntityAt.TryGetValue(id, out sentAt);
+            if (CompanionAwarenessInjectionPolicy.ShouldResendEntity(
+                    sentBefore,
+                    sentAt,
+                    now))
+            {
+                result.Add(items[index]);
+            }
+        }
+        return result.ToArray();
+    }
+
+    private static string[] CollectSentIds(
+        NearbyPropPayload[] nearbyProps,
+        RememberedPropPayload[] rememberedProps,
+        NearbyInteractablePayload[] nearbyInteractables,
+        RememberedInteractablePayload[] rememberedInteractables,
+        NearbyPlayerPayload[] nearbyPlayers)
+    {
+        var ids = new List<string>();
+        for (var index = 0; index < nearbyProps.Length; index++)
+            ids.Add(nearbyProps[index].id);
+        for (var index = 0; index < rememberedProps.Length; index++)
+            ids.Add(rememberedProps[index].id);
+        for (var index = 0; index < nearbyInteractables.Length; index++)
+            ids.Add(nearbyInteractables[index].id);
+        for (var index = 0; index < rememberedInteractables.Length; index++)
+            ids.Add(rememberedInteractables[index].id);
+        for (var index = 0; index < nearbyPlayers.Length; index++)
+            ids.Add(nearbyPlayers[index].id);
+        return ids.ToArray();
+    }
+
+    private CompanionStatePayload CaptureCompanionState(out string key)
+    {
+        var held = CaptureHeld(_body.Character);
+        var followMode = _actions?.FollowRequested == true ? "follow" : "stay";
+        var posture = PostureLabel(
+            _actions == null ? CompanionPosture.Standing : _actions.Posture);
+        var carried = _actions?.IsCarried == true;
+        var activeAction = _actions?.ActiveJobName ?? "none";
+        key = followMode + "|" + posture + "|" + carried + "|" +
+              (_actions?.IsCarryingHuman == true) + "|" + activeAction + "|" +
+              (held.Key == 0 ? "none" : held.Id);
+        return new CompanionStatePayload
+        {
+            follow_mode = followMode,
+            follow_state = _actions?.FollowStateLabel ?? "unavailable",
+            posture = posture,
+            moving = _actions?.IsMoving == true,
+            grounded = IsGrounded(_body.Character),
+            carried_by_human = carried,
+            carrying_human = _actions?.IsCarryingHuman == true,
+            active_action = activeAction,
+            jump_queued = _actions?.JumpQueued == true,
+            held_item = ToPayload(held)
+        };
+    }
+
+    private HumanStatePayload CaptureHumanState(
+        PlayerCharacter human,
+        out string key)
+    {
+        var humanOffset = human.transform.position - _body.Position;
+        var distance = Round1(HorizontalMagnitude(humanOffset));
+        var bearing = BearingLabel(_body.Transform.forward, humanOffset);
+        var visible = HasLineOfSight(
+            _body.HeadPosition,
+            human.transform,
+            CompanionBody.HeadPositionOf(human),
+            ResolveLayerMask(human));
+        var grounded = IsGrounded(human);
+        var held = CaptureHeld(human);
+        key = CompanionAwarenessInjectionPolicy.HumanDistanceBucket(distance) +
+              "|" + bearing + "|" + visible + "|" + grounded + "|" +
+              (held.Key == 0 ? "none" : held.Id);
+        return new HumanStatePayload
+        {
+            distance_from_companion_m = distance,
+            height_from_companion_m = Round1(humanOffset.y),
+            bearing_from_companion = bearing,
+            visible_from_companion = visible,
+            grounded = grounded,
+            held_item = ToPayload(held)
+        };
     }
 
     internal void Release()
@@ -637,8 +1001,16 @@ internal sealed class CompanionAwareness
         _hasVisualCapture = false;
         _visualEventSequence = 0;
         _nextPassiveCaptureAt = 0f;
+        _sentEntityAt.Clear();
+        _unsolicitedSentAt.Clear();
+        _lastPacketAt = -1f;
+        _salientEventPending = false;
+        _nextUnsolicitedScanAt = 0f;
+        _lastSentHumanStateKey = null;
+        _lastSentCompanionStateKey = null;
         _passiveFailureLog.Reset();
         _tickFailureLog.Reset();
+        _rateCapLog.Reset();
     }
 
     private void ObserveHeldItem(
@@ -654,24 +1026,28 @@ internal sealed class CompanionAwareness
             return;
         }
 
+        var salient = IsHumanActor(actor);
         if (previous.Key != 0 && current.Key == 0)
         {
             RecordEvent(
                 now,
-                actor + " released " + DescribeHeld(previous));
+                actor + " released " + DescribeHeld(previous),
+                salient);
         }
         else if (current.Key != 0 && previous.Key == 0)
         {
             RecordEvent(
                 now,
-                actor + " picked up " + DescribeHeld(current));
+                actor + " picked up " + DescribeHeld(current),
+                salient);
         }
         else if (current.Key != 0)
         {
             RecordEvent(
                 now,
                 actor + " switched from " + DescribeHeld(previous) +
-                " to " + DescribeHeld(current));
+                " to " + DescribeHeld(current),
+                salient);
         }
 
         previous = current;
@@ -710,14 +1086,15 @@ internal sealed class CompanionAwareness
                 RecordEvent(
                     now,
                     $"{actor} landed {Mathf.Abs(Round1(height)):F1}m {direction} " +
-                    $"after {Round1(seconds):F1}s airborne");
+                    $"after {Round1(seconds):F1}s airborne",
+                    IsHumanActor(actor));
             }
         }
 
         wasGrounded = grounded;
     }
 
-    private void RecordEvent(float now, string description)
+    private void RecordEvent(float now, string description, bool salient)
     {
         if (string.IsNullOrWhiteSpace(description))
             return;
@@ -730,8 +1107,23 @@ internal sealed class CompanionAwareness
         });
         while (_journal.Count > MaximumJournalEntries)
             _journal.Dequeue();
+        if (salient)
+        {
+            _salientEventPending = true;
+            _nextUnsolicitedScanAt =
+                CompanionAwarenessInjectionPolicy.NextScanAfterSalientEvent(
+                    now,
+                    _lastPacketAt,
+                    _nextUnsolicitedScanAt);
+        }
         Plugin.Logger.LogInfo(
-            $"[AWARENESS] EVENT sequence={_nextEventSequence}, description={description}.");
+            $"[AWARENESS] EVENT sequence={_nextEventSequence}, " +
+            $"salient={salient}, description={description}.");
+    }
+
+    private static bool IsHumanActor(string actor)
+    {
+        return string.Equals(actor, "human", StringComparison.Ordinal);
     }
 
     private void RemoveExpiredEvents(float now)

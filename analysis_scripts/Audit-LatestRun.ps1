@@ -217,6 +217,18 @@ $interactionEvidence = New-Object System.Collections.Generic.List[string]
 $directedMoveArrivals = @{}
 $directedMoveResolutions = @{}
 $directedMoveEvidence = New-Object System.Collections.Generic.List[string]
+$unsolicitedInjections = New-Object System.Collections.Generic.List[object]
+$unsolicitedDeferrals = New-Object System.Collections.Generic.List[string]
+$unsolicitedPolicySource = Get-Content -LiteralPath (
+    Join-Path $ramblersRoot "src\CompanionAwarenessInjectionPolicy.cs") -Raw
+$unsolicitedMinimumInterval = [double]::Parse(
+    [regex]::Match(
+        $unsolicitedPolicySource,
+        'MinimumIntervalSeconds = (?<value>\d+(?:\.\d+)?)f;').Groups["value"].Value,
+    [System.Globalization.CultureInfo]::InvariantCulture)
+$unsolicitedPerMinuteCap = [int][regex]::Match(
+    $unsolicitedPolicySource,
+    'MaximumPacketsPerMinute = (?<value>\d+);').Groups["value"].Value
 $physicalActions = @(
     "inspect_reference",
     "go_to_location",
@@ -304,6 +316,34 @@ foreach ($line in $sessionLines) {
             $turns[$turnId] = New-Object System.Collections.Generic.List[string]
         }
         $turns[$turnId].Add("context " + $Matches["details"])
+    }
+
+    if ($line -match '\[AWARENESS\] EVENT_CONTEXT_INJECTED trigger=(?<trigger>[^,]+), humanSpeaking=(?<human>True|False), assistantSpeaking=(?<assistant>True|False), sinceLastPacketSeconds=(?<since>-?[\d.,]+), packetsLastMinute=(?<count>\d+), (?<details>.*)$') {
+        $sinceSeconds = [double]::Parse(
+            $Matches["since"].Replace(",", "."),
+            [System.Globalization.CultureInfo]::InvariantCulture)
+        $injection = [pscustomobject]@{
+            Trigger = $Matches["trigger"]
+            HumanSpeaking = ($Matches["human"] -eq "True")
+            AssistantSpeaking = ($Matches["assistant"] -eq "True")
+            SinceSeconds = $sinceSeconds
+            PacketsLastMinute = [int]$Matches["count"]
+            Details = $Matches["details"]
+        }
+        $unsolicitedInjections.Add($injection)
+        if ($injection.HumanSpeaking) {
+            Add-Failure "Unsolicited context injected while the human was speaking: trigger=$($injection.Trigger)."
+        }
+        if ($injection.PacketsLastMinute -gt $unsolicitedPerMinuteCap) {
+            Add-Failure "Unsolicited context exceeded the per-minute cap: $($injection.PacketsLastMinute) packets in one minute."
+        }
+        if ($sinceSeconds -ge 0 -and $sinceSeconds -lt $unsolicitedMinimumInterval) {
+            Add-Failure "Unsolicited context violated the minimum interval: $sinceSeconds seconds after the previous packet."
+        }
+    }
+
+    if ($line -match '\[AWARENESS\] EVENT_CONTEXT_DEFERRED reason=(?<reason>[^,]+)') {
+        $unsolicitedDeferrals.Add($Matches["reason"])
     }
 
     $targetResolution = Get-TargetResolutionEvidence -Line $line
@@ -579,6 +619,11 @@ foreach ($evidence in $interactionEvidence) {
 $report.Add("Directed-move arrivals: $($directedMoveEvidence.Count)")
 foreach ($evidence in $directedMoveEvidence) {
     $report.Add("  $evidence")
+}
+$silentInjections = @($unsolicitedInjections | Where-Object { -not $_.HumanSpeaking }).Count
+$report.Add("Unsolicited context: injected=$($unsolicitedInjections.Count) silent=$silentInjections deferred=$($unsolicitedDeferrals.Count) cap=$unsolicitedPerMinuteCap/min minGap=${unsolicitedMinimumInterval}s")
+foreach ($injection in $unsolicitedInjections) {
+    $report.Add("  trigger=$($injection.Trigger), sinceLastPacket=$($injection.SinceSeconds)s, packetsLastMinute=$($injection.PacketsLastMinute), assistantSpeaking=$($injection.AssistantSpeaking), $($injection.Details)")
 }
 $report.Add("")
 $report.Add("Turns: $($turns.Count)")
