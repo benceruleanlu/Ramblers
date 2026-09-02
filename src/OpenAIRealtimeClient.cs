@@ -94,8 +94,6 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         new ConcurrentQueue<RealtimeClientEvent>();
     private readonly SemaphoreSlim _outboundSignal = new SemaphoreSlim(0);
     private readonly object _responseSync = new object();
-    private readonly Dictionary<string, long> _outstandingToolBatchTurns =
-        new Dictionary<string, long>();
 
     private Task _runTask;
     private volatile bool _ready;
@@ -218,39 +216,27 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         }
     }
 
-    internal bool CompleteFunctionCallBatch(
-        string responseId,
-        RealtimeFunctionOutput[] outputs,
-        AgentContinuationItem[] continuation,
-        bool requestResponse)
+    internal bool SubmitFunctionOutput(
+        RealtimeFunctionOutput output,
+        AgentContinuationItem[] continuation)
     {
-        if (string.IsNullOrEmpty(responseId) || outputs == null)
+        if (output == null || string.IsNullOrEmpty(output.CallId))
             return false;
 
-        lock (_responseSync)
+        var queued = QueueJson(new
         {
-            if (!_outstandingToolBatchTurns.ContainsKey(responseId))
-                return false;
-        }
-
-        for (var index = 0; index < outputs.Length; index++)
-        {
-            var output = outputs[index];
-            if (output == null || string.IsNullOrEmpty(output.CallId))
-                continue;
-            QueueJson(new
+            event_id = NextEventId("function_output"),
+            type = "conversation.item.create",
+            item = new
             {
-                event_id = NextEventId("function_output"),
-                type = "conversation.item.create",
-                item = new
-                {
-                    type = "function_call_output",
-                    call_id = output.CallId,
-                    output = output.ResultJson ??
-                             AgentToolResult.Failure("action_execution_failed").ToJson()
-                }
-            });
-        }
+                type = "function_call_output",
+                call_id = output.CallId,
+                output = output.ResultJson ??
+                         AgentToolResult.Failure("action_execution_failed").ToJson()
+            }
+        });
+        if (!queued)
+            return false;
 
         if (continuation != null)
         {
@@ -273,38 +259,6 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             }
         }
 
-        var shouldCreate = false;
-        var continuationRequested = false;
-        var continuationRequestedAt = Stopwatch.GetTimestamp();
-        long batchTurnId;
-        lock (_responseSync)
-        {
-            if (!_outstandingToolBatchTurns.TryGetValue(
-                    responseId,
-                    out batchTurnId))
-            {
-                return false;
-            }
-            _outstandingToolBatchTurns.Remove(responseId);
-            if (requestResponse && !_responseRequested)
-            {
-                _responseRequested = true;
-                _responseRequestedTurnId = batchTurnId;
-                _responseRequestedAt = continuationRequestedAt;
-                continuationRequested = true;
-            }
-            shouldCreate = TryReserveResponseCreate();
-        }
-
-        if (continuationRequested)
-        {
-            _logs.Enqueue(
-                $"TURN_LATENCY turnId={batchTurnId}, " +
-                $"stage=continuation_requested, " +
-                $"queue={(shouldCreate ? "create_queued" : "waiting_for_response_slot")}");
-        }
-        if (shouldCreate)
-            QueueResponseCreate();
         return true;
     }
 
@@ -637,8 +591,6 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
             shouldCreate = TryReserveResponseCreate();
             if (shouldCreate)
                 queueState = "create_queued";
-            else if (_outstandingToolBatchTurns.Count > 0)
-                queueState = "waiting_for_tools";
         }
 
         _logs.Enqueue(
@@ -654,8 +606,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         var requestedAt = Stopwatch.GetTimestamp();
         lock (_responseSync)
         {
-
-            if (_responseRequested || _responseActive || _responseCreateQueued)
+            if (_responseRequested)
                 return;
             _responseRequested = true;
             _responseRequestedTurnId = turnId;
@@ -665,7 +616,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
 
         _logs.Enqueue(
             $"TURN_LATENCY turnId={turnId}, stage=continuation_requested, " +
-            $"queue={(shouldCreate ? "create_queued" : "waiting_for_tools")}");
+            $"queue={(shouldCreate ? "create_queued" : "waiting_for_response_slot")}");
         if (shouldCreate)
             QueueResponseCreate();
     }
@@ -756,8 +707,7 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
 
     private bool TryReserveResponseCreate()
     {
-        if (!_responseRequested || _responseActive || _responseCreateQueued ||
-            _outstandingToolBatchTurns.Count > 0)
+        if (!_responseRequested || _responseActive || _responseCreateQueued)
             return false;
 
         _responseRequested = false;
@@ -928,8 +878,6 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         if (string.IsNullOrEmpty(responseId))
             responseId = "tool_batch_" + calls[0].CallId;
 
-        lock (_responseSync)
-            _outstandingToolBatchTurns[responseId] = turnId;
         _functionCallBatches.Enqueue(new RealtimeFunctionCallBatch
         {
             ResponseId = responseId,
@@ -1025,7 +973,6 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         _ready = false;
         lock (_responseSync)
         {
-            _outstandingToolBatchTurns.Clear();
             _responseCreateEventId = null;
             _responseRequestedTurnId = 0;
             _responseRequestedAt = 0;

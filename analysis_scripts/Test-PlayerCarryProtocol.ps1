@@ -79,10 +79,10 @@ Assert-Contains $bridge 'HumanPlayerTarget = humanPlayerTarget' `
     "turn state must retain the exact human"
 Assert-Contains $bridge 'AgentToolCatalog.PickUpPlayer' `
     "a new utterance must be able to interrupt pending human pickup"
-Assert-Contains $bridge 'AgentToolCatalog.DropPlayer' `
-    "a new utterance must be able to interrupt pending human release"
-Assert-Contains $bridge 'AgentToolCatalog.GoToLocation' `
-    "a new utterance must be able to interrupt directed travel"
+Assert-Contains $bridge 'CompanionController.CancelJob(pending.JobToken);' `
+    "a pending carry must remain cancellable through the shared reconciliation path"
+Assert-Contains $bridge 'PollToolBatch(_activeToolBatches[index]);' `
+    "directed travel must keep reporting through per-batch polling while conversation continues"
 
 Assert-Contains $router 'turnReference?.HumanPlayerTarget == null' `
     "routing must fail closed without an utterance-bound human"

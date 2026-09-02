@@ -157,8 +157,8 @@ Assert-Contains $pickup 'AgentToolCatalog.DropItem,' `
     "the terminal result must report the drop action"
 Assert-Contains $pickup '"hands_empty"' `
     "empty hands must be explicit in the terminal state"
-Assert-Contains $bridge 'AgentToolCatalog.DropItem,' `
-    "new speech must interrupt a pending drop through reconciliation"
+Assert-Contains $bridge '"job_timeout");' `
+    "a stalled drop must still reconcile through timeout cancellation"
 
 Assert-NotContains $pickup 'FindObjects' `
     "drop must never search for a replacement prop"

@@ -34,7 +34,7 @@ Assert-Contains '_activeResponseFirstAudioLogged' `
     "one response must emit only one first-audio timing"
 Assert-Contains '_reservedResponseRequestedAt = _responseRequestedAt;' `
     "queued requests must carry their original monotonic timestamp"
-Assert-Contains 'var continuationRequestedAt = Stopwatch.GetTimestamp();' `
+Assert-Contains 'stage=continuation_requested' `
     "tool continuations must receive their own latency origin"
 Assert-Contains 'Stopwatch.Frequency' `
     "timings must use a monotonic clock rather than wall time"

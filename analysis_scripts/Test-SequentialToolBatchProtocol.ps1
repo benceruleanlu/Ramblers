@@ -63,8 +63,8 @@ Assert-Contains 'ShouldAbortRemainderAfterFailure(functionCall, result)' `
     "an immediate player-pickup failure must stop its dependent movement"
 Assert-Contains 'FailUndispatchedCalls(pending, "previous_action_failed")' `
     "dependent calls must receive an explicit causal failure"
-Assert-Contains '_pendingToolBatch.Interrupted = true;' `
-    "a spoken correction must mark the whole old physical batch stale"
+Assert-Order $bridge 'PollPendingToolBatches();' 'DrainFunctionCallBatches();' `
+    "job completions must be consumed before new calls can dispatch"
 Assert-Contains ': "action_interrupted");' `
     "an interrupted job must not expose later calls from its old response"
 Assert-Contains 'RequestPendingJobCancellation(' `
