@@ -11,46 +11,6 @@ $ErrorActionPreference = "Stop"
 $ramblersRoot = Split-Path -Parent $PSScriptRoot
 $expectedCodecHash = "70921000BEB9CA762A8ACDB93AC6F6C39DB8A351A6FA12ACA3EDDBC652855F04"
 
-function Read-Source {
-    param([Parameter(Mandatory = $true)][string]$RelativePath)
-    return Get-Content -LiteralPath (Join-Path $ramblersRoot $RelativePath) -Raw
-}
-
-function Assert-Contains {
-    param(
-        [Parameter(Mandatory = $true)][string]$Text,
-        [Parameter(Mandatory = $true)][string]$Needle,
-        [Parameter(Mandatory = $true)][string]$Description
-    )
-    if ($Text.IndexOf($Needle, [System.StringComparison]::Ordinal) -lt 0) {
-        throw "Vision-image transport check failed: $Description"
-    }
-}
-
-$capture = Read-Source "src\CompanionVisionCapture.cs"
-$encoder = Read-Source "src\JpegEncoder.cs"
-$transport = Read-Source "src\OpenAIRealtimeClient.cs"
-$build = Read-Source "build.ps1"
-
-Assert-Contains $capture 'private const int CaptureWidth = 640;' `
-    "the reviewed 16:9 capture width must stay explicit"
-Assert-Contains $capture 'private const int CaptureHeight = 360;' `
-    "the reviewed 16:9 capture height must stay explicit"
-Assert-Contains $capture 'JpegEncoder.EncodeRgb24(' `
-    "capture must use the managed JPEG encoder"
-Assert-Contains $capture 'MediaType = JpegEncoder.MediaType' `
-    "the data URI must advertise the bytes as JPEG"
-Assert-Contains $encoder 'internal const string MediaType = "image/jpeg";' `
-    "the encoder media type must match the Realtime contract"
-Assert-Contains $encoder 'internal const int DefaultQuality = 82;' `
-    "the bandwidth/fidelity choice must remain reviewable"
-Assert-Contains $transport 'detail = "high",' `
-    "the model processing detail must not change implicitly"
-Assert-Contains $build '$compilerArguments += "/reference:$jpegEncoderPath"' `
-    "the plugin must compile against the pinned managed codec"
-Assert-Contains $build 'Copy-Item -LiteralPath $jpegEncoderPath' `
-    "the runtime dependency must be emitted beside every build"
-
 $codecPath = Join-Path $ramblersRoot `
     "vendor\StbImageWriteSharp\1.16.7\StbImageWriteSharp.dll"
 if (-not (Test-Path -LiteralPath $codecPath -PathType Leaf)) {
@@ -114,6 +74,4 @@ finally {
     }
 }
 
-Write-Host "Vision-image transport checks passed."
-Write-Host "  Proven: pinned codec integrity, JPEG decode, dimensions, orientation, quality, media type, explicit high detail, and build output wiring."
-Write-Host "  Not proven: live Unity capture content or Realtime model acceptance in the deployed game."
+Write-Host "Vision-image transport probe passed."

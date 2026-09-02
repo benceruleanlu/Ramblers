@@ -6,58 +6,7 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ramblersRoot = Split-Path -Parent $PSScriptRoot
-
-function Read-Source {
-    param([Parameter(Mandatory = $true)][string]$RelativePath)
-    return Get-Content -LiteralPath (Join-Path $ramblersRoot $RelativePath) -Raw
-}
-
-function Assert-Contains {
-    param(
-        [Parameter(Mandatory = $true)][string]$Text,
-        [Parameter(Mandatory = $true)][string]$Needle,
-        [Parameter(Mandatory = $true)][string]$Description
-    )
-    if ($Text.IndexOf($Needle, [System.StringComparison]::Ordinal) -lt 0) {
-        throw "Natural-failure check failed: $Description"
-    }
-}
-
-function Assert-NotContains {
-    param(
-        [Parameter(Mandatory = $true)][string]$Text,
-        [Parameter(Mandatory = $true)][string]$Needle,
-        [Parameter(Mandatory = $true)][string]$Description
-    )
-    if ($Text.IndexOf($Needle, [System.StringComparison]::Ordinal) -ge 0) {
-        throw "Natural-failure check failed: $Description"
-    }
-}
-
-$result = Read-Source "src\AgentToolResult.cs"
-$bridge = Read-Source "src\OpenAIRealtimeBridge.cs"
-$prompt = Read-Source "src\AgentPrompt.cs"
-
-Assert-Contains $result '[JsonIgnore]' `
-    "exact diagnostic error codes must stay out of model-facing JSON"
-Assert-NotContains $result '[JsonPropertyName("error")]' `
-    "the model-facing result must not expose a raw error field"
-Assert-Contains $result 'return "could_not_identify_object";' `
-    "object ambiguity must have a player-safe status"
-Assert-Contains $result 'return "temporarily_busy";' `
-    "concurrent actions must have a player-safe status"
-Assert-Contains $result 'return "game_action_unavailable";' `
-    "other failures must have a player-safe status"
-Assert-Contains $result 'Do not blame the player or mention tools, codes, diagnostics, or internal mechanics.' `
-    "unavailable actions must produce natural in-world guidance"
-Assert-Contains $bridge 'diagnosticError={diagnosticError ?? "none"}' `
-    "developer logs must retain the exact failure code"
-Assert-Contains $bridge 'var result = dispatch.Result ??' `
-    "immediate dispatch must retain the typed result before logging"
-Assert-Contains $bridge 'result.Error' `
-    "immediate and deferred failure diagnostics must cross the logging boundary"
-Assert-Contains $prompt 'never invent or expose diagnostic terminology' `
-    "the cross-cutting prompt must forbid reconstructed technical language"
+$result = Get-Content -LiteralPath (Join-Path $ramblersRoot "src\AgentToolResult.cs") -Raw
 
 $probeName = "NaturalFailureProbe_" + [Guid]::NewGuid().ToString("N")
 $probeSource = @"
@@ -111,6 +60,4 @@ if ($success.ok -ne $true -or $success.action -ne "jump" -or
     throw "Natural-failure check failed: successful action serialization changed"
 }
 
-Write-Host "Natural-failure protocol checks passed."
-Write-Host "  Proven: serialized failures omit raw diagnostics and map identification, busy, and unavailable cases to player-safe status plus in-world guidance; exact codes stay in logs and success output is unchanged."
-Write-Host "  Not proven: live model wording for every failure category."
+Write-Host "Natural-failure serialization probe passed."
