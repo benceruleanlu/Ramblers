@@ -138,6 +138,43 @@ internal sealed class CompanionAffordanceCandidates
         return true;
     }
 
+    internal static bool TryCaptureAmbient(
+        PlayerCharacter human,
+        CompanionBody body,
+        out CompanionAffordanceCandidates candidates,
+        out string error)
+    {
+        candidates = null;
+        error = null;
+        if (human == null)
+        {
+            error = "human_player_unavailable";
+            return false;
+        }
+        if (body == null || !body.IsAlive)
+        {
+            error = "bot_not_spawned";
+            return false;
+        }
+
+        var actor = new CompanionActorContext(body, human);
+        CompanionAffordanceTarget companionHeldItem;
+        string companionHeldItemError;
+        CompanionAffordanceTarget.TryCaptureCompanionHeldItem(
+            actor,
+            null,
+            out companionHeldItem,
+            out companionHeldItemError);
+        candidates = new CompanionAffordanceCandidates(
+            actor,
+            null,
+            null,
+            "ambient_capture_without_human_reference",
+            companionHeldItem,
+            companionHeldItemError);
+        return true;
+    }
+
     internal bool TrySelect(
         CompanionAffordanceSource source,
         out CompanionAffordanceTarget target,

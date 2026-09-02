@@ -280,6 +280,24 @@ internal sealed class OpenAIRealtimeClient : IAgentAudioSink, IDisposable
         });
     }
 
+    internal bool QueueUnsolicitedContext(AgentContinuationItem item)
+    {
+        var content = BuildContinuationContent(item);
+        if (content == null)
+            return false;
+        return QueueJson(new
+        {
+            event_id = NextEventId("game_event"),
+            type = "conversation.item.create",
+            item = new
+            {
+                type = "message",
+                role = "user",
+                content
+            }
+        });
+    }
+
     internal void TruncateAudio(RealtimeAudioTruncation truncation)
     {
         if (truncation == null || string.IsNullOrEmpty(truncation.ItemId))
