@@ -63,6 +63,12 @@ namespace UnityEngine
         internal string name = "test";
         internal Transform parent = null;
         internal float Yaw;
+        internal bool IsChildOf(Transform ancestor)
+        {
+            for (var current = this; current != null; current = current.parent)
+                if (current == ancestor) return true;
+            return false;
+        }
         internal Vector3 InverseTransformDirection(Vector3 v) => Quaternion.AngleAxis(-Yaw, Vector3.up) * v;
     }
 
@@ -185,6 +191,9 @@ namespace Ramblers
         private static int Main()
         {
             WalkableHitDoesNotHideWall();
+            TargetCapsuleIsExcludedOnlyWhenRequested();
+            TargetRayDoesNotHideOtherObstacles();
+            TargetTopIsNotWalkingSupport();
             HitOrderDoesNotChangeClearance();
             SupportAloneIsClear();
             HypotheticalOriginOffsetsTheNativeCollider();
@@ -214,7 +223,7 @@ namespace Ramblers
             ReproQueryBudgetIsScoped();
             NativeReproLeavesBodiesAndMovementUnchanged();
             ReleaseClearsNativeReferences();
-            Console.WriteLine("Companion navigation geometry probe passed (30 cases).");
+            Console.WriteLine("Companion navigation geometry probe passed (33 cases).");
             return 0;
         }
 
@@ -244,6 +253,80 @@ namespace Ramblers
                 collider = collider ?? new Collider(),
                 point = new Vector3(0f, 0f, distance)
             };
+        }
+
+        private static void TargetCapsuleIsExcludedOnlyWhenRequested()
+        {
+            Create(out var geometry);
+            var target = new Transform();
+            var targetCollider = new Collider { transform = new Transform { parent = target } };
+            targetCollider.gameObject.layer = 11;
+            PlayerGround.CastHits = new[] { Hit(0.84f, -Forward, targetCollider) };
+            Expect(!geometry.IsSegmentClear(Vector3.zero, Forward * 1.34f),
+                "ordinary clearance must still detect the player's capsule");
+            Expect(geometry.IsSegmentClear(Vector3.zero, Forward * 1.34f, target),
+                "follow target capsule vetoed arrival at the logged distance");
+            var other = new Collider();
+            other.gameObject.layer = 11;
+            PlayerGround.CastHits = new[] { Hit(0.84f, -Forward, targetCollider), Hit(1f, -Forward, other) };
+            Expect(!geometry.IsSegmentClear(Vector3.zero, Forward * 1.34f, target),
+                "excluding target also excluded another player on the same layer");
+            other.gameObject.layer = 10;
+            Expect(!geometry.IsSegmentClear(Vector3.zero, Forward * 1.34f, target),
+                "excluding target also excluded terrain");
+            PlayerGround.CastHits = new[] { Hit(0.84f, -Forward, new Collider { transform = target }) };
+            Expect(geometry.IsSegmentClear(Vector3.zero, Forward * 1.34f, target),
+                "target root collider was not excluded");
+        }
+
+        private static void TargetRayDoesNotHideOtherObstacles()
+        {
+            Create(out var geometry);
+            var target = new Transform();
+            var targetCollider = new Collider { transform = new Transform { parent = target } };
+            var obstacle = new Collider();
+            var includeObstacle = false;
+            Physics.Ray = (origin, direction, distance) =>
+            {
+                if (origin.z < 0.5f && 0.5f - origin.z <= distance)
+                    return Hit(0.5f - origin.z, -Forward, targetCollider);
+                if (includeObstacle && origin.z < 1f && 1f - origin.z <= distance)
+                    return Hit(1f - origin.z, -Forward, obstacle);
+                return null;
+            };
+            Expect(!geometry.IsSegmentClear(Vector3.zero, Forward * 2f), "default ray missed player");
+            Expect(geometry.IsSegmentClear(Vector3.zero, Forward * 2f, target), "target ray vetoed arrival");
+            includeObstacle = true;
+            Expect(!geometry.IsSegmentClear(Vector3.zero, Forward * 2f, target), "target ray hid wall behind it");
+            obstacle.gameObject.layer = 11;
+            Expect(!geometry.IsSegmentClear(Vector3.zero, Forward * 2f, target), "target ray hid another player");
+        }
+
+        private static void TargetTopIsNotWalkingSupport()
+        {
+            Create(out var geometry);
+            var target = new Transform();
+            var targetCollider = new Collider { transform = new Transform { parent = target } };
+            var floor = new Collider();
+            Physics.Ray = (origin, direction, distance) =>
+            {
+                if (direction.y > -0.9f) return null;
+                var top = origin.x >= 0.8f && origin.y >= 0.1f;
+                var height = top ? 0.1f : 0f;
+                if (origin.y < height || origin.y - height > distance) return null;
+                return new RaycastHit { collider = top ? targetCollider : floor, normal = Vector3.up,
+                    point = new Vector3(origin.x, height, origin.z), distance = origin.y - height };
+            };
+            var goal = new Vector3(1.34f, 0.1f, 0f);
+            Expect(geometry.TryGroundPoint(goal, out var ordinaryGround) && ordinaryGround.y > 0.01f,
+                "fixture did not reproduce target becoming ground");
+            Expect(geometry.CanWalkSegment(Vector3.zero, goal, target), "target top corrupted walking support");
+            Expect(geometry.TryGroundPoint(goal, out var ground, target) && Math.Abs(ground.y) < 0.001f,
+                "target-aware planner support did not reach the actual floor");
+            Expect(geometry.TryGroundRoutePoint(goal, out ground, target) && Math.Abs(ground.y) < 0.001f,
+                "target-aware ordinary goal projection did not reach the actual floor");
+            Expect(geometry.TryGroundPoint(goal, out ground) && ground.y > 0.01f,
+                "target exclusion leaked into ordinary support queries");
         }
 
         private static void WalkableHitDoesNotHideWall()

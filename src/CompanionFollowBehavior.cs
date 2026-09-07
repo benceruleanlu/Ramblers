@@ -72,15 +72,15 @@ internal sealed class CompanionFollowBehavior
         _attention = attention;
         _jump = jump;
         _navigation = new CompanionFollowNavigation(
-            candidate => _locomotion.Geometry.TryGroundPoint(candidate, out var grounded)
+            candidate => _locomotion.Geometry.TryGroundPoint(candidate, out var grounded, GetHumanPlayer()?.transform)
                 ? (Vector3?)grounded : null,
             (from, to) => !_locomotion.Geometry.QueryBudgetExhausted &&
-                _locomotion.Geometry.CanWalkSegment(from, to),
-            (from, to) => _locomotion.Geometry.IsSegmentClear(from, to),
+                _locomotion.Geometry.CanWalkSegment(from, to, GetHumanPlayer()?.transform),
+            (from, to) => _locomotion.Geometry.IsSegmentClear(from, to, GetHumanPlayer()?.transform),
             () => !_locomotion.Geometry.QueryBudgetExhausted);
         _routePlanner = new CompanionFollowRoutePlanner(
             candidate => !_locomotion.Geometry.QueryBudgetExhausted &&
-                _locomotion.Geometry.TryGroundPoint(candidate, out var grounded)
+                _locomotion.Geometry.TryGroundPoint(candidate, out var grounded, GetHumanPlayer()?.transform)
                 ? (Vector3?)grounded : null,
             (from, to) => !_locomotion.Geometry.QueryBudgetExhausted &&
                 _navigation.IsRouteSegmentAvailable(from, to),
@@ -402,7 +402,7 @@ internal sealed class CompanionFollowBehavior
         var holdDistance = _state == FollowState.Holding ? ResumeDistance : FollowDistance;
         if (BreadcrumbTrail.HorizontalDistance(position, humanGoal) <= holdDistance &&
             Mathf.Abs(humanGoal.y - position.y) <= HoldingVerticalTolerance &&
-            _locomotion.Geometry.IsSegmentClear(position, humanGoal))
+            _locomotion.Geometry.IsSegmentClear(position, humanGoal, human.transform))
         {
             if (_state != FollowState.Holding)
             {
@@ -453,7 +453,7 @@ internal sealed class CompanionFollowBehavior
         var position = human.transform.position;
         if (human.ground != null && human.ground.isGrounded)
             return WalkingPosition(position);
-        if (_locomotion.Geometry.TryGroundPoint(position, out var supported))
+        if (_locomotion.Geometry.TryGroundPoint(position, out var supported, human.transform))
             return supported;
         if (_humanJumpInProgress)
             position.y = _humanJumpTakeoffPosition.y;
@@ -462,7 +462,7 @@ internal sealed class CompanionFollowBehavior
 
     private Vector3 WalkingPosition(Vector3 position)
     {
-        return _locomotion.Geometry.TryGroundRoutePoint(position, out var supported)
+        return _locomotion.Geometry.TryGroundRoutePoint(position, out var supported, GetHumanPlayer()?.transform)
             ? supported : position;
     }
 
@@ -582,7 +582,7 @@ internal sealed class CompanionFollowBehavior
         if (!completed)
             return;
         var walkable = !traversal.RequiresJump ||
-                       _locomotion.Geometry.CanWalkSegment(traversal.Takeoff, traversal.Landing);
+                       _locomotion.Geometry.CanWalkSegment(traversal.Takeoff, traversal.Landing, human.transform);
         if (walkable)
         {
             _trail.Add(WalkingPosition(traversal.Landing), false, false);

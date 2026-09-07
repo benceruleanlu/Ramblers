@@ -58,28 +58,29 @@ internal sealed class CompanionNavigationGeometry
         LastWalkingConnectionReason = "released";
     }
 
-    internal bool TryGroundPoint(Vector3 candidate, out Vector3 groundedPosition)
+    internal bool TryGroundPoint(Vector3 candidate, out Vector3 groundedPosition, Transform ignoredTarget = null)
     {
         Vector3 supportNormal;
-        return TryGroundPoint(candidate, out groundedPosition, out supportNormal);
+        return TryGroundPoint(candidate, out groundedPosition, out supportNormal, ignoredTarget);
     }
 
-    internal bool TryGroundRoutePoint(Vector3 candidate, out Vector3 groundedPosition)
+    internal bool TryGroundRoutePoint(Vector3 candidate, out Vector3 groundedPosition, Transform ignoredTarget = null)
     {
         Vector3 normal;
         RaycastHit support;
         return TryGroundPoint(candidate, candidate.y + 0.1f,
-            out groundedPosition, out normal, out support);
+            out groundedPosition, out normal, out support, ignoredTarget);
     }
 
     private bool TryGroundPoint(
         Vector3 candidate,
         out Vector3 groundedPosition,
-        out Vector3 supportNormal)
+        out Vector3 supportNormal,
+        Transform ignoredTarget = null)
     {
         RaycastHit support;
         return TryGroundPoint(candidate, float.PositiveInfinity,
-            out groundedPosition, out supportNormal, out support);
+            out groundedPosition, out supportNormal, out support, ignoredTarget);
     }
 
     private bool TryGroundPoint(
@@ -87,7 +88,8 @@ internal sealed class CompanionNavigationGeometry
         float maximumSupportHeight,
         out Vector3 groundedPosition,
         out Vector3 supportNormal,
-        out RaycastHit selectedSupport)
+        out RaycastHit selectedSupport,
+        Transform ignoredTarget = null)
     {
         groundedPosition = candidate;
         supportNormal = Vector3.up;
@@ -120,7 +122,7 @@ internal sealed class CompanionNavigationGeometry
                         rayOrigin + Vector3.down * travelled,
                         Vector3.down,
                         remaining,
-                        out support))
+                        out support, ignoredTarget))
                     break;
 
                 if (support.normal.y >= WalkableNormalY)
@@ -220,12 +222,14 @@ internal sealed class CompanionNavigationGeometry
         return path.Replace(',', '_').Replace(';', '_');
     }
 
-    internal bool CanWalkSegment(Vector3 from, Vector3 to)
+    internal bool CanWalkSegment(Vector3 from, Vector3 to) => CanWalkSegment(from, to, null);
+
+    internal bool CanWalkSegment(Vector3 from, Vector3 to, Transform ignoredTarget)
     {
-        return ProbeWalkingConnection(from, to) == CompanionWalkingConnection.Walkable;
+        return ProbeWalkingConnection(from, to, ignoredTarget) == CompanionWalkingConnection.Walkable;
     }
 
-    internal CompanionWalkingConnection ProbeWalkingConnection(Vector3 from, Vector3 to)
+    internal CompanionWalkingConnection ProbeWalkingConnection(Vector3 from, Vector3 to, Transform ignoredTarget = null)
     {
         if (_body == null || !_body.IsAlive)
             return WalkingResult(CompanionWalkingConnection.Uncertain, "body_unavailable");
@@ -243,7 +247,7 @@ internal sealed class CompanionNavigationGeometry
         {
             Vector3 previous;
             Vector3 previousNormal;
-            var startSupported = TryGroundPoint(from, out previous, out previousNormal);
+            var startSupported = TryGroundPoint(from, out previous, out previousNormal, ignoredTarget);
             if (NativeQueryCount >= _queryLimit)
                 return WalkingResult(CompanionWalkingConnection.Uncertain, "query_budget:start");
             if (!startSupported)
@@ -262,7 +266,7 @@ internal sealed class CompanionNavigationGeometry
                     (previousNormal.x * (candidate.x - previous.x) +
                      previousNormal.z * (candidate.z - previous.z)) /
                     Mathf.Max(0.1f, previousNormal.y);
-                var sampledSupport = TryGroundPoint(candidate, out supported, out normal);
+                var sampledSupport = TryGroundPoint(candidate, out supported, out normal, ignoredTarget);
                 if (NativeQueryCount >= _queryLimit)
                     return WalkingResult(CompanionWalkingConnection.Uncertain, $"query_budget:sample={sample}");
                 if (!sampledSupport)
@@ -280,7 +284,7 @@ internal sealed class CompanionNavigationGeometry
                 if (discontinuity > WalkingHeightTolerance + HeightComparisonEpsilon)
                     return WalkingResult(CompanionWalkingConnection.Uncertain,
                         $"abrupt_step:sample={sample}:height={vertical:F3}:error={discontinuity:F3}");
-                if (!IsSegmentClear(previous, supported))
+                if (!IsSegmentClear(previous, supported, ignoredTarget))
                     return WalkingResult(CompanionWalkingConnection.Obstructed, $"collision:sample={sample}");
                 if (NativeQueryCount >= _queryLimit)
                     return WalkingResult(CompanionWalkingConnection.Uncertain, $"query_budget:sample={sample}");
@@ -306,7 +310,9 @@ internal sealed class CompanionNavigationGeometry
         return result;
     }
 
-    internal bool IsSegmentClear(Vector3 from, Vector3 to)
+    internal bool IsSegmentClear(Vector3 from, Vector3 to) => IsSegmentClear(from, to, null);
+
+    internal bool IsSegmentClear(Vector3 from, Vector3 to, Transform ignoredTarget)
     {
         var delta = to - from;
         var distance = delta.magnitude;
@@ -314,7 +320,7 @@ internal sealed class CompanionNavigationGeometry
             return true;
 
         string description;
-        return MeasureClearance(from, delta / distance, distance, false, out description) >=
+        return MeasureClearance(from, delta / distance, distance, false, out description, ignoredTarget) >=
                distance - 0.06f;
     }
 
@@ -332,7 +338,8 @@ internal sealed class CompanionNavigationGeometry
         Vector3 direction,
         float distance,
         bool describe,
-        out string description)
+        out string description,
+        Transform ignoredTarget = null)
     {
         description = "clear";
         if (distance <= 0f)
@@ -368,7 +375,7 @@ internal sealed class CompanionNavigationGeometry
             for (var index = 0; index < count; index++)
             {
                 var hit = _hits[index];
-                if (IsSelf(hit))
+                if (IsIgnored(hit, ignoredTarget))
                     continue;
                 if (hit.normal.y >= WalkableNormalY)
                 {
@@ -397,7 +404,7 @@ internal sealed class CompanionNavigationGeometry
             for (var continuation = 0; continuation < RayContinuationLimit; continuation++)
             {
                 RaycastHit hit;
-                if (!TryRayHit(rayOrigin, direction, distance - travelled, out hit))
+                if (!TryRayHit(rayOrigin, direction, distance - travelled, out hit, ignoredTarget))
                     break;
                 if (hit.normal.y < WalkableNormalY)
                 {
@@ -429,7 +436,8 @@ internal sealed class CompanionNavigationGeometry
         Vector3 origin,
         Vector3 direction,
         float distance,
-        out RaycastHit result)
+        out RaycastHit result,
+        Transform ignoredTarget = null)
     {
         result = default(RaycastHit);
         var travelled = 0f;
@@ -447,7 +455,7 @@ internal sealed class CompanionNavigationGeometry
                     CompanionLocomotion.GetObstacleMask(_body.Character),
                     QueryTriggerInteraction.Ignore))
                 return false;
-            if (!IsSelf(hit))
+            if (!IsIgnored(hit, ignoredTarget))
             {
                 hit.distance += travelled;
                 result = hit;
@@ -458,9 +466,13 @@ internal sealed class CompanionNavigationGeometry
         return false;
     }
 
-    private bool IsSelf(RaycastHit hit)
+    private bool IsIgnored(RaycastHit hit, Transform ignoredTarget)
     {
-        return hit.collider != null && _body.Contains(hit.collider.transform);
+        if (hit.collider == null)
+            return false;
+        var transform = hit.collider.transform;
+        return _body.Contains(transform) || ignoredTarget != null &&
+            (transform == ignoredTarget || transform.IsChildOf(ignoredTarget));
     }
 
     private void GetDimensions(out float footOffset, out float radius, out float height)

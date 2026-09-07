@@ -127,6 +127,7 @@ namespace Ramblers
     {
         internal string LastWalkingConnectionReason => "probe";
         internal Func<Vector3, Vector3, bool> Clear = (from, to) => true;
+        internal Transform PlayerObstacle;
         internal Func<Vector3, Vector3, CompanionWalkingConnection> Walking =
             (from, to) => CompanionWalkingConnection.Walkable;
         internal Func<Vector3, Vector3?> Support = candidate => new Vector3(candidate.x, 0, candidate.z);
@@ -140,21 +141,29 @@ namespace Ramblers
             try { action(); }
             finally { _queryLimit = previous; }
         }
-        internal bool TryGroundPoint(Vector3 candidate, out Vector3 grounded)
+        internal bool TryGroundPoint(Vector3 candidate, out Vector3 grounded, Transform ignoredTarget = null)
         {
             NativeQueryCount++;
             var supported = Support(candidate);
             grounded = supported ?? candidate;
             return supported.HasValue;
         }
-        internal bool TryGroundRoutePoint(Vector3 candidate, out Vector3 grounded) =>
-            TryGroundPoint(candidate, out grounded);
-        internal bool IsSegmentClear(Vector3 from, Vector3 to)
-        { NativeQueryCount++; return Clear(from, to); }
-        internal CompanionWalkingConnection ProbeWalkingConnection(Vector3 from, Vector3 to)
-        { NativeQueryCount++; return Walking(from, to); }
-        internal bool CanWalkSegment(Vector3 from, Vector3 to) =>
-            ProbeWalkingConnection(from, to) == CompanionWalkingConnection.Walkable;
+        internal bool TryGroundRoutePoint(Vector3 candidate, out Vector3 grounded, Transform ignoredTarget = null) =>
+            TryGroundPoint(candidate, out grounded, ignoredTarget);
+        internal bool IsSegmentClear(Vector3 from, Vector3 to, Transform ignoredTarget = null)
+        { NativeQueryCount++; return Clear(from, to) && !HitsPlayer(from, to, ignoredTarget); }
+        internal CompanionWalkingConnection ProbeWalkingConnection(Vector3 from, Vector3 to, Transform ignoredTarget = null)
+        { NativeQueryCount++; return HitsPlayer(from, to, ignoredTarget) ? CompanionWalkingConnection.Obstructed : Walking(from, to); }
+        internal bool CanWalkSegment(Vector3 from, Vector3 to, Transform ignoredTarget = null) =>
+            ProbeWalkingConnection(from, to, ignoredTarget) == CompanionWalkingConnection.Walkable;
+        private bool HitsPlayer(Vector3 from, Vector3 to, Transform ignoredTarget)
+        {
+            if (PlayerObstacle == null || PlayerObstacle == ignoredTarget) return false;
+            var delta = to - from;
+            var along = delta.sqrMagnitude < 0.0001f ? 0f :
+                Math.Max(0f, Math.Min(1f, Vector3.Dot(PlayerObstacle.position - from, delta) / delta.sqrMagnitude));
+            return Vector3.Distance(from + delta * along, PlayerObstacle.position) < 0.5f;
+        }
     }
     internal sealed class CompanionLocomotion
     {
@@ -218,6 +227,9 @@ namespace Ramblers
         {
             var failures = 0;
             Run("default following and explicit stay", DefaultFollowAndStay, ref failures);
+            Run("player collider does not veto stopping distance", PlayerColliderDoesNotVetoArrival, ref failures);
+            Run("approach stops before contact and resumes with hysteresis", ApproachStopsBeforePlayerContact, ref failures);
+            Run("nearby terrain still prevents through-wall arrival", NearbyWallStillPreventsArrival, ref failures);
             Run("walkable level jump is not mirrored", LevelJumpPipeline, ref failures);
             Run("real gap retains useful jump hint", RealGapJumpPipeline, ref failures);
             Run("short landing keeps the required crossing", ShortLandingPreservesJump, ref failures);
@@ -246,8 +258,54 @@ namespace Ramblers
                 Console.Error.WriteLine("Companion follow integration: " + failures + " checks failed.");
                 return 1;
             }
-            Console.WriteLine("Companion follow integration: 24 behavioral checks passed.");
+            Console.WriteLine("Companion follow integration: 27 behavioral checks passed.");
             return 0;
+        }
+
+        private static void PlayerColliderDoesNotVetoArrival()
+        {
+            foreach (var distance in new[] { 2f, 1.34f, 0.94f, 0.66f })
+            {
+                var world = new World(Point(distance), Point(0));
+                world.Motion.Geometry.PlayerObstacle = world.Human.transform;
+                Expect(!world.Motion.Geometry.IsSegmentClear(world.Body.Position, world.Human.transform.position),
+                    "fixture omitted the target's collider");
+                world.Tick(0);
+                Expect(world.Follow.StateLabel == "holding" && world.Motion.LastMovementIntent.sqrMagnitude == 0,
+                    "still commanding movement inside stopping radius at " + distance);
+            }
+        }
+
+        private static void ApproachStopsBeforePlayerContact()
+        {
+            var world = new World(Point(5), Point(0));
+            world.Motion.Geometry.PlayerObstacle = world.Human.transform;
+            for (var step = 0; step < 80; step++)
+            {
+                world.Tick(step * 0.11f);
+                world.Body.Character.transform.position += world.Motion.LastMovementIntent *
+                    (world.Motion.LastCommandedSpeed * 0.11f);
+                Expect(Vector3.Distance(world.Body.Position, world.Human.transform.position) > 1.5f,
+                    "approach drove into the player instead of stopping");
+            }
+            Expect(world.Follow.StateLabel == "holding", "approach did not settle into holding");
+            world.Human.transform.position = world.Body.Position + Point(2.4f);
+            world.Tick(9f);
+            Expect(world.Motion.LastMovementIntent.sqrMagnitude == 0, "small player motion caused stop/start chatter");
+            world.Human.transform.position = world.Body.Position + Point(2.7f);
+            world.Tick(9.2f);
+            Expect(world.Motion.LastMovementIntent.x > 0.9f, "following did not resume outside resume radius");
+        }
+
+        private static void NearbyWallStillPreventsArrival()
+        {
+            var world = new World(Point(1.34f), Point(0));
+            world.Motion.Geometry.PlayerObstacle = world.Human.transform;
+            world.Motion.Geometry.Clear = (from, to) => (from.x < 0.5f) == (to.x < 0.5f);
+            world.Motion.Geometry.Walking = (from, to) => world.Motion.Geometry.Clear(from, to)
+                ? CompanionWalkingConnection.Walkable : CompanionWalkingConnection.Obstructed;
+            world.Tick(0);
+            Expect(world.Follow.StateLabel != "holding", "target exclusion accepted arrival through a wall");
         }
 
         private static void DefaultFollowAndStay()
@@ -854,6 +912,7 @@ namespace Ramblers
                 Plugin.Logger.Lines.Clear();
                 Mirror.NetworkServer.active = true;
                 Human.transform.position = human;
+                Motion.Geometry.PlayerObstacle = Human.transform;
                 Human.playerNetworking.isLocalPlayer = true;
                 WorldManager.localPlayerCharacter = Human;
                 Body.Character.transform.position = body;
