@@ -10,13 +10,19 @@ internal readonly struct BreadcrumbPoint
         Vector3 position,
         bool requiresJump,
         bool requiresDrop,
-        Vector3 travelDirection)
+        Vector3 travelDirection,
+        bool hasTakeoff = false,
+        Vector3 takeoffPosition = default(Vector3),
+        float traversalDuration = 0f)
     {
         Sequence = sequence;
         Position = position;
         RequiresJump = requiresJump;
         RequiresDrop = requiresDrop;
         TravelDirection = travelDirection;
+        HasTakeoff = hasTakeoff;
+        TakeoffPosition = takeoffPosition;
+        TraversalDuration = traversalDuration;
     }
 
     internal int Sequence { get; }
@@ -24,6 +30,9 @@ internal readonly struct BreadcrumbPoint
     internal bool RequiresJump { get; }
     internal bool RequiresDrop { get; }
     internal Vector3 TravelDirection { get; }
+    internal bool HasTakeoff { get; }
+    internal Vector3 TakeoffPosition { get; }
+    internal float TraversalDuration { get; }
 }
 
 internal sealed class BreadcrumbTrail
@@ -89,6 +98,22 @@ internal sealed class BreadcrumbTrail
         return _points[_head];
     }
 
+    internal BreadcrumbPoint AddTraversal(Vector3 takeoff, Vector3 position,
+        bool requiresJump, bool requiresDrop, float duration)
+    {
+        Add(takeoff, false, false);
+        var landing = Add(position, requiresJump, requiresDrop);
+        var direction = position - takeoff;
+        direction.y = 0f;
+        direction.Normalize();
+        landing = new BreadcrumbPoint(landing.Sequence, landing.Position,
+            landing.RequiresJump, landing.RequiresDrop, direction,
+            true, takeoff, duration);
+        _points[(_head + _count - 1) % _points.Length] = landing;
+        _lastAdded = landing;
+        return landing;
+    }
+
     internal bool TryPeek(int offset, out BreadcrumbPoint point)
     {
         point = default(BreadcrumbPoint);
@@ -99,6 +124,29 @@ internal sealed class BreadcrumbTrail
         return true;
     }
 
+    internal void MakeFirstWalkable()
+    {
+        if (_count == 0)
+            return;
+        var point = Peek();
+        var walkable = new BreadcrumbPoint(point.Sequence, point.Position,
+            false, false, point.TravelDirection);
+        _points[_head] = walkable;
+        if (_lastAdded.Sequence == point.Sequence)
+            _lastAdded = walkable;
+    }
+
+    internal void RemoveThrough(int sequence)
+    {
+        for (var offset = 0; offset < _count; offset++)
+        {
+            if (_points[(_head + offset) % _points.Length].Sequence != sequence)
+                continue;
+            _head = (_head + offset + 1) % _points.Length;
+            _count -= offset + 1;
+            return;
+        }
+    }
     internal bool TryRemoveFirst(out BreadcrumbPoint point)
     {
         point = default(BreadcrumbPoint);
@@ -126,7 +174,8 @@ internal sealed class BreadcrumbTrail
         int committedJumpSequence,
         int committedDropSequence,
         out BreadcrumbPoint lastRemoved,
-        out bool crossedPointPlane)
+        out bool crossedPointPlane,
+        Func<Vector3, bool> canReachPoint = null)
     {
         var removed = 0;
         lastRemoved = default(BreadcrumbPoint);
@@ -150,7 +199,8 @@ internal sealed class BreadcrumbTrail
                          _count > 1 &&
                          verticallyNear &&
                          HasCrossedPointPlane(from, point, passLateralTolerance);
-            if (!reached && !passed)
+            if ((!reached && !passed) ||
+                (canReachPoint != null && !canReachPoint(point.Position)))
             {
                 return removed;
             }
