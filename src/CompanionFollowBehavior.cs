@@ -307,6 +307,41 @@ internal sealed class CompanionFollowBehavior
         _suspensionReason = null;
     }
 
+    internal void RebaseAfterExternalReposition(
+        PlayerCharacter human,
+        float now,
+        bool movementAllowed,
+        string movementBlocker)
+    {
+        _locomotion.StopQuietly();
+        _jump.CancelFollow("external reposition");
+        _bodyIsCarried = false;
+        _bodyCarriesHuman = false;
+        _trail.Clear();
+        _nextTrailSample = now + TrailSampleInterval;
+        ResetTraversalState(human);
+
+        if (!_followRequested || human == null)
+        {
+            Plugin.Logger.LogInfo(
+                "[FOLLOW] EXTERNAL_REPOSITION_REBASED " +
+                $"followRequested={_followRequested}, breadcrumbs=0.");
+            return;
+        }
+
+        _trail.Add(human.transform.position, false, false);
+        _state = movementAllowed ? FollowState.Waiting : FollowState.Suspended;
+        _suspensionReason = movementAllowed ? null : movementBlocker ?? "companion_action";
+        _followAt = now;
+        _nextNavigationTick = now;
+        _attention.SetTarget(GazeChannel.Follow, CompanionBody.HeadPositionOf(human));
+        _attention.ResumeAt(now);
+        _locomotion.ResetProgressObservation(now);
+        Plugin.Logger.LogInfo(
+            "[FOLLOW] EXTERNAL_REPOSITION_REBASED " +
+            $"followRequested=true, movementAllowed={movementAllowed}, breadcrumbs=1.");
+    }
+
     private void BeginFollowing(float now)
     {
         var human = GetHumanPlayer();

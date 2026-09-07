@@ -128,6 +128,11 @@ internal sealed class CompanionActionCoordinator
         return _follow.SetMode(mode, now, MovementAllowed, MovementBlocker);
     }
 
+    internal void RebaseAfterExternalReposition(PlayerCharacter human, float now)
+    {
+        _follow.RebaseAfterExternalReposition(human, now, MovementAllowed, MovementBlocker);
+    }
+
     internal AgentToolResult SetPosture(CompanionPosture posture, float now)
     {
         var locomotionHolder = FindHolder(JobResources.Locomotion);

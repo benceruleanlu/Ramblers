@@ -714,6 +714,7 @@ internal sealed class CompanionController : MonoBehaviour
         if (HasBody)
         {
             var now = Time.realtimeSinceStartup;
+            TryApplyCraneShortcut(now);
             if (now >= _verifyAt && _verificationLog.ShouldLog())
                 LogVerification();
             _actions.TickFrame(now);
@@ -737,6 +738,58 @@ internal sealed class CompanionController : MonoBehaviour
             return;
 
         TrySpawn(manager, localPlayer);
+    }
+
+    private void TryApplyCraneShortcut(float now)
+    {
+        if (!Plugin.EnableCraneShortcut.Value)
+            return;
+
+        try
+        {
+            if (!Input.GetKeyDown(KeyCode.F8))
+                return;
+
+            if (!NetworkServer.active || !_body.Networking.isServer ||
+                _body.Networking.isLocalPlayer)
+            {
+                Plugin.Logger.LogWarning(
+                    "[QA] CRANE_REPRO_SKIPPED reason=companion_authority_unavailable.");
+                return;
+            }
+
+            var human = WorldManager.localPlayerCharacter;
+            if (_jobLeases.Count != 0 || _actions.ActiveJobName != null || _actions.JumpQueued)
+            {
+                Plugin.Logger.LogWarning(
+                    "[QA] CRANE_REPRO_SKIPPED reason=companion_action_active.");
+                return;
+            }
+
+            if (CompanionFollowBehavior.IsHumanCarryingBody(_body, human) ||
+                CompanionFollowBehavior.IsBodyCarryingHuman(_body, human))
+            {
+                Plugin.Logger.LogWarning(
+                    "[QA] CRANE_REPRO_SKIPPED reason=carry_relationship_active.");
+                return;
+            }
+
+            string failure;
+            if (!DevelopmentCraneShortcut.TryApply(_body, human, out failure))
+            {
+                Plugin.Logger.LogWarning($"[QA] CRANE_REPRO_SKIPPED reason={failure}.");
+                return;
+            }
+
+            _actions.RebaseAfterExternalReposition(human, now);
+            Plugin.Logger.LogInfo(
+                "[QA] CRANE_REPRO_APPLIED hotkey=F8 " +
+                $"human={human.transform.position}, companion={_body.Position}.");
+        }
+        catch (Exception exception)
+        {
+            Plugin.Logger.LogError($"[QA] CRANE_REPRO_FAILED error={exception.Message}");
+        }
     }
 
     private void FixedUpdate()
