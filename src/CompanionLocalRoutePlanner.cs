@@ -19,8 +19,15 @@ internal sealed class CompanionLocalRoutePlanner
         new Dictionary<Cell, Vector3?>();
     private Func<Vector3, Vector3?> _sampleGround;
     private Func<Vector3, Vector3, bool> _clearSegment;
+    private Func<bool> _budgetAvailable;
     private Vector3 _start;
     private Vector3 _goal;
+    private bool _searchPending;
+    private bool _directPending;
+    private int _expandingNode = -1;
+    private int _neighbor;
+    private bool _goalCheckPending;
+    private int _expandedTotal;
 
     internal CompanionLocalRoutePlanner(
         int maximumExpandedNodes = 160,
@@ -48,6 +55,18 @@ internal sealed class CompanionLocalRoutePlanner
     internal int LastSegmentCheckCount { get; private set; }
     internal int LastQueryCount => LastSampleCount + LastSegmentCheckCount;
 
+    internal void Reset()
+    {
+        _searchPending = false;
+        _nodes.Clear();
+        _nodeIndices.Clear();
+        _groundSamples.Clear();
+        _directPending = true;
+        _expandingNode = -1;
+        _neighbor = 0;
+        _expandedTotal = 0;
+    }
+
     internal bool TryPlan(
         Vector3 start,
         Vector3 goal,
@@ -55,10 +74,19 @@ internal sealed class CompanionLocalRoutePlanner
         Func<Vector3, Vector3, bool> clearSegment,
         out Vector3[] route)
     {
+        _searchPending = false;
+        return TryPlan(start, goal, sampleGround, clearSegment, null, out route);
+    }
+
+    internal bool TryPlan(
+        Vector3 start,
+        Vector3 goal,
+        Func<Vector3, Vector3?> sampleGround,
+        Func<Vector3, Vector3, bool> clearSegment,
+        Func<bool> budgetAvailable,
+        out Vector3[] route)
+    {
         route = Array.Empty<Vector3>();
-        _nodes.Clear();
-        _nodeIndices.Clear();
-        _groundSamples.Clear();
         LastExpandedNodeCount = 0;
         LastSampleCount = 0;
         LastSegmentCheckCount = 0;
@@ -68,70 +96,109 @@ internal sealed class CompanionLocalRoutePlanner
                 ? nameof(sampleGround) : nameof(clearSegment));
         if (!Finite(start) || !Finite(goal))
         {
+            _searchPending = false;
             LastStatus = "invalid_position";
             return false;
         }
 
-        _start = start;
-        _goal = goal;
+        if (!_searchPending || Distance(start, _start) > 0.35f || Distance(goal, _goal) > 0.25f)
+        {
+            Reset();
+            _start = start;
+            _goal = goal;
+        }
         _sampleGround = sampleGround;
         _clearSegment = clearSegment;
+        _budgetAvailable = budgetAvailable;
         try
         {
-            return Search(out route);
+            var found = Search(out route);
+            _searchPending = !found && LastStatus == "query_budget";
+            return found;
         }
         finally
         {
             _sampleGround = null;
             _clearSegment = null;
+            _budgetAvailable = null;
         }
     }
 
     private bool Search(out Vector3[] route)
     {
         route = Array.Empty<Vector3>();
-        if (SegmentClear(_start, _goal))
+        if (_directPending)
         {
-            route = new[] { _goal };
-            LastStatus = "direct";
-            return true;
-        }
-
-        var goalDx = _goal.x - _start.x;
-        var goalDz = _goal.z - _start.z;
-        if (goalDx * goalDx + goalDz * goalDz > _radius * _radius)
-        {
-            LastStatus = "goal_outside_horizon";
-            return false;
-        }
-
-        var initial = new Node(new Cell(0, 0, 0), _start, 0f, Distance(_start, _goal), -1);
-        _nodes.Add(initial);
-        _nodeIndices.Add(initial.Cell, 0);
-        while (LastExpandedNodeCount < _maximumExpandedNodes && HasQueryBudget)
-        {
-            var currentIndex = SelectNext();
-            if (currentIndex < 0)
+            if (!HasQueryBudget)
+                return YieldSearch();
+            var direct = SegmentClear(_start, _goal);
+            if (!ExternalBudgetAvailable)
+                return YieldSearch();
+            if (direct)
             {
-                LastStatus = "no_route";
+                route = new[] { _goal };
+                LastStatus = "direct";
+                return true;
+            }
+            _directPending = false;
+            var goalDx = _goal.x - _start.x;
+            var goalDz = _goal.z - _start.z;
+            if (goalDx * goalDx + goalDz * goalDz > _radius * _radius)
+            {
+                LastStatus = "goal_outside_horizon";
                 return false;
             }
 
-            var current = _nodes[currentIndex];
-            current.Closed = true;
-            LastExpandedNodeCount++;
-            if (Distance(current.Position, _goal) <= _spacing * 2.25f &&
-                SegmentClear(current.Position, _goal))
+            var initial = new Node(new Cell(0, 0, 0), _start, 0f, Distance(_start, _goal), -1);
+            _nodes.Add(initial);
+            _nodeIndices.Add(initial.Cell, 0);
+        }
+        while (HasQueryBudget)
+        {
+            if (_expandingNode < 0)
             {
-                route = BuildRoute(currentIndex);
-                LastStatus = "detour";
-                return true;
+                if (_expandedTotal >= _maximumExpandedNodes)
+                {
+                    LastStatus = "node_budget";
+                    return false;
+                }
+                _expandingNode = SelectNext();
+                if (_expandingNode < 0)
+                {
+                    LastStatus = "no_route";
+                    return false;
+                }
+                _nodes[_expandingNode].Closed = true;
+                LastExpandedNodeCount++;
+                _expandedTotal++;
+                _neighbor = 0;
+                _goalCheckPending = true;
             }
 
-            for (var direction = 0; direction < NeighborX.Length; direction++)
+            var currentIndex = _expandingNode;
+            var current = _nodes[currentIndex];
+            if (_goalCheckPending)
+            {
+                if (Distance(current.Position, _goal) <= _spacing * 2.25f)
+                {
+                    var connects = SegmentClear(current.Position, _goal);
+                    if (!ExternalBudgetAvailable)
+                        return YieldSearch();
+                    if (connects)
+                    {
+                        route = BuildRoute(currentIndex);
+                        LastStatus = "detour";
+                        return true;
+                    }
+                }
+                _goalCheckPending = false;
+            }
+
+            for (; _neighbor < NeighborX.Length; _neighbor++)
             {
                 if (!HasQueryBudget)
-                    break;
+                    return YieldSearch();
+                var direction = _neighbor;
                 var x = current.Cell.X + NeighborX[direction];
                 var z = current.Cell.Z + NeighborZ[direction];
                 if ((x * x + z * z) * _spacing * _spacing > _radius * _radius)
@@ -144,6 +211,8 @@ internal sealed class CompanionLocalRoutePlanner
                         _start.x + x * _spacing,
                         current.Position.y,
                         _start.z + z * _spacing));
+                    if (!ExternalBudgetAvailable)
+                        return YieldSearch();
                     if (grounded.HasValue && !Finite(grounded.Value))
                         grounded = null;
                     _groundSamples.Add(sampleCell, grounded);
@@ -160,7 +229,12 @@ internal sealed class CompanionLocalRoutePlanner
                     Math.Abs(position.y - current.Position.y) * 0.4f;
                 if (exists && _nodes[candidateIndex].Cost <= cost + 0.0001f)
                     continue;
-                if (!SegmentClear(current.Position, position))
+                if (!HasQueryBudget)
+                    return YieldSearch();
+                var edgeClear = SegmentClear(current.Position, position);
+                if (!ExternalBudgetAvailable)
+                    return YieldSearch();
+                if (!edgeClear)
                     continue;
 
                 if (exists)
@@ -179,9 +253,15 @@ internal sealed class CompanionLocalRoutePlanner
                         cell, position, cost, cost + Distance(position, _goal), currentIndex));
                 }
             }
+            _expandingNode = -1;
         }
 
-        LastStatus = !HasQueryBudget ? "query_budget" : "node_budget";
+        return YieldSearch();
+    }
+
+    private bool YieldSearch()
+    {
+        LastStatus = "query_budget";
         return false;
     }
 
@@ -232,14 +312,16 @@ internal sealed class CompanionLocalRoutePlanner
         return smoothed.ToArray();
     }
 
-    private bool HasQueryBudget => LastQueryCount < _maximumQueries;
+    private bool ExternalBudgetAvailable => _budgetAvailable == null || _budgetAvailable();
+    private bool HasQueryBudget => LastQueryCount < _maximumQueries && ExternalBudgetAvailable;
 
     private bool SegmentClear(Vector3 from, Vector3 to)
     {
         if (!HasQueryBudget)
             return false;
         LastSegmentCheckCount++;
-        return _clearSegment(from, to);
+        var clear = _clearSegment(from, to);
+        return clear && ExternalBudgetAvailable;
     }
 
     private int HeightBand(float height) =>

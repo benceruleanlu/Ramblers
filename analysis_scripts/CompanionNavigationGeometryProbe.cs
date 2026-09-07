@@ -21,13 +21,17 @@ namespace UnityEngine
         internal float z;
         internal Vector3(float x, float y, float z) { this.x = x; this.y = y; this.z = z; }
         internal static Vector3 zero => new Vector3(0f, 0f, 0f);
+        internal static Vector3 forward => new Vector3(0f, 0f, 1f);
         internal static Vector3 up => new Vector3(0f, 1f, 0f);
         internal static Vector3 down => new Vector3(0f, -1f, 0f);
         internal float sqrMagnitude => x * x + y * y + z * z;
         internal float magnitude => (float)Math.Sqrt(sqrMagnitude);
+        internal Vector3 normalized => magnitude < 0.00001f ? zero : this / magnitude;
+        internal static float Dot(Vector3 a, Vector3 b) => a.x * b.x + a.y * b.y + a.z * b.z;
         internal void Normalize() { var m = magnitude; if (m > 0.00001f) { x /= m; y /= m; z /= m; } }
         public static Vector3 operator +(Vector3 a, Vector3 b) => new Vector3(a.x + b.x, a.y + b.y, a.z + b.z);
         public static Vector3 operator -(Vector3 a, Vector3 b) => new Vector3(a.x - b.x, a.y - b.y, a.z - b.z);
+        public static Vector3 operator -(Vector3 value) => new Vector3(-value.x, -value.y, -value.z);
         public static Vector3 operator *(Vector3 a, float b) => new Vector3(a.x * b, a.y * b, a.z * b);
         public static Vector3 operator /(Vector3 a, float b) => new Vector3(a.x / b, a.y / b, a.z / b);
         internal static float Distance(Vector3 a, Vector3 b) => (a - b).magnitude;
@@ -51,6 +55,7 @@ namespace UnityEngine
         internal static int Min(int a, int b) => Math.Min(a, b);
         internal static float Max(float a, float b) => Math.Max(a, b);
         internal static float Abs(float v) => Math.Abs(v);
+        internal static float Clamp(float value, float minimum, float maximum) => Math.Min(maximum, Math.Max(minimum, value));
     }
 
     internal sealed class Transform

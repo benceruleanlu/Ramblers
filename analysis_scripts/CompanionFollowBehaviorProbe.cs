@@ -220,6 +220,8 @@ namespace Ramblers
             Run("default following and explicit stay", DefaultFollowAndStay, ref failures);
             Run("walkable level jump is not mirrored", LevelJumpPipeline, ref failures);
             Run("real gap retains useful jump hint", RealGapJumpPipeline, ref failures);
+            Run("short landing keeps the required crossing", ShortLandingPreservesJump, ref failures);
+            Run("partial jump can continue by walking", PartialJumpReconsidersWalkingRoute, ref failures);
             Run("short wall uses walking detour", ShortWallUsesWalkingDetour, ref failures);
             Run("fun jumps and zigzag do not drag follower backward", FunJumpsAndZigzagFollowCurrentHuman, ref failures);
             Run("airborne human projects to walking ground", AirborneHumanKeepsHorizontalChase, ref failures);
@@ -244,7 +246,7 @@ namespace Ramblers
                 Console.Error.WriteLine("Companion follow integration: " + failures + " checks failed.");
                 return 1;
             }
-            Console.WriteLine("Companion follow integration: 22 behavioral checks passed.");
+            Console.WriteLine("Companion follow integration: 24 behavioral checks passed.");
             return 0;
         }
 
@@ -311,6 +313,46 @@ namespace Ramblers
                 "confirmed grounded landing never released the traversal breadcrumb");
             Expect(world.Jump.RequestTimes.Count == 1 && world.Motion.LastMovementIntent.x > 0.9f,
                 "landing replayed a completed jump or stopped following the next route");
+        }
+
+        private static void ShortLandingPreservesJump()
+        {
+            var world = RecordedJump(Point(3));
+            var landing = FindTraversal(world);
+            world.Body.Character.transform.position = Point(0);
+            world.Tick(0.7f);
+            world.Body.Character.ground.isGrounded = false;
+            world.Body.Character.transform.position = new Vector3(0.3f, 0.8f, 0);
+            world.Tick(0.85f);
+            world.Body.Character.ground.isGrounded = true;
+            world.Body.Character.transform.position = Point(0.4f);
+            world.Tick(1.3f);
+            Expect(ContainsTraversal(world, landing.Sequence),
+                "jump landing 2.6 meters short erased the recorded crossing");
+            var committed = (int)typeof(CompanionFollowBehavior)
+                .GetField("_jumpCommittedSequence", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(world.Follow);
+            Expect(committed != landing.Sequence, "short landing was reported as successful traversal");
+            for (var tick = 0; tick < 15; tick++) world.Tick(1.4f + tick * 0.1f);
+            Expect(world.Jump.RequestTimes.Count >= 2 && ContainsTraversal(world, landing.Sequence),
+                "failed landing prevented a paced native retry");
+        }
+
+        private static void PartialJumpReconsidersWalkingRoute()
+        {
+            var world = RecordedJump(Point(5));
+            world.Motion.Geometry.Walking = (from, to) => from.x <= 0.5f && to.x <= 0.5f
+                ? CompanionWalkingConnection.Walkable : CompanionWalkingConnection.Obstructed;
+            world.Body.Character.transform.position = Point(0);
+            world.Tick(0.7f);
+            world.Body.Character.ground.isGrounded = false;
+            world.Body.Character.transform.position = new Vector3(1f, 0.8f, 0);
+            world.Tick(0.85f);
+            world.Body.Character.ground.isGrounded = true;
+            world.Body.Character.transform.position = Point(2.5f);
+            world.Motion.Geometry.Walking = (from, to) => CompanionWalkingConnection.Walkable;
+            world.Tick(1.3f);
+            Expect(world.Motion.LastMovementIntent.x > 0.9f && world.Jump.RequestTimes.Count == 1,
+                "partial jump ignored available walking route and returned toward old takeoff");
         }
 
         private static void FunJumpsAndZigzagFollowCurrentHuman()

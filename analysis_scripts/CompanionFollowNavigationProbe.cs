@@ -50,6 +50,11 @@ namespace Ramblers
         {
             var failures = 0;
             Run("persistent U detour", PersistentDetourMovesThroughU, ref failures);
+            Run("slow U detour counts route progress", SlowDetourMovesThroughU, ref failures);
+            Run("long U detour counts route progress", LongDetourMovesThroughU, ref failures);
+            Run("corner validation is not repeated", CornerValidationUsesBudgetOnce, ref failures);
+            Run("exhausted validation retains route", ExhaustedValidationRetainsRoute, ref failures);
+            Run("newly completed search gets execution time", CompletedSearchStartsExecutionWindow, ref failures);
             Run("measured stall changes direction", ActualStallRejectsFailedDirection, ref failures);
             Run("ten seconds blocked keeps recovering", CompleteBlockageDoesNotDeadlock, ref failures);
             Run("uncertain floor samples", FloorUncertaintyCanPassThrough, ref failures);
@@ -66,15 +71,77 @@ namespace Ramblers
                 Console.Error.WriteLine("Companion follow navigation: " + failures + " behavioral checks failed.");
                 return 1;
             }
-            Console.WriteLine("Companion follow navigation: 12 behavioral checks passed.");
+            Console.WriteLine("Companion follow navigation: 17 behavioral checks passed.");
             return 0;
         }
 
         private static void PersistentDetourMovesThroughU()
         {
+            TraverseU(-1.5f, 0.1f, 400);
+        }
+
+        private static void CornerValidationUsesBudgetOnce()
+        {
+            var remaining = 384;
+            var checks = 0;
+            var navigator = new CompanionFollowNavigation(candidate => candidate,
+                (from, to) =>
+                {
+                    checks++;
+                    var completed = remaining >= 220;
+                    remaining = Math.Max(0, remaining - 220);
+                    return completed;
+                }, null, () => remaining > 0);
+            navigator.AcceptRoute(Point(4, 5), 1,
+                new[] { Point(0, 0), Point(4, 0), Point(4, 5) }, 0);
+            navigator.Tick(Point(0, 0), Point(4, 5), 1, true, 0.1f);
+            Expect(checks == 1 && navigator.WaypointsRemaining == 2,
+                "duplicate corner validation exhausted budget and discarded valid route");
+        }
+
+        private static void ExhaustedValidationRetainsRoute()
+        {
+            var remaining = 100;
+            var navigator = new CompanionFollowNavigation(candidate => candidate,
+                (from, to) => { remaining = 0; return false; }, null, () => remaining > 0);
+            navigator.AcceptRoute(Point(4, 5), 1, new[] { Point(4, 0), Point(4, 5) }, 0);
+            var step = navigator.Tick(Point(0, 0), Point(4, 5), 1, true, 0.1f);
+            Expect(navigator.WaypointsRemaining == 2 && navigator.PlanCount == 0 &&
+                step.Mode == "validation_pending",
+                "unfinished segment validation was treated as physical obstruction");
+        }
+
+        private static void CompletedSearchStartsExecutionWindow()
+        {
+            var goal = Point(5, 0);
+            var navigator = new CompanionFollowNavigation(candidate => candidate, (from, to) => true);
+            navigator.AcceptRoute(goal, 0, Array.Empty<Vector3>(), 0, true);
+            for (var tick = 0; tick < 60; tick++)
+                navigator.Tick(Point(0, 0), goal, 0, true, tick * 0.1f);
+            var failures = navigator.RememberedFailures;
+            navigator.AcceptRoute(goal, 0, new[] { Point(0, 2), Point(5, 2), goal }, 6f);
+            var step = navigator.Tick(Point(0, 0), goal, 0, true, 6f);
+            Expect(!step.GoalStalled && !step.Stalled && navigator.WaypointsRemaining == 3,
+                "planning time immediately failed a newly completed route");
+            Expect(navigator.RememberedFailures == failures,
+                "granting execution time erased measured failed approaches");
+        }
+
+        private static void SlowDetourMovesThroughU()
+        {
+            TraverseU(-1.5f, 0.025f, 2000);
+        }
+
+        private static void LongDetourMovesThroughU()
+        {
+            TraverseU(-5.5f, 0.1f, 1000);
+        }
+
+        private static void TraverseU(float opening, float distancePerTick, int maximumTicks)
+        {
             Func<Vector3, bool> open = point =>
-                !Inside(point, -1.8f, -1.2f, -1.5f, 3.3f) &&
-                !Inside(point, 1.2f, 1.8f, -1.5f, 3.3f) &&
+                !Inside(point, -1.8f, -1.2f, opening, 3.3f) &&
+                !Inside(point, 1.2f, 1.8f, opening, 3.3f) &&
                 !Inside(point, -1.8f, 1.8f, 2.7f, 3.3f);
             var clear = SegmentPredicate(open);
             var navigator = new CompanionFollowNavigation(candidate => candidate, clear);
@@ -82,12 +149,14 @@ namespace Ramblers
             var goal = Point(0, 5);
             var movedAway = false;
             var detourTicks = 0;
-            for (var tick = 0; tick < 400 && Vector3.Distance(position, goal) > 0.3f; tick++)
+            for (var tick = 0; tick < maximumTicks && Vector3.Distance(position, goal) > 0.3f; tick++)
             {
                 var step = navigator.Tick(position, goal, 1, true, tick * 0.05f);
-                Expect(!HasGoalStall(step), "legitimate U-shaped detour was mistaken for a repeated failed approach");
+                Expect(!HasGoalStall(step), "legitimate U-shaped detour was mistaken for a repeated failed approach: " +
+                    "t=" + tick * 0.05f + ", x=" + position.x + ", z=" + position.z +
+                    ", mode=" + step.Mode + ", plan=" + navigator.PlanStatus + ", nodes=" + navigator.ExpandedNodes);
                 if (step.Mode == "detour") detourTicks++;
-                var candidate = position + step.Direction * 0.1f;
+                var candidate = position + step.Direction * distancePerTick;
                 Expect(clear(position, candidate), "commanded detour movement crossed a solid wall");
                 position = candidate;
                 movedAway |= position.z < -1.5f;

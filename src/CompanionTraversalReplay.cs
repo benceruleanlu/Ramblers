@@ -105,7 +105,9 @@ internal sealed class CompanionTraversalReplay
                 return true;
             }
 
-            Complete();
+            _phase = ReplayPhase.Approach;
+            _nextLaunchAt = now + RetryCooldown;
+            _observedUnsupported = false;
             return false;
         }
 

@@ -33,6 +33,7 @@ internal sealed class CompanionFollowNavigation
     private readonly Func<Vector3, Vector3?> _sampleGround;
     private readonly Func<Vector3, Vector3, bool> _clearSegment;
     private readonly Func<Vector3, Vector3, bool> _attemptSegment;
+    private readonly Func<bool> _budgetAvailable;
     private readonly List<FailedDirection> _failures = new List<FailedDirection>();
     private Vector3[] _route = Array.Empty<Vector3>();
     private int _cursor;
@@ -61,15 +62,23 @@ internal sealed class CompanionFollowNavigation
     private float _approachGoalDistance;
     private float _approachAt;
     private bool _leftApproach;
+    private Vector3[] _observedRoute;
+    private float _bestRouteRemaining;
+    private bool _searchPending;
+    private bool _externalSearchPending;
+    private Vector3 _searchStart;
+    private Vector3 _searchGoal;
 
     internal CompanionFollowNavigation(
         Func<Vector3, Vector3?> sampleGround,
         Func<Vector3, Vector3, bool> clearSegment,
-        Func<Vector3, Vector3, bool> attemptSegment = null)
+        Func<Vector3, Vector3, bool> attemptSegment = null,
+        Func<bool> budgetAvailable = null)
     {
         _sampleGround = sampleGround;
         _clearSegment = clearSegment;
         _attemptSegment = attemptSegment;
+        _budgetAvailable = budgetAvailable;
     }
 
     internal string PlanStatus => _planner.LastStatus;
@@ -95,6 +104,10 @@ internal sealed class CompanionFollowNavigation
         _escapeRoute = false;
         _observingGoal = false;
         _hasApproach = false;
+        _observedRoute = null;
+        _searchPending = false;
+        _externalSearchPending = false;
+        _planner.Reset();
         PlanCount = 0;
         GoalStallCount = 0;
     }
@@ -108,6 +121,10 @@ internal sealed class CompanionFollowNavigation
         _nextPlanAt = 0f;
         _observingGoal = false;
         _hasApproach = false;
+        _observedRoute = null;
+        _searchPending = false;
+        _externalSearchPending = false;
+        _planner.Reset();
     }
 
     internal bool TryWalkingDetour(
@@ -130,8 +147,15 @@ internal sealed class CompanionFollowNavigation
         return true;
     }
 
-    internal void AcceptRoute(Vector3 goal, int targetSequence, Vector3[] route, float now)
+    internal void AcceptRoute(Vector3 goal, int targetSequence, Vector3[] route, float now,
+        bool searchPending = false)
     {
+        if (_externalSearchPending && !searchPending && route.Length > 0)
+        {
+            _observingProgress = false;
+            _observingGoal = false;
+            _observedRoute = null;
+        }
         _route = route;
         _cursor = 0;
         _targetSequence = targetSequence;
@@ -139,6 +163,9 @@ internal sealed class CompanionFollowNavigation
         _hasGoal = true;
         _escapeRoute = false;
         _nextPlanAt = route.Length == 0 ? now : now + 0.8f;
+        _searchPending = false;
+        _externalSearchPending = searchPending;
+        _planner.Reset();
     }
 
     internal CompanionNavigationStep Tick(
@@ -157,6 +184,8 @@ internal sealed class CompanionFollowNavigation
             _goal = goal;
             _targetSequence = targetSequence;
             _hasGoal = true;
+            _searchPending = false;
+            _planner.Reset();
         }
 
         var goalStalled = ObserveGoalProgress(position, goal, grounded, now);
@@ -179,38 +208,70 @@ internal sealed class CompanionFollowNavigation
             _cursor = 0;
             _nextPlanAt = 0f;
             _recoveryAttempts++;
+            _searchPending = false;
+            _planner.Reset();
         }
 
+        var validatedCursor = -1;
+        var validationDeferred = false;
         while (_cursor < _route.Length &&
                Flat(_route[_cursor] - position).magnitude <= 0.45f &&
                Mathf.Abs(_route[_cursor].y - position.y) <= 0.9f)
         {
+            if (_cursor + 1 < _route.Length)
+            {
+                var clear = SegmentClear(position, _route[_cursor + 1]);
+                if (_budgetAvailable != null && !_budgetAvailable())
+                {
+                    validationDeferred = true;
+                    break;
+                }
+                if (!clear)
+                    break;
+                validatedCursor = _cursor + 1;
+            }
             _cursor++;
             _observingProgress = false;
         }
 
-        if (_cursor < _route.Length &&
-            !SegmentClear(position, _route[_cursor]))
+        if (_cursor < _route.Length && validatedCursor != _cursor && !validationDeferred)
         {
-            _route = Array.Empty<Vector3>();
-            _cursor = 0;
+            var clear = SegmentClear(position, _route[_cursor]);
+            validationDeferred = _budgetAvailable != null && !_budgetAvailable();
+            if (!clear && !validationDeferred)
+            {
+                _route = Array.Empty<Vector3>();
+                _cursor = 0;
+            }
         }
 
-        if (_cursor >= _route.Length && now >= _nextPlanAt)
+        if (_cursor >= _route.Length && now >= _nextPlanAt && !_externalSearchPending)
         {
             _nextPlanAt = now + 0.8f;
-            var offset = goal - position;
-            var horizontal = Flat(offset).magnitude;
-            var localGoal = horizontal > 5.5f
-                ? position + offset * (5.5f / horizontal) : goal;
-            var sampledGoal = _sampleGround(localGoal);
-            if (sampledGoal.HasValue && horizontal > 5.5f)
-                localGoal = sampledGoal.Value;
+            if (!_searchPending || Vector3.Distance(position, _searchStart) > 2f)
+            {
+                _planner.Reset();
+                _searchStart = position;
+                var offset = goal - position;
+                var horizontal = Flat(offset).magnitude;
+                _searchGoal = horizontal > 5.5f
+                    ? position + offset * (5.5f / horizontal) : goal;
+                var sampledGoal = _sampleGround(_searchGoal);
+                if (sampledGoal.HasValue && horizontal > 5.5f)
+                    _searchGoal = sampledGoal.Value;
+            }
             PlanCount++;
             _escapeRoute = !_planner.TryPlan(
-                position, localGoal, _sampleGround, SegmentClear, out _route);
+                _searchStart, _searchGoal, _sampleGround, SegmentClear, _budgetAvailable, out _route);
+            _searchPending = _planner.LastStatus == "query_budget";
             _cursor = 0;
-            if (_escapeRoute)
+            if (_searchPending)
+            {
+                _nextPlanAt = now;
+                _lastDirection = _lastDirection.sqrMagnitude > 0.001f
+                    ? _lastDirection : Flat(goal - position).normalized;
+            }
+            else if (_escapeRoute)
                 FindEscape(position, goal);
         }
 
@@ -229,7 +290,9 @@ internal sealed class CompanionFollowNavigation
         SetProgressTarget(position, target, now);
         _lastDirection = direction;
         RememberApproach(position, goal, direction, now);
-        var mode = _cursor >= _route.Length ? "attempt"
+        var mode = validationDeferred ? "validation_pending"
+            : _searchPending || _externalSearchPending ? "search_pending"
+            : _cursor >= _route.Length ? "attempt"
             : _escapeRoute ? "escape" : _route.Length > 1 ? "detour" : "direct";
         return new CompanionNavigationStep(direction, mode, stalled, requestJump, goalStalled);
     }
@@ -244,7 +307,24 @@ internal sealed class CompanionFollowNavigation
             _bestGoalDistance = distance;
             _goalProgressAt = now;
             _hasApproach = false;
+            _observedRoute = null;
             return false;
+        }
+        if (grounded && !_escapeRoute && _cursor < _route.Length)
+        {
+            var remaining = Vector3.Distance(position, _route[_cursor]);
+            for (var index = _cursor + 1; index < _route.Length; index++)
+                remaining += Vector3.Distance(_route[index - 1], _route[index]);
+            if (!ReferenceEquals(_observedRoute, _route))
+            {
+                _observedRoute = _route;
+                _bestRouteRemaining = remaining;
+            }
+            else if (remaining < _bestRouteRemaining - GoalProgressDistance)
+            {
+                _bestRouteRemaining = remaining;
+                _goalProgressAt = now;
+            }
         }
         if (distance < _bestGoalDistance - GoalProgressDistance)
         {

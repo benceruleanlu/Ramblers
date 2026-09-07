@@ -86,7 +86,7 @@ namespace Ramblers
             DropDoesNotRequestJump();
             TargetChangeRetainsAirborneDirection();
             TargetChangeRetainsPendingNativeLaunch();
-            MissedLandingApproachesEndpointWithoutRejump();
+            MissedLandingRetainsCrossingForRetry();
             RevisitingCompletedSequenceDoesNotRejump();
             ResetClearsCommitOwnership();
             ClockResetClearsOldFlight();
@@ -211,7 +211,7 @@ namespace Ramblers
                 "one-frame floor seam ended a pending jump");
             Expect(replay.JumpCommittedSequence == 0, "floor seam satisfied a jump marker");
             replay.Tick(point, Point(0.3f, 0.3f), false, 0.1f, Yes, out direction);
-            replay.Tick(point, Point(1.5f, 0f), true, 0.5f, Yes, out direction);
+            replay.Tick(point, Point(2f, 0f), true, 0.5f, Yes, out direction);
             Expect(replay.JumpCommittedSequence == 1, "real jump following a floor seam was lost");
         }
 
@@ -280,7 +280,7 @@ namespace Ramblers
             Expect(replay.TargetSequence == 1, "airborne onset adopted replacement target");
         }
 
-        private static void MissedLandingApproachesEndpointWithoutRejump()
+        private static void MissedLandingRetainsCrossingForRetry()
         {
             var replay = new CompanionTraversalReplay();
             var point = Jump(1, Point(0f, 0f), Point(3f, 0f));
@@ -290,11 +290,15 @@ namespace Ramblers
             replay.Tick(point, Point(0f, 0f), true, 0f, jump, out direction);
             replay.Tick(point, Point(0.2f, 0.2f), false, 0.1f, jump, out direction);
             replay.Tick(point, Point(1f, -1f), true, 0.5f, jump, out direction);
-            ExpectNear(replay.ApproachPosition.x, 3f, "missed landing sent body back to takeoff");
+            ExpectNear(replay.ApproachPosition.x, 0f, "missed landing lost the required takeoff");
             ExpectNear(replay.ApproachPosition.y, 0f, "missed landing substituted the current ground");
             Expect(!replay.Tick(point, Point(0f, 0f), true, 0.6f, jump, out direction),
-                "completed jump automatically relaunched after missing its landing");
-            Expect(requests == 1, "missed landing caused a repeated jump");
+                "missed jump bypassed its retry cooldown");
+            Expect(requests == 1 && replay.JumpCommittedSequence == 0,
+                "missed landing was marked successful");
+            Expect(replay.Tick(point, Point(0f, 0f), true, 0.9f, jump, out direction),
+                "missed landing could not retry from takeoff");
+            Expect(requests == 2, "missed landing failed to request a paced retry");
         }
 
         private static void RevisitingCompletedSequenceDoesNotRejump()

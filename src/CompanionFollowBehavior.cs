@@ -76,13 +76,15 @@ internal sealed class CompanionFollowBehavior
                 ? (Vector3?)grounded : null,
             (from, to) => !_locomotion.Geometry.QueryBudgetExhausted &&
                 _locomotion.Geometry.CanWalkSegment(from, to),
-            (from, to) => _locomotion.Geometry.IsSegmentClear(from, to));
+            (from, to) => _locomotion.Geometry.IsSegmentClear(from, to),
+            () => !_locomotion.Geometry.QueryBudgetExhausted);
         _routePlanner = new CompanionFollowRoutePlanner(
             candidate => !_locomotion.Geometry.QueryBudgetExhausted &&
                 _locomotion.Geometry.TryGroundPoint(candidate, out var grounded)
                 ? (Vector3?)grounded : null,
             (from, to) => !_locomotion.Geometry.QueryBudgetExhausted &&
-                _navigation.IsRouteSegmentAvailable(from, to));
+                _navigation.IsRouteSegmentAvailable(from, to),
+            () => !_locomotion.Geometry.QueryBudgetExhausted);
     }
 
     internal bool IsRequested => _followRequested;
@@ -402,6 +404,12 @@ internal sealed class CompanionFollowBehavior
             Mathf.Abs(humanGoal.y - position.y) <= HoldingVerticalTolerance &&
             _locomotion.Geometry.IsSegmentClear(position, humanGoal))
         {
+            if (_state != FollowState.Holding)
+            {
+                _trail.Clear();
+                _trail.Add(humanGoal, false, false);
+                _routePlanner.Reset();
+            }
             _currentTarget = humanGoal;
             _currentBreadcrumbSequence = 0;
             _lastRouteMode = "human:holding";
@@ -420,13 +428,15 @@ internal sealed class CompanionFollowBehavior
         if (_routeRevision != route.Revision)
         {
             _routeRevision = route.Revision;
-            _navigation.AcceptRoute(route.Destination, route.Hint.Sequence, route.Waypoints, now);
+            _navigation.AcceptRoute(route.Destination, route.Hint.Sequence, route.Waypoints, now,
+                route.SearchPending);
             if (Plugin.FollowDiagnosticsEnabled)
             {
                 Plugin.Logger.LogInfo("[FOLLOW] ROUTE_SELECTED " +
                     $"goal={humanGoal}, destination={route.Destination}, kind={route.Kind}, " +
                     $"hint={route.Hint.Sequence}, waypoints={route.Waypoints.Length}, " +
                     $"remaining={route.RemainingDistance:F2}, " +
+                    $"searchPending={route.SearchPending}, " +
                     $"nativeQueries={_locomotion.Geometry.NativeQueryCount - queriesBefore}.");
             }
         }
@@ -436,7 +446,7 @@ internal sealed class CompanionFollowBehavior
             return;
         }
         MoveToward(route.Destination, route.Hint.Sequence, humanDistance, now,
-            route.Kind.ToString().ToLowerInvariant());
+            route.Kind.ToString().ToLowerInvariant(), route.SearchPending);
     }
     private Vector3 ResolveHumanFollowPosition(PlayerCharacter human)
     {
@@ -456,7 +466,8 @@ internal sealed class CompanionFollowBehavior
             ? supported : position;
     }
 
-    private void MoveToward(Vector3 destination, int sequence, float humanDistance, float now, string source)
+    private void MoveToward(Vector3 destination, int sequence, float humanDistance, float now, string source,
+        bool searchPending)
     {
         var position = _body.Position;
         _lastTargetHorizontalDistance = BreadcrumbTrail.HorizontalDistance(position, destination);
@@ -469,7 +480,7 @@ internal sealed class CompanionFollowBehavior
         var navigationMilliseconds = (System.Diagnostics.Stopwatch.GetTimestamp() - navigationStarted) *
                                      1000.0 / System.Diagnostics.Stopwatch.Frequency;
         var nativeQueries = _locomotion.Geometry.NativeQueryCount - queriesBefore;
-        if (step.GoalStalled)
+        if (step.GoalStalled && !searchPending)
         {
             _routePlanner.ReportFailure(now);
             Plugin.Logger.LogInfo("[FOLLOW] ROUTE_RECONSIDERED " +
@@ -512,10 +523,14 @@ internal sealed class CompanionFollowBehavior
                 _routePlanner.Reset();
                 _locomotion.Stop(now);
             }
+            else if (wasActive)
+            {
+                _routePlanner.Reconsider();
+            }
             if (wasActive)
             {
                 Plugin.Logger.LogInfo("[FOLLOW] TRAVERSAL_SETTLED " +
-                    $"outcome={(completed ? "landed" : "launch_retry")}, " +
+                    $"outcome={(completed ? "landed" : "retry")}, " +
                     $"breadcrumb={point.Sequence}, jump={_jumpCommittedSequence}, drop={_dropCommittedSequence}, " +
                     $"position={_body.Position}, landing={point.Position}.");
             }
