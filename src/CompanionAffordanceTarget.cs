@@ -119,6 +119,10 @@ internal sealed class CompanionAffordanceCandidates
                 out humanReference,
                 out humanReferenceError);
         }
+        CompanionReferenceDiagnostics.LogBinding(
+            humanCastableTarget,
+            humanReference,
+            humanReferenceError);
 
         CompanionAffordanceTarget companionHeldItem;
         string companionHeldItemError;
@@ -483,6 +487,8 @@ internal sealed class CompanionAffordanceTarget
         castableTarget = human.caster.castableTarget;
         if (CompanionAffordanceDriverUtility.IsAvailable(castableTarget))
         {
+            CompanionReferenceDiagnostics.LogGaze(
+                human, body, "stock_castable", null, castableTarget, null);
             Plugin.Logger.LogInfo(
                 $"[INTERACT] WORLD_REFERENCE_CAPTURED source=stock_castable," +
                 $" instanceId={castableTarget.GetInstanceID()}.");
@@ -493,12 +499,15 @@ internal sealed class CompanionAffordanceTarget
         if (view == null || view.forward.sqrMagnitude < 0.0001f)
         {
             error = "human_view_unavailable";
+            CompanionReferenceDiagnostics.LogGaze(
+                human, body, "extended_gaze", null, null, error);
             return false;
         }
 
+        GameObject hitObject = null;
         try
         {
-            var hitObject = human.caster.CastThroughHands(
+            hitObject = human.caster.CastThroughHands(
                 new Ray(view.position, view.forward.normalized),
                 HumanGazeCastDistance);
             castableTarget = hitObject == null
@@ -511,6 +520,8 @@ internal sealed class CompanionAffordanceTarget
                 $"[INTERACT] WORLD_REFERENCE_CAPTURE_FAILED " +
                 $"source=extended_gaze, error={exception.Message}");
             error = "human_interaction_reference_unavailable";
+            CompanionReferenceDiagnostics.LogGaze(
+                human, body, "extended_gaze", hitObject, castableTarget, error);
             return false;
         }
 
@@ -518,9 +529,13 @@ internal sealed class CompanionAffordanceTarget
         {
             castableTarget = null;
             error = "human_reference_not_interactable";
+            CompanionReferenceDiagnostics.LogGaze(
+                human, body, "extended_gaze", hitObject, null, error);
             return false;
         }
 
+        CompanionReferenceDiagnostics.LogGaze(
+            human, body, "extended_gaze", hitObject, castableTarget, null);
         Plugin.Logger.LogInfo(
             $"[INTERACT] WORLD_REFERENCE_CAPTURED source=extended_gaze," +
             $" instanceId={castableTarget.GetInstanceID()}," +
@@ -843,7 +858,7 @@ internal sealed class CompanionAffordanceTarget
                castableTarget.GetInstanceID() == instanceId;
     }
 
-    private static Transform ResolveHumanViewTransform(PlayerCharacter human)
+    internal static Transform ResolveHumanViewTransform(PlayerCharacter human)
     {
         if (human != null && human.cameraMinder != null)
         {
