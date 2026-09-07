@@ -33,7 +33,6 @@ internal sealed class CompanionLocomotion
     private const float ObstacleProbeDistance = 1.5f;
     internal const float MinimumClearance = 0.7f;
     private const float MinimumGroundResponse = 0.08f;
-    private const float WalkableSweepNormalY = 0.7f;
     private const float AvoidanceSideHold = 1.5f;
     private const float StuckObservationWindow = 2.5f;
     private const float StuckMovementThreshold = 0.15f;
@@ -57,6 +56,7 @@ internal sealed class CompanionLocomotion
     };
 
     private readonly LogLatch _stuckWarningLog = new LogLatch();
+    private readonly CompanionNavigationGeometry _geometry = new CompanionNavigationGeometry();
 
     private CompanionBody _body;
     private Vector3 _lastMovementIntent;
@@ -106,6 +106,7 @@ internal sealed class CompanionLocomotion
     internal float LastSteepScalar => _lastSteepScalar;
     internal string LastDirectHit => _lastDirectHit;
     internal string LastProbeSummary => _lastProbeSummary;
+    internal CompanionNavigationGeometry Geometry => _geometry;
 
     internal string DescribeGait()
     {
@@ -141,6 +142,7 @@ internal sealed class CompanionLocomotion
     internal void Bind(CompanionBody body, float now)
     {
         _body = body;
+        _geometry.Bind(body);
         _lastMovementIntent = Vector3.zero;
         _avoidanceSign = 0;
         _lastSteeringAngle = 0f;
@@ -161,6 +163,7 @@ internal sealed class CompanionLocomotion
 
     internal void Release()
     {
+        _geometry.Release();
         _body = null;
         _lastMovementIntent = Vector3.zero;
         _avoidanceSign = 0;
@@ -245,16 +248,28 @@ internal sealed class CompanionLocomotion
 
     internal SteeringStatus CommitTraversalDirection(
         Vector3 desiredDirection,
-        float pathDistance)
+        float pathDistance,
+        float targetSpeed = 0f)
     {
         var status = default(SteeringStatus);
         desiredDirection.y = 0f;
         if (desiredDirection.sqrMagnitude < 0.0001f)
+        {
+            SetMovementIntent(Vector3.zero);
+            SetMovementGait(MovementGait.Stopped);
+            _lastCommandedSpeed = 0f;
             return status;
+        }
 
         desiredDirection.Normalize();
         MovementGait requestedGait;
         var gaitSpeed = PreviewMovementSpeed(pathDistance, out requestedGait);
+        if (targetSpeed > 0f)
+        {
+            gaitSpeed = Mathf.Min(targetSpeed, RunSpeed);
+            requestedGait = gaitSpeed > WalkSpeed * 1.1f
+                ? MovementGait.Run : MovementGait.Walk;
+        }
         var probeDistance = Mathf.Max(
             ObstacleProbeDistance,
             gaitSpeed * BrakingLookahead);
@@ -290,6 +305,16 @@ internal sealed class CompanionLocomotion
         status.DirectGroundLimited = directGroundLimited;
         status.GroundResponse = groundResponse;
         status.SteepScalar = steepScalar;
+        return status;
+    }
+
+    internal SteeringStatus MoveAlongRoute(
+        Vector3 direction,
+        float distance,
+        float now)
+    {
+        var status = CommitTraversalDirection(direction, distance);
+        _lastSteeringAuthority = "local_route";
         return status;
     }
 
@@ -341,7 +366,7 @@ internal sealed class CompanionLocomotion
         {
             Plugin.Logger.LogInfo(
                 "[FOLLOW] GAIT run " +
-                $"trailDistance={pathDistance:F2}; latched until the next complete stop.");
+                $"trailDistance={pathDistance:F2}.");
         }
         else
         {
@@ -477,7 +502,8 @@ internal sealed class CompanionLocomotion
         }
 
         _lastProbeSummary = probeSummary.ToString();
-        if (Mathf.Abs(steeringAngle) < 179f)
+        if (Mathf.Abs(steeringAngle) < 179f &&
+            (now >= _avoidanceSignUntil || _avoidanceSign == 0))
         {
             _avoidanceSign = steeringAngle > 0f ? 1 : -1;
             _avoidanceSignUntil = now + AvoidanceSideHold;
@@ -499,7 +525,11 @@ internal sealed class CompanionLocomotion
             return 0f;
 
         direction.Normalize();
-        var response = ground.GetSlopedMoveForce(direction, out steepScalar);
+        var kernal = _body.Character.kernal;
+        var localDirection = kernal == null
+            ? direction
+            : kernal.InverseTransformDirection(direction);
+        var response = ground.GetSlopedMoveForce(localDirection, out steepScalar);
         return response.magnitude;
     }
 
@@ -508,40 +538,7 @@ internal sealed class CompanionLocomotion
         if (_body == null || !_body.IsAlive)
             return false;
 
-        var delta = destination - _body.Position;
-        delta.y = 0f;
-        var distance = delta.magnitude;
-        if (distance < 0.05f)
-            return true;
-
-        var direction = delta / distance;
-        string ignoredHit;
-        return HasClearShortcutRay(direction, distance, 0.45f) &&
-               HasClearShortcutRay(direction, distance, 1.1f) &&
-               MeasureClearance(direction, distance, out ignoredHit) >=
-                   distance - 0.02f;
-    }
-
-    private bool HasClearShortcutRay(
-        Vector3 direction,
-        float distance,
-        float height)
-    {
-        var bodyCollider = _body.Character?.collision?.bodyCollider;
-        var bodyRadius = bodyCollider == null ? 0.25f : bodyCollider.radius;
-        var startOffset = Mathf.Min(distance, bodyRadius + 0.05f);
-        var remaining = distance - startOffset;
-        if (remaining <= 0.02f)
-            return true;
-
-        RaycastHit hit;
-        return !Physics.Raycast(
-            _body.Position + direction * startOffset + Vector3.up * height,
-            direction,
-            out hit,
-            remaining,
-            GetObstacleMask(_body.Character),
-            QueryTriggerInteraction.Ignore);
+        return _geometry.IsSegmentClear(_body.Position, destination);
     }
 
     private float MeasureClearance(
@@ -549,62 +546,11 @@ internal sealed class CompanionLocomotion
         float probeDistance,
         out string hitDescription)
     {
-        var rigidbody = _body.Character.rb;
-        if (rigidbody == null)
-        {
-            hitDescription = "no_rigidbody";
-            return probeDistance;
-        }
-
-        RaycastHit hit;
-        if (!rigidbody.SweepTest(
-                direction,
-                out hit,
-                probeDistance,
-                QueryTriggerInteraction.Ignore))
-        {
-            hitDescription = "clear";
-            return probeDistance;
-        }
-
-        var hitTransform = hit.collider == null ? null : hit.collider.transform;
-        if (_body != null && _body.Contains(hitTransform))
-        {
-            hitDescription = "ignored_self:" + DescribeHit(hit);
-            return probeDistance;
-        }
-
-        if (hit.normal.y >= WalkableSweepNormalY)
-        {
-            hitDescription = "ignored_walkable:" + DescribeHit(hit);
-            return probeDistance;
-        }
-
-        hitDescription = DescribeHit(hit);
-        return hit.distance;
-    }
-
-    private string DescribeHit(RaycastHit hit)
-    {
-        var collider = hit.collider;
-        if (collider == null)
-            return "unknown_collider";
-
-        var hitTransform = collider.transform;
-        var hitName = hitTransform == null
-            ? "unnamed"
-            : SanitizeProbeText(hitTransform.name);
-        var layer = collider.gameObject == null ? -1 : collider.gameObject.layer;
-        var self = _body != null && _body.Contains(hitTransform);
-        return $"{hitName}@layer{layer}:self={self}:normal={hit.normal}";
-    }
-
-    private static string SanitizeProbeText(string value)
-    {
-        if (string.IsNullOrEmpty(value))
-            return "unnamed";
-
-        return value.Replace(',', '_').Replace(';', '_').Replace(' ', '_');
+        return _geometry.MeasureClearance(
+            _body.Position,
+            direction,
+            probeDistance,
+            out hitDescription);
     }
 
     private static string FormatProbe(
@@ -651,6 +597,8 @@ internal sealed class CompanionLocomotion
         var stuck = movement < StuckMovementThreshold;
         if (stuck)
         {
+            _avoidanceSign = 0;
+            _avoidanceSignUntil = 0f;
             if (_stuckWarningLog.ShouldLog())
             {
                 Plugin.Logger.LogWarning(

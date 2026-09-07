@@ -18,18 +18,8 @@ internal sealed class CompanionFollowBehavior
     private const float ResumeDistance = 2.5f;
     private const float HoldingVerticalTolerance = 1.0f;
     private const float TrailResetDistance = 8f;
-    private const float JumpRiseThreshold = 0.45f;
-    private const float MeaningfulJumpLandingRise = 0.35f;
-    private const float JumpApproachDistance = 1.6f;
-    private const float BlockedJumpApproachDistance = 1.8f;
     private const float TraversalLookaheadDistance = 1.8f;
     private const float TraversalLookaheadVerticalTolerance = 1.0f;
-    private const float DropCommitDepth = 0.45f;
-    private const float DropCommitApproachDistance = 1.8f;
-    private const float DropDirectionCommitSeconds = 1.25f;
-    private const float TraversalDirectionCommitSeconds = 1.25f;
-    private const float RecoveryDirectionCommitSeconds = 0.45f;
-    private const int MaximumJumpAttemptsPerBreadcrumb = 2;
     private const float StatusLogInterval = 1f;
     private const int MaximumBreadcrumbs = 1024;
 
@@ -49,6 +39,10 @@ internal sealed class CompanionFollowBehavior
     private readonly CompanionLocomotion _locomotion;
     private readonly CompanionAttention _attention;
     private readonly CompanionJumpActuator _jump;
+    private readonly CompanionTraversalRecorder _traversalRecorder = new CompanionTraversalRecorder();
+    private readonly CompanionTraversalReplay _replay = new CompanionTraversalReplay();
+    private readonly CompanionFollowNavigation _navigation;
+    private BreadcrumbPoint _activeTraversalPoint;
 
     private CompanionBody _body;
     private PlayerCharacter _humanAtSpawn;
@@ -62,20 +56,13 @@ internal sealed class CompanionFollowBehavior
     private float _followStartedAt;
     private float _nextStatusLog;
     private string _suspensionReason;
-    private bool _humanWasGrounded;
     private bool _humanJumpInProgress;
     private Vector3 _humanJumpTakeoffPosition;
-    private float _humanJumpPeakY;
-    private bool _pendingHumanDrop;
     private bool _bodyIsCarried;
     private bool _bodyCarriesHuman;
     private int _currentBreadcrumbSequence;
     private int _jumpCommittedSequence;
-    private int _jumpAttemptsForBreadcrumb;
     private int _dropCommittedSequence;
-    private float _directTraversalUntil;
-    private Vector3 _committedTraversalDirection;
-    private int _committedTraversalSequence;
     private Vector3 _lastRouteDirection;
     private string _lastRouteMode = "waypoint";
     private float _lastTargetHorizontalDistance;
@@ -88,6 +75,10 @@ internal sealed class CompanionFollowBehavior
         _locomotion = locomotion;
         _attention = attention;
         _jump = jump;
+        _navigation = new CompanionFollowNavigation(
+            candidate => _locomotion.Geometry.TryGroundPoint(candidate, out var grounded)
+                ? grounded : candidate,
+            (from, to) => _locomotion.Geometry.IsSegmentClear(from, to));
     }
 
     internal bool IsRequested => _followRequested;
@@ -131,7 +122,7 @@ internal sealed class CompanionFollowBehavior
         if (UpdateCarryState(now))
             return;
 
-        ObserveHumanTraversal();
+        ObserveHumanTraversal(now);
         if (now < _nextTrailSample)
             return;
         _nextTrailSample = now + TrailSampleInterval;
@@ -368,11 +359,11 @@ internal sealed class CompanionFollowBehavior
             $"walkSpeed={_locomotion.WalkSpeed:F2}, runSpeed={_locomotion.RunSpeed:F2}, " +
             $"gaitSpeedsFromTunings={_locomotion.GaitSpeedsFromTunings}, " +
             $"posture={CompanionPostureActuator.Describe(_locomotion.Posture)}, " +
-            $"runStartDistance={CompanionLocomotion.RunStartDistance:F2}, runLatchesUntilStop=true, " +
+            $"runStartDistance={CompanionLocomotion.RunStartDistance:F2}, recordedTraversalPace=true, " +
             $"bodyTurnSpeed={CompanionFacing.BodyTurnSpeed:F0}, lookLimitsFromTunings=true, " +
-            "verticalAwareTrail=true, jumpReplay=landing_outcome, dropReplay=true, " +
-            "traversalLookahead=true, carryRebase=true, slopeAwareSteering=true, " +
-            "walkableSweepFiltering=true, " +
+            "verticalAwareTrail=true, jumpReplay=takeoff_and_landing, dropReplay=true, " +
+            "localRouteSearch=true, failedDirectionMemory=true, carryRebase=true, " +
+            "allHitCollisionQueries=true, footprintSupport=true, " +
             $"navigationHz={1f / NavigationInterval:F0}, obstacleMask={obstacleMask}, " +
             $"bodyRadius={(bodyCollider == null ? -1f : bodyCollider.radius):F2}, " +
             $"bodyHeight={(bodyCollider == null ? -1f : bodyCollider.height):F2}.");
@@ -384,557 +375,183 @@ internal sealed class CompanionFollowBehavior
         if (human == null)
         {
             StopForState(FollowState.Blocked, now);
-            Plugin.Logger.LogWarning("[FOLLOW] BLOCKED local human player is unavailable.");
             return;
         }
 
-        var botPosition = _body.Position;
+        var position = _body.Position;
         var humanPosition = human.transform.position;
         var routeEndpoint = _humanJumpInProgress
-            ? _humanJumpTakeoffPosition
-            : humanPosition;
-        _attention.SetTarget(
-            GazeChannel.Follow,
-            CompanionBody.HeadPositionOf(human));
-        var humanDistance = Vector3.Distance(botPosition, humanPosition);
-        var routeVerticalDistance = Mathf.Abs(routeEndpoint.y - botPosition.y);
-        var routeDistanceBeforePruning = _trail.MeasureDistance(
-            botPosition,
-            routeEndpoint);
-        var holdDistance = _state == FollowState.Holding
-            ? ResumeDistance
-            : FollowDistance;
-        if (routeDistanceBeforePruning <= holdDistance &&
-            routeVerticalDistance <= HoldingVerticalTolerance)
+            ? _humanJumpTakeoffPosition : humanPosition;
+        var humanDistance = Vector3.Distance(position, humanPosition);
+        _attention.SetTarget(GazeChannel.Follow, CompanionBody.HeadPositionOf(human));
+        _lastTrailDistance = _trail.MeasureDistance(position, routeEndpoint);
+
+        if (_replay.Active && TryReplayTraversal(_activeTraversalPoint, now))
+        {
+            LogFollowStatusIfDue(now, humanDistance, Vector3.Distance(position, _currentTarget));
+            return;
+        }
+
+        var holdDistance = _state == FollowState.Holding ? ResumeDistance : FollowDistance;
+        if (_lastTrailDistance <= holdDistance &&
+            Mathf.Abs(routeEndpoint.y - position.y) <= HoldingVerticalTolerance)
         {
             StopForState(FollowState.Holding, now);
             LogFollowStatusIfDue(now, humanDistance, 0f);
             return;
         }
 
-        BreadcrumbPoint lastRemoved;
-        bool crossedPointPlane;
-        var removedBreadcrumbs = _trail.RemoveReached(
-            botPosition,
-            BreadcrumbArrivalTolerance,
-            BreadcrumbArrivalVerticalTolerance,
-            BreadcrumbPassLateralTolerance,
-            IsBodyGrounded,
-            _jumpCommittedSequence,
-            _dropCommittedSequence,
-            out lastRemoved,
-            out crossedPointPlane);
-        if (crossedPointPlane)
+        if (IsBodyGrounded)
         {
-            Plugin.Logger.LogInfo(
-                "[FOLLOW] ROUTE_ADVANCE reason=passed_plane " +
-                $"removed={removedBreadcrumbs}, last={lastRemoved.Sequence}, " +
-                $"position={botPosition}, waypoint={lastRemoved.Position}, " +
-                $"travelDirection={lastRemoved.TravelDirection}.");
-        }
-
-        var shortcutFirst = default(BreadcrumbPoint);
-        var shortcutLast = default(BreadcrumbPoint);
-        var shortcutRemoved = IsBodyGrounded
-            ? _trail.RemoveThroughLatestNearby(
-                botPosition,
-                RouteShortcutHorizontalTolerance,
-                BreadcrumbArrivalVerticalTolerance,
-                _jumpCommittedSequence,
-                _dropCommittedSequence,
-                IsRouteShortcutTraversable,
-                out shortcutFirst,
-                out shortcutLast)
-            : 0;
-        if (shortcutRemoved > 0)
-        {
-            _directTraversalUntil = 0f;
-            _committedTraversalDirection = Vector3.zero;
-            _committedTraversalSequence = 0;
-            _locomotion.ResetProgressObservation(now);
-            Plugin.Logger.LogInfo(
-                "[FOLLOW] ROUTE_SHORTCUT reason=later_breadcrumb_nearby " +
-                $"removed={shortcutRemoved}, first={shortcutFirst.Sequence}, " +
-                $"last={shortcutLast.Sequence}, remaining={_trail.Count}, " +
-                $"position={botPosition}.");
+            _trail.RemoveReached(position, BreadcrumbArrivalTolerance,
+                BreadcrumbArrivalVerticalTolerance, BreadcrumbPassLateralTolerance,
+                true, _jumpCommittedSequence, _dropCommittedSequence,
+                out var lastRemoved, out var crossedPlane,
+                point => _locomotion.Geometry.IsSegmentClear(position, point));
+            var removed = _trail.RemoveThroughLatestNearby(position,
+                RouteShortcutHorizontalTolerance, BreadcrumbArrivalVerticalTolerance,
+                _jumpCommittedSequence, _dropCommittedSequence,
+                point => _locomotion.Geometry.IsSegmentClear(position, point),
+                out var shortcutFirst, out var shortcutLast);
+            if (removed > 0)
+            {
+                Plugin.Logger.LogInfo("[FOLLOW] ROUTE_SHORTCUT " +
+                    $"removed={removed}, first={shortcutFirst.Sequence}, last={shortcutLast.Sequence}.");
+            }
         }
         if (_trail.Count == 0)
             _trail.Add(routeEndpoint, false, false);
 
-        var breadcrumb = SelectTraversalLookahead(botPosition);
-        SelectBreadcrumb(breadcrumb, now);
-        _currentTarget = breadcrumb.Position;
-        var toTarget = _currentTarget - botPosition;
-        var targetVerticalDelta = toTarget.y;
-        toTarget.y = 0f;
-        var targetHorizontalDistance = toTarget.magnitude;
-        _lastTargetHorizontalDistance = targetHorizontalDistance;
-        var targetDistance = Vector3.Distance(botPosition, _currentTarget);
-        var desiredDirection = ResolveRouteDirection(
-            botPosition,
-            routeEndpoint,
-            breadcrumb,
-            now);
-        if (desiredDirection.sqrMagnitude < 0.0001f)
+        var breadcrumb = _trail.Peek();
+        if (!breadcrumb.RequiresJump && !breadcrumb.RequiresDrop &&
+            _trail.TryPeek(1, out var next) && next.HasTakeoff &&
+            BreadcrumbTrail.HorizontalDistance(position, breadcrumb.Position) <= TraversalLookaheadDistance &&
+            Mathf.Abs(position.y - breadcrumb.Position.y) <= TraversalLookaheadVerticalTolerance)
         {
-            StopForState(FollowState.Blocked, now);
-            Plugin.Logger.LogWarning(
-                "[FOLLOW] BLOCKED route has vertical separation but no " +
-                $"horizontal exit direction. target={_currentTarget}, " +
-                $"verticalDelta={targetVerticalDelta:F2}.");
-            return;
+            _trail.TryRemoveFirst(out var skipped);
+            breadcrumb = next;
         }
-
-        desiredDirection.Normalize();
-        _lastRouteDirection = desiredDirection;
-        var trailDistance = _trail.MeasureDistance(botPosition, routeEndpoint);
-        _lastTrailDistance = trailDistance;
-
-        var previousState = _state;
-        var previousAngle = _locomotion.LastSteeringAngle;
-        SteeringStatus status;
-        if (now >= _directTraversalUntil)
-        {
-            _committedTraversalDirection = Vector3.zero;
-            _committedTraversalSequence = 0;
-        }
-        var usedTraversalCommit = now < _directTraversalUntil;
-        if (usedTraversalCommit && !IsBodyGrounded)
-            _lastRouteMode = "airborne_commit";
-        if (!usedTraversalCommit)
-        {
-            var jumpReason = breadcrumb.RequiresJump &&
-                             breadcrumb.Sequence != _jumpCommittedSequence &&
-                             targetHorizontalDistance <= JumpApproachDistance
-                ? "recorded_human_jump"
-                : targetVerticalDelta >= JumpRiseThreshold &&
-                  targetHorizontalDistance <= JumpApproachDistance
-                    ? "rising_breadcrumb"
-                    : null;
-            if (jumpReason != null &&
-                TryCommitTraversalJump(
-                    now,
-                    breadcrumb,
-                    jumpReason,
-                    desiredDirection,
-                    targetHorizontalDistance,
-                    targetVerticalDelta))
-            {
-                usedTraversalCommit = true;
-            }
-        }
-
-        var recordedDrop = breadcrumb.RequiresDrop &&
-                           breadcrumb.Sequence != _dropCommittedSequence;
-        if (IsBodyGrounded &&
-            (recordedDrop || targetVerticalDelta <= -DropCommitDepth) &&
-            targetHorizontalDistance <= DropCommitApproachDistance)
-        {
-            _directTraversalUntil = Mathf.Max(
-                _directTraversalUntil,
-                now + DropDirectionCommitSeconds);
-            _committedTraversalDirection = desiredDirection;
-            _committedTraversalSequence = breadcrumb.Sequence;
-            usedTraversalCommit = true;
-            if (_dropCommittedSequence != breadcrumb.Sequence)
-            {
-                _dropCommittedSequence = breadcrumb.Sequence;
-                Plugin.Logger.LogInfo(
-                    "[FOLLOW] DROP_COMMIT " +
-                    $"breadcrumb={breadcrumb.Sequence}, " +
-                    $"reason={(recordedDrop ? "recorded_human_drop" : "descending_breadcrumb")}, " +
-                    $"horizontalDistance={targetHorizontalDistance:F2}, " +
-                    $"verticalDelta={targetVerticalDelta:F2}, " +
-                    $"travelDirection={breadcrumb.TravelDirection}.");
-            }
-        }
-
-        if (usedTraversalCommit)
-        {
-            status = _locomotion.CommitTraversalDirection(
-                _committedTraversalDirection,
-                trailDistance);
-        }
-        else if (!_locomotion.TrySteerToward(
-                     desiredDirection,
-                     trailDistance,
-                     now,
-                     out status))
-        {
-            if (targetHorizontalDistance <= BlockedJumpApproachDistance &&
-                targetVerticalDelta >= -BreadcrumbArrivalVerticalTolerance &&
-                TryCommitTraversalJump(
-                    now,
-                    breadcrumb,
-                    "blocked_route",
-                    desiredDirection,
-                    targetHorizontalDistance,
-                    targetVerticalDelta))
-            {
-                usedTraversalCommit = true;
-                status = _locomotion.CommitTraversalDirection(
-                    desiredDirection,
-                    trailDistance);
-            }
-            else
-            {
-                var stateChanged = _state != FollowState.Blocked;
-                StopForState(FollowState.Blocked, now);
-                if (stateChanged)
-                {
-                    Plugin.Logger.LogWarning(
-                        "[FOLLOW] BLOCKED " +
-                        $"target={_currentTarget}, targetDistance={targetDistance:F2}, " +
-                        $"targetVerticalDelta={targetVerticalDelta:F2}, " +
-                        $"humanDistance={humanDistance:F2}; no steering candidate had " +
-                        $"{CompanionLocomotion.MinimumClearance:F2}m clearance and " +
-                        "no grounded traversal jump was available. No teleport attempted.");
-                }
-                LogFollowStatusIfDue(now, humanDistance, targetDistance);
-                return;
-            }
-        }
-
-        _state = FollowState.Following;
-        if (!usedTraversalCommit &&
-            status.DirectPathBlocked &&
-            (previousState != FollowState.Following ||
-             Mathf.Abs(previousAngle - status.SteeringAngle) >= 1f))
-        {
-            Plugin.Logger.LogInfo(
-                "[FOLLOW] AVOID " +
-                $"steeringAngle={status.SteeringAngle:F0}, clearance={status.Clearance:F2}, " +
-                $"groundLimited={status.DirectGroundLimited}, " +
-                $"groundResponse={status.GroundResponse:F2}, steepScalar={status.SteepScalar:F2}, " +
-                $"target={_currentTarget}, targetDistance={targetDistance:F2}.");
-        }
-        else if (!status.DirectPathBlocked && previousState == FollowState.Blocked)
-        {
-            Plugin.Logger.LogInfo("[FOLLOW] Path clear; resuming breadcrumb follow.");
-        }
-
-        var stuck = _locomotion.ObserveProgress(now);
-        if (stuck &&
-            targetVerticalDelta >= -BreadcrumbArrivalVerticalTolerance &&
-            TryCommitTraversalJump(
-                now,
-                breadcrumb,
-                "stuck_recovery",
-                desiredDirection,
-                targetHorizontalDistance,
-                targetVerticalDelta))
-        {
-            _locomotion.CommitTraversalDirection(
-                desiredDirection,
-                trailDistance);
-            _locomotion.ResetProgressObservation(now);
-        }
-        LogFollowStatusIfDue(now, humanDistance, targetDistance);
-    }
-
-    private bool IsRouteShortcutTraversable(Vector3 point)
-    {
-        if (_body == null || !_body.IsAlive)
-            return false;
-        return _locomotion.CanShortcutSegment(point);
-    }
-
-    private BreadcrumbPoint SelectTraversalLookahead(Vector3 botPosition)
-    {
-        var current = _trail.Peek();
-        if (current.RequiresJump || current.RequiresDrop)
-            return current;
-
-        BreadcrumbPoint next;
-        if (!_trail.TryPeek(1, out next) ||
-            (!next.RequiresJump && !next.RequiresDrop))
-        {
-            return current;
-        }
-
-        var horizontalDistance = BreadcrumbTrail.HorizontalDistance(
-            botPosition,
-            current.Position);
-        var verticalDistance = Mathf.Abs(botPosition.y - current.Position.y);
-        if (horizontalDistance > TraversalLookaheadDistance ||
-            verticalDistance > TraversalLookaheadVerticalTolerance)
-        {
-            return current;
-        }
-
-        BreadcrumbPoint skipped;
-        if (!_trail.TryRemoveFirst(out skipped))
-            return current;
-
-        Plugin.Logger.LogInfo(
-            "[FOLLOW] TRAVERSAL_LOOKAHEAD " +
-            $"skipped={skipped.Sequence}, selected={next.Sequence}, " +
-            $"kind={(next.RequiresJump ? "jump" : "drop")}, " +
-            $"approachDistance={horizontalDistance:F2}, " +
-            $"travelDirection={next.TravelDirection}.");
-        return next;
-    }
-
-    private Vector3 ResolveRouteDirection(
-        Vector3 botPosition,
-        Vector3 humanPosition,
-        BreadcrumbPoint breadcrumb,
-        float now)
-    {
-        var traversalCommitted =
-            (breadcrumb.RequiresJump &&
-             breadcrumb.Sequence == _jumpCommittedSequence) ||
-            (breadcrumb.RequiresDrop &&
-             breadcrumb.Sequence == _dropCommittedSequence);
-        bool usingTravelDirection;
-        var direction = BreadcrumbTrail.ResolveTraversalApproachDirection(
-            botPosition,
-            breadcrumb,
-            traversalCommitted,
-            traversalCommitted && now < _directTraversalUntil,
-            JumpApproachDistance,
-            DropCommitApproachDistance,
-            out usingTravelDirection);
-        _lastRouteMode = usingTravelDirection
-            ? traversalCommitted ? "transition_commit" : "transition_tangent"
-            : breadcrumb.RequiresJump || breadcrumb.RequiresDrop
-                ? "transition_approach"
-                : "waypoint";
-        if (usingTravelDirection && !traversalCommitted)
-        {
-            var tangentDistance = BreadcrumbTrail.HorizontalDistance(
-                botPosition,
-                breadcrumb.Position);
-            var tangentCorridor = breadcrumb.RequiresDrop
-                ? DropCommitApproachDistance
-                : JumpApproachDistance;
-            Plugin.Logger.LogInfo(
-                "[FOLLOW] ROUTE_TANGENT " +
-                $"breadcrumb={breadcrumb.Sequence}, " +
-                $"kind={(breadcrumb.RequiresDrop ? "drop" : "jump")}, " +
-                $"horizontalDistance={tangentDistance.ToString("F3", System.Globalization.CultureInfo.InvariantCulture)}, " +
-                $"corridor={tangentCorridor.ToString("F3", System.Globalization.CultureInfo.InvariantCulture)}.");
-        }
-        if (direction.sqrMagnitude >= 0.0001f)
-            return direction;
-
-        BreadcrumbPoint next;
-        if (_trail.TryPeek(1, out next))
-        {
-            direction = next.Position - botPosition;
-            direction.y = 0f;
-            if (direction.sqrMagnitude >= 0.0001f)
-            {
-                _lastRouteMode = "lookahead";
-                return direction;
-            }
-        }
-
-        if (_lastRouteDirection.sqrMagnitude >= 0.0001f)
-        {
-            _lastRouteMode = "last_direction";
-            return _lastRouteDirection;
-        }
-
-        direction = humanPosition - botPosition;
-        direction.y = 0f;
-        if (direction.sqrMagnitude >= 0.0001f)
-        {
-            _lastRouteMode = "human_fallback";
-            return direction;
-        }
-
-        _lastRouteMode = "body_fallback";
-        direction = _body.Transform.forward;
-        direction.y = 0f;
-        return direction;
-    }
-
-    private void SelectBreadcrumb(BreadcrumbPoint breadcrumb, float now)
-    {
-        if (_currentBreadcrumbSequence == breadcrumb.Sequence)
-        {
-            if (BreadcrumbTrail.ShouldReleasePriorTraversalCommit(
-                    breadcrumb.Sequence,
-                    _committedTraversalSequence,
-                    IsBodyGrounded))
-            {
-                Plugin.Logger.LogInfo(
-                    "[FOLLOW] TRAVERSAL_COMMIT_RELEASED " +
-                    $"reason=landed_after_target_change, " +
-                    $"owner={_committedTraversalSequence}, " +
-                    $"target={breadcrumb.Sequence}.");
-                _directTraversalUntil = 0f;
-                _committedTraversalDirection = Vector3.zero;
-                _committedTraversalSequence = 0;
-            }
-            return;
-        }
-
         _currentBreadcrumbSequence = breadcrumb.Sequence;
-
-        var preserveAirborneCommit = !IsBodyGrounded &&
-                                     now < _directTraversalUntil &&
-                                     _committedTraversalDirection.sqrMagnitude >= 0.0001f;
-        if (!preserveAirborneCommit)
+        _currentTarget = breadcrumb.Position;
+        if ((breadcrumb.RequiresJump || breadcrumb.RequiresDrop) &&
+            TryReplayTraversal(breadcrumb, now))
         {
-            _directTraversalUntil = 0f;
-            _committedTraversalDirection = Vector3.zero;
-            _committedTraversalSequence = 0;
+            LogFollowStatusIfDue(now, humanDistance, Vector3.Distance(position, _currentTarget));
+            return;
         }
-        _jumpCommittedSequence = 0;
-        _jumpAttemptsForBreadcrumb = 0;
-        _dropCommittedSequence = 0;
+
+        var destination = breadcrumb.RequiresJump || breadcrumb.RequiresDrop
+            ? _replay.ApproachPosition : breadcrumb.Position;
+        _lastTargetHorizontalDistance = BreadcrumbTrail.HorizontalDistance(position, destination);
+        var previousPlan = _navigation.PlanCount;
+        var queriesBefore = _locomotion.Geometry.NativeQueryCount;
+        var navigationStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+        var step = _navigation.Tick(position, destination, breadcrumb.Sequence, IsBodyGrounded, now);
+        var navigationMilliseconds = (System.Diagnostics.Stopwatch.GetTimestamp() - navigationStarted) *
+                                     1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        var nativeQueries = _locomotion.Geometry.NativeQueryCount - queriesBefore;
+        _lastRouteDirection = step.Direction;
+        _lastRouteMode = step.Mode;
+        _locomotion.MoveAlongRoute(step.Direction, _lastTrailDistance, now);
+        _state = FollowState.Following;
+        if (step.RequestJump)
+            RequestTraversalJump(now, "navigation_recovery");
+        if ((Plugin.FollowDiagnosticsEnabled && previousPlan != _navigation.PlanCount) || step.Stalled)
+        {
+            Plugin.Logger.LogInfo("[FOLLOW] NAVIGATION " +
+                $"mode={step.Mode}, stalled={step.Stalled}, target={destination}, " +
+                $"plan={_navigation.PlanStatus}, nodes={_navigation.ExpandedNodes}, " +
+                $"queries={_navigation.QueryCount}, remaining={_navigation.WaypointsRemaining}, " +
+                $"nativeQueries={nativeQueries}, navigationMs={navigationMilliseconds:F2}, " +
+                $"failedDirections={_navigation.RememberedFailures}, direction={step.Direction}.");
+        }
+        LogFollowStatusIfDue(now, humanDistance, Vector3.Distance(position, destination));
     }
 
-    private bool TryCommitTraversalJump(
-        float now,
-        BreadcrumbPoint breadcrumb,
-        string reason,
-        Vector3 direction,
-        float horizontalDistance,
-        float verticalDelta)
+    private bool TryReplayTraversal(BreadcrumbPoint point, float now)
     {
-        if (_jumpAttemptsForBreadcrumb >= MaximumJumpAttemptsPerBreadcrumb)
-            return false;
-
-        string error;
-        if (!_jump.TryRequestTraversal(
-                now,
-                _locomotion.Posture,
-                reason,
-                out error))
+        var wasActive = _replay.Active;
+        var committed = _replay.Tick(point, _body.Position, IsBodyGrounded, now,
+            () => RequestTraversalJump(now, "recorded_human_jump"), out var direction);
+        _jumpCommittedSequence = _replay.JumpCommittedSequence;
+        _dropCommittedSequence = _replay.DropCommittedSequence;
+        if (!committed)
         {
+            if (wasActive)
+            {
+                var completed = _jumpCommittedSequence == point.Sequence ||
+                                _dropCommittedSequence == point.Sequence;
+                Plugin.Logger.LogInfo("[FOLLOW] TRAVERSAL_SETTLED " +
+                    $"outcome={(completed ? "landed" : "launch_retry")}, " +
+                    $"breadcrumb={point.Sequence}, jump={_jumpCommittedSequence}, drop={_dropCommittedSequence}, " +
+                    $"position={_body.Position}, landing={point.Position}.");
+            }
             return false;
         }
 
-        _jumpAttemptsForBreadcrumb++;
-        _jumpCommittedSequence = breadcrumb.Sequence;
-        var recovery = string.Equals(
-                           reason,
-                           "blocked_route",
-                           StringComparison.Ordinal) ||
-                       string.Equals(
-                           reason,
-                           "stuck_recovery",
-                           StringComparison.Ordinal);
-        var commitSeconds = recovery
-            ? RecoveryDirectionCommitSeconds
-            : TraversalDirectionCommitSeconds;
-        _directTraversalUntil = now + commitSeconds;
-        direction.y = 0f;
-        _committedTraversalDirection = direction.sqrMagnitude < 0.0001f
-            ? breadcrumb.TravelDirection
-            : direction.normalized;
-        _committedTraversalSequence = breadcrumb.Sequence;
-        _locomotion.ResetProgressObservation(now);
-        Plugin.Logger.LogInfo(
-            "[FOLLOW] JUMP_COMMIT " +
-            $"breadcrumb={breadcrumb.Sequence}, reason={reason}, " +
-            $"attempt={_jumpAttemptsForBreadcrumb}, " +
-            $"horizontalDistance={horizontalDistance:F2}, " +
-            $"verticalDelta={verticalDelta:F2}, " +
-            $"commitSeconds={commitSeconds:F2}.");
+        _activeTraversalPoint = point;
+        _currentTarget = point.Position;
+        _currentBreadcrumbSequence = point.Sequence;
+        _lastTargetHorizontalDistance = BreadcrumbTrail.HorizontalDistance(_body.Position, point.Position);
+        _lastRouteDirection = direction;
+        _lastRouteMode = IsBodyGrounded ? "traversal_launch" : "traversal_airborne";
+        _navigation.Pause();
+        var recordedSpeed = point.TraversalDuration > 0.05f
+            ? BreadcrumbTrail.HorizontalDistance(point.TakeoffPosition, point.Position) /
+              point.TraversalDuration : 0f;
+        _locomotion.CommitTraversalDirection(direction, _lastTrailDistance, recordedSpeed);
+        _state = FollowState.Following;
+        if (!wasActive)
+        {
+            Plugin.Logger.LogInfo("[FOLLOW] TRAVERSAL_LAUNCH " +
+                $"breadcrumb={point.Sequence}, kind={(point.RequiresJump ? "jump" : "drop")}, " +
+                $"takeoff={point.TakeoffPosition}, landing={point.Position}, direction={direction}, " +
+                $"recordedSpeed={recordedSpeed:F2}, commandedSpeed={_locomotion.LastCommandedSpeed:F2}.");
+        }
         return true;
+    }
+
+    private bool RequestTraversalJump(float now, string reason)
+    {
+        return _jump.TryRequestTraversal(now, _locomotion.Posture, reason, out var error);
     }
 
     private bool IsBodyGrounded =>
         _body?.Character?.ground != null &&
         _body.Character.ground.isGrounded;
 
-    private void ObserveHumanTraversal()
+    private void ObserveHumanTraversal(float now)
     {
         var human = GetHumanPlayer();
         if (human == null)
             return;
-
-        var grounded = human.ground != null && human.ground.isGrounded;
-        var justJumped = human.jumper != null && human.jumper.justJumped;
-        var position = human.transform.position;
-        var verticalVelocity = human.rb == null
-            ? 0f
-            : human.rb.linearVelocity.y;
-
-        if (_humanJumpInProgress)
-        {
-            _humanJumpPeakY = Mathf.Max(_humanJumpPeakY, position.y);
-            if (grounded && !_humanWasGrounded)
-            {
-                RecordHumanJumpLanding(position);
-                _humanJumpInProgress = false;
-            }
-        }
-        else if (_humanWasGrounded && !grounded)
-        {
-            var startedJump = justJumped || verticalVelocity > 0.25f;
-            if (startedJump)
-            {
-                _humanJumpInProgress = true;
-                _humanJumpTakeoffPosition = position;
-                _humanJumpPeakY = position.y;
-                _pendingHumanDrop = false;
-            }
-            else
-            {
-                _pendingHumanDrop = true;
-            }
-        }
-
-        _humanWasGrounded = grounded;
-    }
-
-    private void RecordHumanJumpLanding(Vector3 landingPosition)
-    {
-        var landingRise = landingPosition.y - _humanJumpTakeoffPosition.y;
-        var peakRise = _humanJumpPeakY - _humanJumpTakeoffPosition.y;
-        var horizontalTravel = BreadcrumbTrail.HorizontalDistance(
-            _humanJumpTakeoffPosition,
-            landingPosition);
-        var requiresJump = landingRise >= MeaningfulJumpLandingRise;
-
-        BreadcrumbPoint lastAdded;
-        var hasLast = _trail.TryGetLastAdded(out lastAdded);
-        var distanceFromTrail = hasLast
-            ? Vector3.Distance(landingPosition, lastAdded.Position)
-            : float.PositiveInfinity;
-        BreadcrumbPoint added = default(BreadcrumbPoint);
-        var addedLanding = requiresJump || distanceFromTrail >= BreadcrumbSpacing;
-        if (addedLanding)
-            added = _trail.Add(landingPosition, requiresJump, false);
-
-        if (requiresJump)
-        {
-            Plugin.Logger.LogInfo(
-                "[FOLLOW] TRAIL_JUMP_RETAINED " +
-                $"breadcrumb={added.Sequence}, landingRise={landingRise:F2}, " +
-                $"peakRise={peakRise:F2}, horizontalTravel={horizontalTravel:F2}, " +
-                $"takeoff={_humanJumpTakeoffPosition}, landing={landingPosition}.");
-        }
-        else
-        {
-            Plugin.Logger.LogInfo(
-                "[FOLLOW] TRAIL_JUMP_IGNORED reason=same_level_landing " +
-                $"landingRise={landingRise:F2}, peakRise={peakRise:F2}, " +
-                $"horizontalTravel={horizontalTravel:F2}, landingRecorded={addedLanding}.");
-        }
+        var completed = _traversalRecorder.Sample(human.transform.position,
+            human.ground != null && human.ground.isGrounded,
+            human.jumper != null && human.jumper.justJumped,
+            human.rb == null ? 0f : human.rb.linearVelocity.y, now, out var traversal);
+        _humanJumpInProgress = _traversalRecorder.TraversalInProgress;
+        _humanJumpTakeoffPosition = _traversalRecorder.TakeoffPosition;
+        if (!completed)
+            return;
+        var landing = _trail.AddTraversal(traversal.Takeoff, traversal.Landing,
+            traversal.RequiresJump, traversal.RequiresDrop, traversal.Duration);
+        Plugin.Logger.LogInfo("[FOLLOW] TRAIL_TRAVERSAL " +
+            $"breadcrumb={landing.Sequence}, kind={(traversal.RequiresJump ? "jump" : "drop")}, " +
+            $"takeoff={traversal.Takeoff}, landing={traversal.Landing}, " +
+            $"duration={traversal.Duration:F2}, peakRise={traversal.PeakRise:F2}, " +
+            $"horizontalDistance={traversal.HorizontalDistance:F2}.");
     }
 
     private void ResetTraversalState(PlayerCharacter human)
     {
-        _humanWasGrounded = human?.ground != null && human.ground.isGrounded;
+        _traversalRecorder.Reset();
+        _replay.Reset();
+        _navigation.Reset();
         _humanJumpInProgress = false;
-        _humanJumpTakeoffPosition = human == null
-            ? Vector3.zero
-            : human.transform.position;
-        _humanJumpPeakY = _humanJumpTakeoffPosition.y;
-        _pendingHumanDrop = false;
+        _humanJumpTakeoffPosition = human == null ? Vector3.zero : human.transform.position;
         _currentBreadcrumbSequence = 0;
         _jumpCommittedSequence = 0;
-        _jumpAttemptsForBreadcrumb = 0;
         _dropCommittedSequence = 0;
-        _directTraversalUntil = 0f;
-        _committedTraversalDirection = Vector3.zero;
-        _committedTraversalSequence = 0;
         _lastRouteDirection = Vector3.zero;
         _lastRouteMode = "waypoint";
         _lastTargetHorizontalDistance = 0f;
@@ -943,47 +560,25 @@ internal sealed class CompanionFollowBehavior
     private void RecordHumanTrail()
     {
         var human = GetHumanPlayer();
-        if (human == null)
+        if (human == null || _humanJumpInProgress)
             return;
-        if (_humanJumpInProgress)
-            return;
-
         var position = human.transform.position;
-        BreadcrumbPoint lastAdded;
-        if (!_trail.TryGetLastAdded(out lastAdded))
+        if (!_trail.TryGetLastAdded(out var lastAdded))
         {
             _trail.Add(position, false, false);
-            _pendingHumanDrop = false;
             return;
         }
-
         var distance = Vector3.Distance(position, lastAdded.Position);
         if (distance >= TrailResetDistance)
         {
             _trail.Clear();
+            ResetTraversalState(human);
             _trail.Add(position, false, false);
-            _pendingHumanDrop = false;
-            Plugin.Logger.LogWarning(
-                "[FOLLOW] TRAIL_RESET " +
-                $"human moved {distance:F2}m between samples; refusing to invent a traversable segment.");
+            Plugin.Logger.LogInfo($"[FOLLOW] TRAIL_REBASED humanDisplacement={distance:F2}.");
             return;
         }
-
-        if (distance < BreadcrumbSpacing)
-            return;
-
-        var added = _trail.Add(
-            position,
-            false,
-            _pendingHumanDrop);
-        if (_pendingHumanDrop)
-        {
-            Plugin.Logger.LogInfo(
-                "[FOLLOW] TRAIL_DROP " +
-                $"breadcrumb={added.Sequence}, position={added.Position}, " +
-                $"travelDirection={added.TravelDirection}.");
-        }
-        _pendingHumanDrop = false;
+        if (distance >= BreadcrumbSpacing)
+            _trail.Add(position, false, false);
     }
 
     private bool UpdateCarryState(float now)
@@ -1006,7 +601,7 @@ internal sealed class CompanionFollowBehavior
             var discardedBreadcrumbs = _trail.Count;
             _trail.Clear();
             _humanJumpInProgress = false;
-            _pendingHumanDrop = false;
+            ResetTraversalState(human);
             _jump.CancelFollow(isCarried
                 ? "companion was picked up"
                 : "companion picked up the human");
@@ -1019,10 +614,6 @@ internal sealed class CompanionFollowBehavior
             }
             else
             {
-
-                _directTraversalUntil = 0f;
-                _committedTraversalDirection = Vector3.zero;
-                _committedTraversalSequence = 0;
                 _state = carriedState;
             }
             _attention.ClearTarget(GazeChannel.Follow);
@@ -1115,12 +706,8 @@ internal sealed class CompanionFollowBehavior
     private void StopForState(FollowState state, float now)
     {
         _locomotion.Stop(now);
-        if (state != FollowState.Following)
-        {
-            _directTraversalUntil = 0f;
-            _committedTraversalDirection = Vector3.zero;
-            _committedTraversalSequence = 0;
-        }
+        _navigation.Pause();
+        _replay.CancelActive();
         _state = state;
     }
 
@@ -1140,7 +727,7 @@ internal sealed class CompanionFollowBehavior
         float humanDistance,
         float targetDistance)
     {
-        if (now < _nextStatusLog)
+        if (!Plugin.FollowDiagnosticsEnabled || now < _nextStatusLog)
             return;
 
         _nextStatusLog = now + StatusLogInterval;

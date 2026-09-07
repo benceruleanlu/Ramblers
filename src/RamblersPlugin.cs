@@ -15,12 +15,14 @@ public sealed class Plugin : BasePlugin
 {
     public const string Guid = "local.bigwalk.ramblers";
     public const string Name = "Ramblers";
-    public const string Version = "0.19.3";
+    public const string Version = "0.20.0";
 
     internal static ManualLogSource Logger = null;
     internal static ConfigEntry<bool> EnableRealtimeAgent = null;
     internal static ConfigEntry<string> OpenAIRealtimeModel = null;
     internal static ConfigEntry<bool> EnableCraneShortcut = null;
+    internal static ConfigEntry<bool> EnableFollowDiagnostics = null;
+    internal static bool FollowDiagnosticsEnabled => EnableFollowDiagnostics?.Value == true;
 
     public override void Load()
     {
@@ -42,6 +44,12 @@ public sealed class Plugin : BasePlugin
             false,
             "Enable F8 to move the host and Rambler beside the crane puzzle for testing.");
         Logger.LogInfo($"[QA] CRANE_SHORTCUT enabled={EnableCraneShortcut.Value}, hotkey=F8.");
+        EnableFollowDiagnostics = Config.Bind(
+            "Diagnostics",
+            "FollowNavigation",
+            false,
+            "Log detailed follow positions, route searches, geometry and native movement for testing.");
+        Logger.LogInfo($"[FOLLOW] DIAGNOSTICS enabled={FollowDiagnosticsEnabled}.");
         ClassInjector.RegisterTypeInIl2Cpp<CompanionController>();
         ClassInjector.RegisterTypeInIl2Cpp<RealtimeAgentBridge>();
 

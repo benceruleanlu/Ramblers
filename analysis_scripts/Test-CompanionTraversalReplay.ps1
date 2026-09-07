@@ -1,0 +1,31 @@
+#requires -Version 5.1
+
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$CompilerPath
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+$ramblersRoot = Split-Path -Parent $PSScriptRoot
+$probeOutputDirectory = Join-Path $env:TEMP "ramblers-traversal-replay-probe"
+$probeOutput = Join-Path $probeOutputDirectory "CompanionTraversalReplayProbe.exe"
+New-Item -ItemType Directory -Path $probeOutputDirectory -Force | Out-Null
+
+& $CompilerPath `
+    /nologo `
+    /target:exe `
+    /optimize+ `
+    "/out:$probeOutput" `
+    (Join-Path $ramblersRoot "src\BreadcrumbTrail.cs") `
+    (Join-Path $ramblersRoot "src\CompanionTraversalReplay.cs") `
+    (Join-Path $PSScriptRoot "CompanionTraversalReplayProbe.cs")
+if ($LASTEXITCODE -ne 0) {
+    throw "Traversal replay probe compilation failed with exit code $LASTEXITCODE."
+}
+
+& $probeOutput
+if ($LASTEXITCODE -ne 0) {
+    throw "Traversal replay probe failed with exit code $LASTEXITCODE."
+}
