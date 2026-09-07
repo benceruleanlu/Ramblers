@@ -1,5 +1,8 @@
 # Ramblers
 
+> [!WARNING]
+> **Under construction:** Ramblers is not ready for use. All `0.x.x` versions are development builds; please wait for the `1.0.0` release before installing or trying it.
+
 An AI companion mod for [Big Walk](https://bigwalk.game/) by House House.
 
 The goal is to play the whole game with Rambler as your teammate: exploring together, communicating, and working through puzzles without having to direct its every move.
