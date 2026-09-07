@@ -532,6 +532,11 @@ internal sealed class CompanionAwareness
             entityReferences,
             out nearbyInteractableObservations,
             out rememberedInteractableObservations);
+        CompanionReferenceDiagnostics.LogCandidates(
+            human,
+            affordanceCandidates,
+            nearbyInteractableObservations,
+            rememberedInteractableObservations);
         var nearbyInteractables = ToNearbyInteractables(
             nearbyInteractableObservations);
         var rememberedInteractables = ToRememberedInteractables(
