@@ -15,11 +15,12 @@ public sealed class Plugin : BasePlugin
 {
     public const string Guid = "local.bigwalk.ramblers";
     public const string Name = "Ramblers";
-    public const string Version = "0.19.2";
+    public const string Version = "0.19.3";
 
     internal static ManualLogSource Logger = null;
     internal static ConfigEntry<bool> EnableRealtimeAgent = null;
     internal static ConfigEntry<string> OpenAIRealtimeModel = null;
+    internal static ConfigEntry<bool> EnableCraneShortcut = null;
 
     public override void Load()
     {
@@ -35,6 +36,12 @@ public sealed class Plugin : BasePlugin
             "Model",
             "gpt-realtime-2.1",
             "Realtime model ID. Keep the documented default unless deliberately testing another model.");
+        EnableCraneShortcut = Config.Bind(
+            "Development",
+            "EnableCraneShortcut",
+            false,
+            "Enable F8 to move the host and Rambler beside the crane puzzle for testing.");
+        Logger.LogInfo($"[QA] CRANE_SHORTCUT enabled={EnableCraneShortcut.Value}, hotkey=F8.");
         ClassInjector.RegisterTypeInIl2Cpp<CompanionController>();
         ClassInjector.RegisterTypeInIl2Cpp<RealtimeAgentBridge>();
 
