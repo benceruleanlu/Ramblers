@@ -1,77 +1,59 @@
 # Ramblers
 
-> [!WARNING]
-> **Under construction:** Ramblers is not ready for use. All `0.x.x` versions are development builds; please wait for the `1.0.0` release before installing or trying it.
+An experimental AI companion mod for [Big Walk](https://bigwalk.game/) by House House.
 
-An experimental host-side companion mod for [Big Walk](https://store.steampowered.com/app/1478500/). Ramblers spawns an AI-controlled party member in follow mode inside the host's own game process — no second client, no second process. You talk to it using Big Walk's stock toggle-to-talk, and it walks itself using Big Walk's stock remote-player motor.
+The goal is to play the whole game with Rambler as your teammate: exploring together, communicating, and working through puzzles without having to direct its every move.
 
-## Install
+> **Under active development.** Rambler cannot yet complete Big Walk with you. All `0.x` builds are experimental and are not ready for general use.
 
-With Big Walk closed, copy `dist/Ramblers.dll` and `dist/StbImageWriteSharp.dll` into `BepInEx/plugins/Ramblers` under the game directory. Rename the deployed `Ramblers.dll` to `Ramblers.dll.disabled` to stop it loading.
+## Current state
 
-Ramblers reads `OPENAI_API_KEY` from the process or current Windows user environment. No key is stored in this repository or in the BepInEx configuration. This local-key path is for development only.
+Ramblers runs inside the host's game process and spawns one companion that follows you by default. It does not require a second game client.
 
-## Compatibility
+The current implementation supports:
 
-Tested against Big Walk `1.4.10` (build `2608201131`) on BepInEx IL2CPP `6.0.0-be.755`, which is Unity `6000.3.17f1` on URP. Ramblers `0.12.0` is runtime-verified on that combination; earlier `0.7.5` and `0.8.0` evidence came from Big Walk `1.4.9`. `0.12.0` verification covers follow, posture, jump, the job layer's capability arbitration, deferred tool dispatch with the microphone epoch barrier, one full `inspect_reference()` producing a described image, default follow, exact-target pickup selected by gaze, nearby context, and recent mention, exact-target cancellation, explicit held-item drop, staged kick strength and direction, and floor-seam route recovery. `0.13.0` added primary-interaction navigation and stricter terrain/route safety, but its first deployed speech turn ended in a native CoreCLR access violation. `0.13.1` removed the new Dissonance source-introspection path and quarantined both ambient `CastableTarget` scanning and per-turn interaction-reference capture while retaining direct metre-domain falloff; one complete spoken runtime turn then passed without a crash. `0.13.2` added player-safe failure results, exact turn-latency telemetry, and a local pre-QA runtime audit. `0.13.3` retained valid shared environment layers in the floor probe, but runtime telemetry proved the probe could still reject a flat, unobstructed spawn-room floor. `0.13.4` stopped that probe from blocking ordinary follow. `0.13.5` removed the disproven floor-ray subsystem, trusted the stock player motor for uncertain terrain, automatically stood for movement actions instead of rejecting them, and let the existing job timeout bound traversal recovery instead of an arbitrary two-jump limit. `0.13.6` independently restored only exact gaze-selected and companion-held primary interactions. `0.14.0` added exact held-ball versus gaze-destination kick grounding, obstacle-aware kick approach, and corridor-bounded jump/drop tangents. `0.15.0` generalized exact native-affordance composition across pickup, held use, repeated switches, item homes, and carried reach, and added exact local-human pickup/drop. `0.16.0` suspends follow while the companion carries the human, adds gaze-grounded destination walking for natural directions such as “take me over there,” and narrowly restores a carried companion's access to one exact reachable unconditioned switch when the game's actor-specific cast omits it. The current `0.17.0` development candidate separates exact structural identity from dynamic action admission, adds bounded nearby/recent interaction IDs, per-kind native affordance drivers, one shared physical approach controller, and staged authority/confirmation for keys, switches, poses, sitting, and item homes. It is build/protocol verified and awaits one collective visual QA pass. Other game or loader versions are unverified.
+- Talking through Big Walk's voice controls, with spoken replies from the companion.
+- Following, staying, changing posture, jumping, and walking to a place you indicate.
+- Picking up, dropping, and kicking props; carrying and setting down the host player; and using supported switches, seats, and item holders.
+- Looking at something you indicate and receiving an image from the companion's own point of view.
+- Receiving nearby world updates between conversations and continuing compatible actions while you talk.
 
-## Build
+These are building blocks for a teammate. Self-directed play, navigation to remembered places, coordinated puzzle actions, complete in-game communication support, and memory across sessions remain unfinished. Individual actions working does not establish that a puzzle or the campaign is playable.
 
-Requires Windows PowerShell 5.1 or newer and a BepInEx IL2CPP install that has been launched at least once, so its interop assemblies exist.
+The goal and remaining work are tracked in [the AI teammate roadmap (#53)](https://github.com/benceruleanlu/Ramblers/issues/53).
+
+## Development setup
+
+Development has used Windows, Big Walk `1.4.10` (build `2608201131`), and BepInEx IL2CPP `6.0.0-be.755`. Other game or loader versions are unverified.
+
+You need a BepInEx installation that has been launched at least once to generate the game's interop assemblies, Windows PowerShell 5.1 or newer, and your own OpenAI API key.
+
+1. Set `OPENAI_API_KEY` in the game's process environment or your Windows user environment before launching the game. Ramblers reads it from there; do not put it in the repository.
+2. Build from the repository root:
+
+   ```powershell
+   .\build.ps1
+   ```
+
+3. With Big Walk closed, copy `dist/Ramblers.dll` and `dist/StbImageWriteSharp.dll` into `BepInEx/plugins/Ramblers` under the game directory.
+4. Launch Big Walk and host a session. Rambler spawns automatically. Use the game's normal toggle-to-talk or push-to-talk controls to speak to it.
+
+To disable the mod, close the game and rename the installed `Ramblers.dll` to `Ramblers.dll.disabled`.
+
+Voice and perception use OpenAI Realtime. Microphone audio, captured images, and game context are sent to OpenAI, and API usage is billed to your account. The current speech output is audible only on the host's client; remote guests cannot hear Rambler.
+
+## Building and checking changes
+
+[build.ps1](build.ps1) discovers Big Walk through Steam and downloads a pinned Roslyn compiler into `.tools/` on first use. It writes the plugin and its JPEG dependency to `dist/`; it does not deploy them into the game.
+
+Use `-GamePath` or `RAMBLERS_GAME_PATH` to select the game directory, and `-CompilerPath` or `RAMBLERS_CSC_PATH` to select the compiler. Add `-NoRestore` to build without downloading a compiler.
+
+Run the protocol checks with PowerShell 7 after the compiler is available:
 
 ```powershell
-.\build.ps1
+pwsh -NoProfile -File .\analysis_scripts\Run-ProtocolTests.ps1
 ```
 
-The build locates Big Walk through your registered Steam libraries, verifies the vendored managed JPEG encoder by hash, and downloads a pinned Roslyn compiler into `.tools/` on first use. It installs nothing system-wide and leaves `PATH`, the registry, and system files alone. Override either path with a flag or an environment variable:
+[Audit-LatestRun.ps1](analysis_scripts/Audit-LatestRun.ps1) rebuilds `dist/` and compares the build, installed plugin, and latest runtime log. It also checks recorded action and conversation behavior. Add `-RequireTurn` to require evidence of a spoken turn.
 
-| Flag | Environment variable |
-| --- | --- |
-| `-GamePath` | `RAMBLERS_GAME_PATH` |
-| `-CompilerPath` | `RAMBLERS_CSC_PATH` |
-
-Add `-NoRestore` to keep the build offline and fail if no compiler is already available.
-
-Run every executable/source protocol check in a fresh PowerShell process with `pwsh -NoProfile -File .\analysis_scripts\Run-ProtocolTests.ps1`. Pass `-CompilerPath .\.tools\roslyn-4.14.0\expanded\tasks\net472\csc.exe` to keep the compiler choice explicit.
-
-Before requesting in-game QA, run `analysis_scripts\Audit-LatestRun.ps1`. It discovers Big Walk through the registered Steam libraries, compares source, build, deployed plugin and codec, and startup identities; summarizes monotonic request/creation/first-audio/completion timings and grounded targets per turn; reports exact kick launch vectors; and fails on unresolved physical jobs, stale action blockers, discarded tool output, client protocol errors, conflicting frozen identities, or a traversal tangent used outside its approach corridor. Add `-RequireTurn` when spoken runtime evidence is mandatory, or pass `-GamePath`/set `RAMBLERS_GAME_PATH` if Steam discovery is unavailable. The command writes its compact report to `%TEMP%\Ramblers\latest-runtime-audit.txt` and deliberately does not claim visual proof.
-
-The build and audit support Windows PowerShell 5.1. `Test-NaturalFailureProtocol.ps1` requires PowerShell 7 because its live serialization probe compiles the production file-scoped C# source in-process; the rest of the test suite retains the 5.1 floor.
-
-## Design
-
-The model never writes movement input and never touches a Unity object. It selects from a fixed tool allowlist, and C# does the driving. Arguments are validated into typed commands before anything Unity-side runs, so a malformed call comes back as a tool failure rather than as an exception inside the game loop.
-
-The voice path reuses what Big Walk already has. The game's own voice state and microphone open the turn — a toggle starts a continuous semantic-VAD stream, a hold makes it a manual push-to-talk turn — and the audio goes to OpenAI Realtime. At the utterance boundary, any physical reference is frozen and bound to that exact response turn. What comes back is either speech, played from a local 3D source on the companion's body, or a tool call. Synthetic speech is local-only and never reaches remote guests. When one response produces several tool calls, they execute strictly in response order: a multi-frame physical job must finish, publish its verified state transition, and release its capabilities before the next call is routed. Each result is returned to the model as soon as its own call settles — minutes later if the job takes that long — and the conversation keeps flowing in the meantime: new utterances neither wait on running jobs nor cancel them, jobs from different turns run concurrently when they claim disjoint capabilities, and one continuation response is requested when a batch finishes so completed work still gets narrated. Between utterances the game also talks to the model on its own: changes a walking partner would notice (the human running off or coming back, carrying, held items, a walk ending, something new coming into view) and a slow heartbeat are injected as delta-only context items, rate-capped and never paired with a response request, so what Rambler knows no longer waits for the human to speak.
-
-Big Walk's direct-voice attenuation curve is keyed in world metres, so Ramblers evaluates the companion's own curve directly against human-to-companion distance; it does not install that curve as a Unity custom rolloff, which would rescale the curve over `AudioSource.maxDistance` and change the falloff. Synthetic speech deliberately does not dereference Dissonance's live `SourceController` or copy its `AudioSource` properties: that generated IL2CPP wrapper chain was newly present in the first `0.13.0` spoken turn that ended in a native CoreCLR access violation, which a managed exception handler cannot contain. Curve samples, live distance, and applied output level are logged. Exact mixer-route parity remains a separate runtime-instrumented task after spoken stability is re-established.
-
-The model-facing surface is deliberately small:
-
-| Tool | Effect |
-| --- | --- |
-| `set_follow_mode(follow \| stay)` | Long-lived follow intent, walked out by the breadcrumb follower. |
-| `set_posture(standing \| crouching \| sitting)` | Long-lived posture. Sitting suspends locomotion without erasing a follow request; standing resumes it. |
-| `jump()` | Queues one grounded jump for the next physics tick. |
-| `inspect_reference()` | Looks at the exact item you are showing it or the place you indicated, then captures one image from the companion's own point of view. |
-| `go_to_location()` | Walks to the exact place frozen under the human's gaze; it can follow `pick_up_player()` in the same response for “pick me up and take me there.” |
-| `interact_with_object(target: interaction ID \| human_reference \| companion_held_item, intent?: use \| sit)` | Walks to and uses the exact native affordance frozen for the turn: switches, player poses/seats, held-item placement homes, or the exact held item's primary action. `use` is the default; `sit` explicitly requests sitting in a native seat. |
-| `pick_up_item(target: prop ID \| human_reference)` | Walks to and picks up an exact nearby/recent prop or the prop frozen under the human's gaze. |
-| `kick_item(target: prop ID \| human_reference \| companion_held_item, strength?, direction?)` | Walks to or continues holding the exact ball, charges on the game-tuned curve, then kicks away, toward the human, or through the frozen gaze destination using stock head-pitch aiming. |
-| `drop_item()` | Drops only the exact prop already held by the companion. |
-| `pick_up_player()` | Walks to and picks up the local human through Big Walk's native player-carry pose. |
-| `drop_player()` | Sets down only the exact human currently carried by the companion. |
-| `cancel_action()` | Stops running work, a queued jump, and follow intent, without changing posture. |
-
-Anything that cannot finish inside a single tool call is a job. A job declares the capabilities it claims — locomotion, gaze, hands — and the coordinator admits it only when those are free, so an action needs no hand-written exclusion check against every other action; gaze in particular is arbitrated on priority channels rather than per-behaviour fields. A job reports a terminal result plus any conversation items it wants delivered alongside it — a text report, an image, or both — which is how a bot-eye snapshot reaches the model without the WebSocket transport knowing what produced it. Failure, cancellation, and timeout results remain private until the exact job has released those capabilities; the operation token survives reconciliation, and timeout starts a bounded cancellation phase instead of orphaning the native action. A bounded fallback releases only Ramblers' ownership, records that reconciliation was abandoned, and lets the next authoritative game snapshot describe any still-held native state.
-
-A completed pickup releases its job and capability reservations while the prop remains held in Big Walk's authoritative hands state. Its verified result advances only that turn's transient hands capability with the same frozen prop and network identity, so a continuation can immediately use or place what it just picked up without resampling gaze. A later utterance independently snapshots authoritative hands state, so ordinary possession cannot masquerade as `pick_up_item_in_progress` or silently carry an obsolete job target forward.
-
-Each human utterance also receives a bounded nonverbal game-context packet. It reports current human/companion relationship and action state, including which participant is carrying the other, up to six nearby props, six nearby interactables, four recently seen interactables, and three other players with stable IDs and coarse spatial facts, plus only the significant events not already reported from an eight-entry journal. Interaction discovery is limited to nearby spawned network roots, `PropHome.allPropHomes`, `Prop.allProps`, and the already-frozen gaze target; root, hierarchy, candidate, memory, distance, age, and output counts are all capped, and there is no whole-scene or nearest-object fallback. Rambler's existing natural ambient glances can populate one local visual-memory slot after the gaze visibly settles; novelty, a 30-second capture interval, 45-second freshness and one-shot delivery prevent that from becoming continuous surveillance or an accumulating local photo stream. Context is consumed only after it is successfully queued and never creates a response by itself, so awareness improves ordinary conversation without making the companion narrate every scene.
-
-`interact_with_object(target, intent?: use|sit)` keeps object identity, movement, and activation separate. Direct gaze freezes one exact ready driver; context IDs freeze the raw `CastableTarget` plus structural kind without requiring current reach, hands, keys, or placement state. After approach or a verified same-turn hands transition, only that exact target is bound to its current native outcome. World switches, held-item switches, player poses, and item homes each implement the same typed driver contract while owning their stock command and exact postcondition. A human-carried companion treats world interaction as an in-place action: it never drops the carry pose to approach, and an exact switch must pass directional reach plus Big Walk's fresh raycast and safety checks before authority. Key effects are confirmed before the target switch is dispatched; pose entry is confirmed before sitting; momentary controls confirm both down and release. Once any native phase crosses authority, failure or cancellation reconciles the actual game state instead of reporting a pre-action failure. Unsupported pocket-item and keyed non-switch combinations are rejected consistently at the central discriminator. Production selection contains no first-level object or scene names, so puzzles composed from these native primitives require no Ramblers patch.
-`inspect_reference()` returns pending while the companion turns and captures over following frames. Persistent follow intent and posture stay outside the job layer as long-lived state rather than jobs.
-
-The physical-action layer freezes every target at the utterance boundary and revalidates the same managed object and network identity before host authority. Pickup and kick can walk to an exact nearby/recent prop instead of requiring last-second gaze. Kick keeps the ball target separate from its aim: it can continue with the exact prop already in companion hands while `toward_reference` uses the independently frozen human-gaze point for a hoop, goal, or spot. It visibly aligns, uses Big Walk's authoritative pickup only when needed, waits on the live `maxWindUpDuration` charge curve, and dispatches the stock held-prop launch with a bounded light, normal, or hard charge. The launch record carries the destination's horizontal heading while Big Walk applies `kickSettings.angleCurve` to the companion's replicated head pitch, matching the native player split and avoiding double elevation on raised hoops. Cancellation before an already-held ball launches preserves that possession; cancellation after kick-owned pickup reconciles with a plain exact-item drop. Release and motion are confirmed, and no unnetworked Rigidbody shove or nearest-item fallback exists. `drop_item()` separately snapshots the exact held prop and succeeds only after empty hands remain stable. Player carry uses the same boundary: `pick_up_player()` freezes the controller-bound local human, walks into range, delegates admission to the stock carry pose, dispatches the connectionless server command body, and confirms the exact hands, carrier, pose, and occupant links. While that exact link remains active, follow locomotion is suspended without erasing follow intent; a subsequent `go_to_location()` job can independently claim locomotion toward its frozen gaze point. `drop_player()` guards the game's parameterless release command with that exact identity and confirms every link has settled before success.
-
-The traversal follower replays the route the human actually took instead of inventing a global NavMesh over Big Walk's irregular world. Breadcrumb reach and route length retain height, while walk-off transitions retain the human's horizontal route tangent. Human jump input is not copied: airborne samples are collapsed into their landing, same-level recreational jumps become ordinary route movement, and only a materially higher landing retains a jump hint. Traversal lookahead selects real transition markers before obstacle sweeping can make the companion pace around the final point at an edge. The companion now approaches a distant jump/drop marker by its actual waypoint vector and switches to the recorded human tangent only inside the transition corridor or during that exact marker's bounded commit; a commitment retained across an airborne target change is cleared on the first grounded tick. The stock grounded jump path handles retained jump markers, and direct route commitment handles ledge exits. Steering asks Big Walk's own slope solver whether each otherwise-clear heading would produce movement, filters the closest upward floor/seam contact so a harmless mesh edge does not masquerade as a wall, tries a traversable contour, then permits a bounded grounded recovery jump if the motor still stalls. Follow pauses and rebases its route whenever either participant carries the other: release cannot send the companion back toward the old pickup point, and carrying the human cannot turn the attached passenger into a bogus elevated route leader. Falling and jumping count as spatial progress, and teleport recovery remains deliberately disabled. The `0.13.5` visual run and structured trace verified ordinary follow, upward floor-contact filtering, same-level jump suppression, and recovery across the observed slope and ledge route; the `0.14.0` corridor correction is executable-probe verified but not yet visually exercised.
+Builds and protocol checks validate implementation details. In-game testing is still needed to verify movement, interactions, communication, and puzzle completion.
