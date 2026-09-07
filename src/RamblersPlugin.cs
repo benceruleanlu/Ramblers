@@ -15,7 +15,7 @@ public sealed class Plugin : BasePlugin
 {
     public const string Guid = "local.bigwalk.ramblers";
     public const string Name = "Ramblers";
-    public const string Version = "0.20.1";
+    public const string Version = "0.20.2";
 
     internal static ManualLogSource Logger = null;
     internal static ConfigEntry<bool> EnableRealtimeAgent = null;
@@ -23,6 +23,8 @@ public sealed class Plugin : BasePlugin
     internal static ConfigEntry<bool> EnableCraneShortcut = null;
     internal static ConfigEntry<bool> EnableFollowDiagnostics = null;
     internal static bool FollowDiagnosticsEnabled => EnableFollowDiagnostics?.Value == true;
+    internal static ConfigEntry<bool> EnableNavigationRepro = null;
+    internal static bool NavigationReproEnabled => EnableNavigationRepro?.Value == true;
 
     public override void Load()
     {
@@ -50,6 +52,11 @@ public sealed class Plugin : BasePlugin
             false,
             "Log detailed follow positions, route searches, geometry and native movement for testing.");
         Logger.LogInfo($"[FOLLOW] DIAGNOSTICS enabled={FollowDiagnosticsEnabled}.");
+        EnableNavigationRepro = Config.Bind(
+            "Development",
+            "NavigationReproProbe",
+            false,
+            "Capture read-only navigation geometry at the recorded failure site after companion spawn.");
         ClassInjector.RegisterTypeInIl2Cpp<CompanionController>();
         ClassInjector.RegisterTypeInIl2Cpp<RealtimeAgentBridge>();
 

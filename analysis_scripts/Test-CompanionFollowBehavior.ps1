@@ -29,6 +29,7 @@ try {
         (Join-Path $ramblersRoot "src\CompanionTraversalReplay.cs") `
         (Join-Path $ramblersRoot "src\CompanionLocalRoutePlanner.cs") `
         (Join-Path $ramblersRoot "src\CompanionFollowNavigation.cs") `
+        (Join-Path $ramblersRoot "src\CompanionFollowRoutePlanner.cs") `
         (Join-Path $ramblersRoot "src\CompanionFollowBehavior.cs") `
         (Join-Path $PSScriptRoot "CompanionFollowBehaviorProbe.cs")
     if ($LASTEXITCODE -ne 0) {

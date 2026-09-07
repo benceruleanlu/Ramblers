@@ -107,6 +107,11 @@ namespace Ramblers
     {
         internal static readonly ProbeLogger Logger = new ProbeLogger();
         internal static bool FollowDiagnosticsEnabled => true;
+        internal static bool NavigationReproEnabled => false;
+    }
+    internal static class CompanionNavigationReproProbe
+    {
+        internal static void Run(CompanionNavigationGeometry geometry, Vector3 position) { }
     }
     internal sealed class CompanionBody
     {
@@ -126,6 +131,15 @@ namespace Ramblers
             (from, to) => CompanionWalkingConnection.Walkable;
         internal Func<Vector3, Vector3?> Support = candidate => new Vector3(candidate.x, 0, candidate.z);
         internal int NativeQueryCount;
+        private int _queryLimit = int.MaxValue;
+        internal bool QueryBudgetExhausted => NativeQueryCount >= _queryLimit;
+        internal void RunWithQueryBudget(int limit, Action action)
+        {
+            var previous = _queryLimit;
+            _queryLimit = Math.Min(previous, NativeQueryCount + limit);
+            try { action(); }
+            finally { _queryLimit = previous; }
+        }
         internal bool TryGroundPoint(Vector3 candidate, out Vector3 grounded)
         {
             NativeQueryCount++;
@@ -133,6 +147,8 @@ namespace Ramblers
             grounded = supported ?? candidate;
             return supported.HasValue;
         }
+        internal bool TryGroundRoutePoint(Vector3 candidate, out Vector3 grounded) =>
+            TryGroundPoint(candidate, out grounded);
         internal bool IsSegmentClear(Vector3 from, Vector3 to)
         { NativeQueryCount++; return Clear(from, to); }
         internal CompanionWalkingConnection ProbeWalkingConnection(Vector3 from, Vector3 to)
@@ -214,12 +230,21 @@ namespace Ramblers
             Run("reposition clears old traversal", RepositionRebasesTraversal, ref failures);
             Run("native authority loss stops movement", AuthorityLossStopsMovement, ref failures);
             Run("thin wall prevents trail pruning", ThinWallPreventsPassedBreadcrumbPruning, ref failures);
+            Run("ordinary waypoint eighty-one uses synthetic measured lower support", OrdinaryEightyOneUsesMeasuredSupport, ref failures);
+            Run("ordinary waypoint eighty-one preserves measured upper support", OrdinaryEightyOnePreservesUpperSupport, ref failures);
+            Run("explicit raised jump preserves recorded height", ExplicitJumpKeepsHeightDespiteLowerWalkingSupport, ref failures);
+            Run("old raised point never takes over the human goal", RepeatedOrdinaryGoalCanRetire, ref failures);
+            Run("ordinary-goal retirement preserves pending jump boundary", OrdinaryRetirementPreservesPendingJump, ref failures);
+            Run("returning human overrides long movement history", ReturningHumanOverridesHistory, ref failures);
+            Run("unknown support remains a native movement attempt", UnknownSupportDoesNotStopFollowing, ref failures);
+            Run("obsolete ridge point is bypassed in simulated movement", ObsoleteRidgeAllowsArrival, ref failures);
+            Run("blocked straight route searches toward human before old history", DetourGoalOverridesOldHistory, ref failures);
             if (failures != 0)
             {
                 Console.Error.WriteLine("Companion follow integration: " + failures + " checks failed.");
                 return 1;
             }
-            Console.WriteLine("Companion follow integration: 13 behavioral checks passed.");
+            Console.WriteLine("Companion follow integration: 22 behavioral checks passed.");
             return 0;
         }
 
@@ -521,6 +546,218 @@ namespace Ramblers
             world.Follow.TickFixed(0.6f, true, null);
             Expect(world.Trail.Peek().Sequence == selected.Sequence,
                 "crossing a breadcrumb's arrival plane through a wall erased the required route");
+        }
+
+        private static void OrdinaryEightyOneUsesMeasuredSupport()
+        {
+            var priorLanding = new Vector3(-215.55f, 33.79f, -509.05f);
+            var rawEightyOne = new Vector3(-216.30f, 33.93f, -509.11f);
+            var world = new World(priorLanding, new Vector3(-215.4f, 32.7f, -509.16f));
+            world.Motion.Geometry.Walking = (from, to) => CompanionWalkingConnection.Uncertain;
+            world.Motion.Geometry.Support = candidate => new Vector3(candidate.x, 32.7f, candidate.z);
+            world.Follow.TickFrame(0);
+            world.Human.transform.position = rawEightyOne;
+            world.Follow.TickFrame(0.2f);
+            Expect(world.Trail.TryGetLastAdded(out var point), "ordinary waypoint was not recorded");
+            Expect(!point.RequiresJump && !point.RequiresDrop &&
+                Math.Abs(point.Position.y - 32.7f) < 0.001f,
+                "ordinary waypoint retained raw y=33.93 despite synthetic measured support at y=32.7");
+            Expect(Math.Abs(point.Position.x - rawEightyOne.x) < 0.001f &&
+                Math.Abs(point.Position.z - rawEightyOne.z) < 0.001f,
+                "support projection changed the ordinary waypoint's horizontal identity");
+        }
+
+        private static void OrdinaryEightyOnePreservesUpperSupport()
+        {
+            var priorLanding = new Vector3(-215.55f, 33.79f, -509.05f);
+            var rawEightyOne = new Vector3(-216.30f, 33.93f, -509.11f);
+            var world = new World(priorLanding, new Vector3(-215.4f, 32.7f, -509.16f));
+            world.Motion.Geometry.Walking = (from, to) => CompanionWalkingConnection.Uncertain;
+            world.Motion.Geometry.Support = candidate => new Vector3(candidate.x, 33.93f, candidate.z);
+            world.Follow.TickFrame(0);
+            world.Human.transform.position = rawEightyOne;
+            world.Follow.TickFrame(0.2f);
+            Expect(world.Trail.TryGetLastAdded(out var point), "supported upper waypoint was not recorded");
+            Expect(Math.Abs(point.Position.y - 33.93f) < 0.001f,
+                "ordinary support projection flattened a measured upper surface");
+        }
+
+        private static void RepeatedOrdinaryGoalCanRetire()
+        {
+            var world = OrdinaryEightyOneLoopWorld();
+            var obsoleteSequence = world.Trail.Peek().Sequence;
+            DriveOrdinaryEightyOneLoop(world);
+            var target = (Vector3)typeof(CompanionFollowBehavior)
+                .GetField("_currentTarget", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(world.Follow);
+            Expect(Vector3.Distance(target, world.Human.transform.position) < 0.1f,
+                "an old raised point replaced the human as the route destination");
+            Expect(world.Motion.TraversalCalls == 0,
+                "ordinary goal retirement introduced a compulsory recorded jump");
+        }
+
+        private static void ReturningHumanOverridesHistory()
+        {
+            var world = new World(Point(0), Point(0));
+            world.Motion.Geometry.Walking = (from, to) => CompanionWalkingConnection.Uncertain;
+            world.Human.transform.position = Point(7);
+            world.Follow.TickFrame(0.2f);
+            world.Human.transform.position = new Vector3(7, 0, 5);
+            world.Follow.TickFrame(0.4f);
+            world.Human.transform.position = Point(1);
+            world.Tick(0.6f);
+            Expect(world.Follow.StateLabel == "holding" && world.Motion.LastMovementIntent.sqrMagnitude == 0,
+                "nearby human was ignored because history still contained a long route");
+        }
+
+        private static void DetourGoalOverridesOldHistory()
+        {
+            var world = new World(Point(5), Point(0));
+            world.Trail.Clear();
+            world.Trail.Add(Point(-4), false, false);
+            world.Trail.Add(new Vector3(-4, 0, 4), false, false);
+            world.Trail.Add(new Vector3(5, 0, 4), false, false);
+            world.Trail.Add(Point(5), false, false);
+            world.Motion.Geometry.Clear = (from, to) =>
+            {
+                for (var sample = 0; sample <= 40; sample++)
+                {
+                    var point = from + (to - from) * (sample / 40f);
+                    if (point.x >= 1.5f && point.x <= 2.5f && Math.Abs(point.z) <= 0.5f)
+                        return false;
+                }
+                return true;
+            };
+            world.Motion.Geometry.Walking = (from, to) => world.Motion.Geometry.Clear(from, to)
+                ? CompanionWalkingConnection.Walkable : CompanionWalkingConnection.Obstructed;
+            world.Tick(0.1f);
+            Expect(world.Motion.LastMovementIntent.x >= 0 && Math.Abs(world.Motion.LastMovementIntent.z) > 0.1f,
+                "blocked straight route sent the companion backward along old history before searching toward human");
+            for (var tick = 2; tick < 55; tick++)
+            {
+                var next = world.Body.Position + world.Motion.LastMovementIntent * 0.2f;
+                Expect(world.Motion.Geometry.Clear(world.Body.Position, next),
+                    "selected detour commanded motion through the wall");
+                world.Body.Character.transform.position = next;
+                world.Tick(tick * 0.1f);
+            }
+            Expect(world.Follow.StateLabel == "holding" && world.Jump.RequestTimes.Count == 0,
+                "route around the wall did not reach the human by walking");
+        }
+
+        private static void UnknownSupportDoesNotStopFollowing()
+        {
+            var world = new World(Point(6), Point(0));
+            world.Motion.Geometry.Support = candidate => null;
+            world.Motion.Geometry.Walking = (from, to) => CompanionWalkingConnection.Uncertain;
+            for (var tick = 0; tick < 35; tick++)
+            {
+                world.Tick(tick * 0.1f);
+                world.Body.Character.transform.position += world.Motion.LastMovementIntent * 0.2f;
+            }
+            Expect(world.Follow.StateLabel == "holding" && world.Jump.RequestTimes.Count == 0,
+                "missing support became a movement gate or invented a jump");
+            Expect(Plugin.Logger.Lines.Exists(line => line.Contains("kind=Attempt")),
+                "uncertain native attempt was mislabeled as a supported walking route");
+        }
+
+        private static void ObsoleteRidgeAllowsArrival()
+        {
+            var world = OrdinaryEightyOneLoopWorld();
+            for (var tick = 0; tick < 65; tick++)
+            {
+                world.Tick(0.6f + tick * 0.1f);
+                var next = world.Body.Position + world.Motion.LastMovementIntent * 0.2f;
+                world.Body.Character.transform.position = world.Motion.Geometry.Support(next).Value;
+            }
+            Expect(world.Follow.StateLabel == "holding" &&
+                Vector3.Distance(world.Body.Position, world.Human.transform.position) <= 2.5f,
+                "simulated walking failed to reach the human around the obsolete ridge point");
+            Expect(world.Jump.RequestTimes.Count == 0 && world.Motion.TraversalCalls == 0,
+                "walking around the old ridge point introduced jump replay");
+        }
+
+        private static void ExplicitJumpKeepsHeightDespiteLowerWalkingSupport()
+        {
+            var world = new World(Point(0), Point(-3));
+            world.Motion.Geometry.Walking = (from, to) => CompanionWalkingConnection.Uncertain;
+            world.Motion.Geometry.Support = candidate => new Vector3(candidate.x, 0f, candidate.z);
+            world.Follow.TickFrame(0);
+            world.Human.jumper.justJumped = true;
+            world.Human.ground.isGrounded = false;
+            world.Human.rb.linearVelocity = new Vector3(0, 4f, 0);
+            world.Human.transform.position = new Vector3(0, 0.7f, 0);
+            world.Follow.TickFrame(0.1f);
+            world.Human.jumper.justJumped = false;
+            world.Human.transform.position = new Vector3(0, 1.8f, 0);
+            world.Follow.TickFrame(0.3f);
+            world.Human.transform.position = new Vector3(0, 1.6f, 0);
+            world.Human.ground.isGrounded = true;
+            world.Human.rb.linearVelocity = Vector3.zero;
+            world.Follow.TickFrame(0.6f);
+            var traversal = FindTraversal(world);
+            Expect(Math.Abs(traversal.Position.y - 1.6f) < 0.001f &&
+                Math.Abs(traversal.TakeoffPosition.y) < 0.001f && traversal.HasTakeoff,
+                "ordinary support projection rewrote the explicit raised traversal layer");
+        }
+
+        private static void OrdinaryRetirementPreservesPendingJump()
+        {
+            var world = OrdinaryEightyOneLoopWorld();
+            var ordinary = world.Trail.Peek();
+            world.Trail.Clear();
+            world.Trail.Add(ordinary.Position, false, false);
+            var pending = world.Trail.AddTraversal(
+                new Vector3(-217.2f, 33.93f, -509.11f),
+                new Vector3(-218f, 35.53f, -509.11f), true, false, 0.6f);
+            world.Trail.Add(world.Human.transform.position, false, false);
+            DriveOrdinaryEightyOneLoop(world);
+            Expect(ContainsTraversal(world, pending.Sequence),
+                "ordinary prefix retirement discarded an uncommitted raised-platform jump");
+        }
+
+        private static World OrdinaryEightyOneLoopWorld()
+        {
+            var rawEightyOne = new Vector3(-216.30f, 33.93f, -509.11f);
+            var world = new World(rawEightyOne, new Vector3(-215.41f, 32.71f, -509.26f));
+            world.Motion.Geometry.Support = candidate =>
+            {
+                var dx = candidate.x - rawEightyOne.x;
+                var dz = candidate.z - rawEightyOne.z;
+                return new Vector3(candidate.x, dx * dx + dz * dz < 0.04f ? 33.93f : 32.7f, candidate.z);
+            };
+            world.Motion.Geometry.Walking = (from, to) =>
+                Math.Abs(from.y - to.y) <= 0.21f && Vector3.Distance(from, to) <= 1.6f
+                    ? CompanionWalkingConnection.Walkable : CompanionWalkingConnection.Obstructed;
+            world.Follow.TickFrame(0);
+            world.Human.transform.position = new Vector3(-218f, 32.7f, -509.6f);
+            world.Follow.TickFrame(0.2f);
+            world.Human.transform.position = new Vector3(-220f, 32.7f, -510f);
+            world.Follow.TickFrame(0.4f);
+            return world;
+        }
+
+        private static void DriveOrdinaryEightyOneLoop(World world)
+        {
+            var loop = new[]
+            {
+                new Vector3(-215.41f, 32.71f, -509.26f),
+                new Vector3(-214.22f, 33.04f, -511.12f),
+                new Vector3(-215.35f, 32.70f, -510.06f),
+                new Vector3(-214.89f, 32.80f, -510.60f),
+                new Vector3(-215.35f, 32.68f, -510.14f)
+            };
+            for (var tick = 0; tick < 180; tick++)
+            {
+                world.Body.Character.transform.position = loop[(tick / 3) % loop.Length];
+                world.Tick(0.6f + tick * 0.1f);
+            }
+        }
+
+        private static bool ContainsSequence(World world, int sequence)
+        {
+            for (var i = 0; world.Trail.TryPeek(i, out var point); i++)
+                if (point.Sequence == sequence) return true;
+            return false;
         }
 
         private static World RecordedJump(Vector3 landing, bool walkingPossible = false)

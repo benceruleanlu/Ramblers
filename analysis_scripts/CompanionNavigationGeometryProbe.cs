@@ -56,6 +56,7 @@ namespace UnityEngine
     internal sealed class Transform
     {
         internal string name = "test";
+        internal Transform parent = null;
         internal float Yaw;
         internal Vector3 InverseTransformDirection(Vector3 v) => Quaternion.AngleAxis(-Yaw, Vector3.up) * v;
     }
@@ -168,8 +169,9 @@ namespace Ramblers
     internal static class Plugin { internal static LoggerStub Logger = new LoggerStub(); }
     internal sealed class LoggerStub
     {
-        internal void LogInfo(string value) { }
-        internal void LogWarning(string value) { }
+        internal readonly System.Collections.Generic.List<string> Entries = new System.Collections.Generic.List<string>();
+        internal void LogInfo(string value) { Entries.Add(value); }
+        internal void LogWarning(string value) { Entries.Add(value); }
     }
 
     internal static class CompanionNavigationGeometryProbe
@@ -200,8 +202,14 @@ namespace Ramblers
             WalkingConnectionPreservesBodyOriginHeight();
             WalkingConnectionFollowsHillContour();
             GroundContactHeightDifferencesStayWithinTolerance();
+            FootprintHitIsProjectedBackToTheCandidateCenter();
+            OrdinaryRouteProjectionKeepsTheUpperPlatform();
+            OrdinaryRouteProjectionDropsRawAirborneHeight();
+            OrdinaryRouteProjectionPreservesUnknownCandidate();
+            ReproQueryBudgetIsScoped();
+            NativeReproLeavesBodiesAndMovementUnchanged();
             ReleaseClearsNativeReferences();
-            Console.WriteLine("Companion navigation geometry probe passed (24 cases).");
+            Console.WriteLine("Companion navigation geometry probe passed (30 cases).");
             return 0;
         }
 
@@ -588,6 +596,99 @@ namespace Ramblers
                 "observed 0.14m human/bot contact difference rejected an ordinary walk");
             Expect(geometry.CanWalkSegment(new Vector3(0f, 32.64f, 0f), new Vector3(3f, 32.74f, 0f)),
                 "0.1m start/0.2m end contact differences rejected by float rounding");
+        }
+
+        private static void FootprintHitIsProjectedBackToTheCandidateCenter()
+        {
+            CompanionNavigationGeometry geometry;
+            Create(out geometry);
+            SampleFloor(origin => Math.Abs(origin.x) < 0.01f && Math.Abs(origin.z) < 0.01f
+                ? (float?)null : origin.x * 0.75f, new Vector3(-0.6f, 0.8f, 0f));
+            Vector3 supported;
+            Expect(geometry.TryGroundPoint(new Vector3(0f, 0.15f, 0f), out supported),
+                "footprint slope support missing");
+            Equal(0f, supported.y, "side-ray height was copied to a different x/z position");
+        }
+
+        private static void OrdinaryRouteProjectionKeepsTheUpperPlatform()
+        {
+            CompanionNavigationGeometry geometry;
+            Create(out geometry);
+            SampleFloor(origin => origin.y > 0.95f ? 0.95f : 0f);
+            Vector3 supported;
+            Expect(geometry.TryGroundRoutePoint(new Vector3(0f, 1f, 0f), out supported),
+                "existing upper-platform support missing");
+            Equal(0.95f, supported.y, "ordinary route projection jumped down to a different floor");
+        }
+
+        private static void OrdinaryRouteProjectionDropsRawAirborneHeight()
+        {
+            CompanionNavigationGeometry geometry;
+            Create(out geometry);
+            SampleFloor(origin => origin.y > 34.3f ? 34.3f : 32.73f);
+            Vector3 supported;
+            Expect(geometry.TryGroundRoutePoint(new Vector3(-216.3f, 33.93f, -509.11f), out supported),
+                "lower support under raw breadcrumb81 height was not found");
+            Equal(32.73f, supported.y, "raw airborne point snapped upward onto another platform");
+        }
+
+        private static void OrdinaryRouteProjectionPreservesUnknownCandidate()
+        {
+            CompanionNavigationGeometry geometry;
+            Create(out geometry);
+            SampleFloor(origin => 0.8f);
+            var candidate = new Vector3(1f, 0.5f, 2f);
+            Vector3 supported;
+            Expect(!geometry.TryGroundRoutePoint(candidate, out supported),
+                "higher-only surface was accepted as downward route support");
+            Equal(0f, Vector3.Distance(candidate, supported), "missing route support changed the candidate");
+        }
+
+        private static void ReproQueryBudgetIsScoped()
+        {
+            CompanionNavigationGeometry geometry;
+            Create(out geometry);
+            geometry.RunWithQueryBudget(3, () =>
+            {
+                geometry.IsSegmentClear(Vector3.zero, Forward);
+                Expect(geometry.QueryBudgetExhausted, "repro query budget did not exhaust");
+                Vector3 supported;
+                geometry.TryGroundPoint(Vector3.zero, out supported);
+                Expect(geometry.NativeQueryCount == 3, "exhausted repro kept making native queries");
+            });
+            Expect(!geometry.QueryBudgetExhausted, "repro budget remained active after return");
+            geometry.IsSegmentClear(Vector3.zero, Forward);
+            Expect(geometry.NativeQueryCount == 6, "repro budget leaked into gameplay sensing");
+        }
+
+        private static void NativeReproLeavesBodiesAndMovementUnchanged()
+        {
+            CompanionNavigationGeometry geometry;
+            var body = Create(out geometry);
+            body.Position = new Vector3(4f, 33f, 8f);
+            body.Character.collision.bodyCollider.bounds = new Bounds
+            {
+                center = new Vector3(4f, 33.75f, 8f), size = new Vector3(0.5f, 1.5f, 0.5f)
+            };
+            var priorPosition = body.Position;
+            var priorIntent = new Vector3(0.5f, 0f, 1f);
+            body.Networking.NetworkcontrolsVelocity = priorIntent;
+            SampleFloor(origin => 33f);
+            Plugin.Logger.Entries.Clear();
+            CompanionNavigationReproProbe.Run(geometry, body.Position);
+            Equal(0f, Vector3.Distance(priorPosition, body.Position), "repro repositioned a body");
+            Equal(0f, Vector3.Distance(priorIntent, body.Networking.NetworkcontrolsVelocity),
+                "repro changed native movement intent");
+            Expect(geometry.NativeQueryCount <= 1500, "repro exceeded its overall native query budget");
+            Expect(!geometry.QueryBudgetExhausted, "repro retained a query limit after returning");
+            Expect(Plugin.Logger.Entries.Exists(line => line.StartsWith("[FOLLOW_REPRO] SUPPORT id=goal_ordinary")),
+                "repro omitted projected breadcrumb evidence");
+            Expect(Plugin.Logger.Entries.Exists(line => line.StartsWith("[FOLLOW_REPRO] PLAN id=toward_later_human")),
+                "repro omitted current-human route evidence");
+            Expect(!Plugin.Logger.Entries.Exists(line => line.StartsWith("[FOLLOW_REPRO] FAILED")),
+                "repro threw under controlled geometry");
+            Expect(Plugin.Logger.Entries.Exists(line => line.StartsWith("[FOLLOW_REPRO] COMPLETE")),
+                "repro omitted completion/query summary");
         }
 
         private static void Expect(bool condition, string message)

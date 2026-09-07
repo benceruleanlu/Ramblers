@@ -136,6 +136,17 @@ internal sealed class BreadcrumbTrail
             _lastAdded = walkable;
     }
 
+    internal void RemoveThrough(int sequence)
+    {
+        for (var offset = 0; offset < _count; offset++)
+        {
+            if (_points[(_head + offset) % _points.Length].Sequence != sequence)
+                continue;
+            _head = (_head + offset + 1) % _points.Length;
+            _count -= offset + 1;
+            return;
+        }
+    }
     internal bool TryRemoveFirst(out BreadcrumbPoint point)
     {
         point = default(BreadcrumbPoint);

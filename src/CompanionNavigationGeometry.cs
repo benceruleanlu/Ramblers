@@ -33,6 +33,7 @@ internal sealed class CompanionNavigationGeometry
 
     internal int NativeQueryCount { get; private set; }
     internal string LastWalkingConnectionReason { get; private set; } = "not_sampled";
+    internal bool QueryBudgetExhausted => NativeQueryCount >= _queryLimit;
 
     internal void Bind(CompanionBody body)
     {
@@ -63,13 +64,34 @@ internal sealed class CompanionNavigationGeometry
         return TryGroundPoint(candidate, out groundedPosition, out supportNormal);
     }
 
+    internal bool TryGroundRoutePoint(Vector3 candidate, out Vector3 groundedPosition)
+    {
+        Vector3 normal;
+        RaycastHit support;
+        return TryGroundPoint(candidate, candidate.y + 0.1f,
+            out groundedPosition, out normal, out support);
+    }
+
     private bool TryGroundPoint(
         Vector3 candidate,
         out Vector3 groundedPosition,
         out Vector3 supportNormal)
     {
+        RaycastHit support;
+        return TryGroundPoint(candidate, float.PositiveInfinity,
+            out groundedPosition, out supportNormal, out support);
+    }
+
+    private bool TryGroundPoint(
+        Vector3 candidate,
+        float maximumSupportHeight,
+        out Vector3 groundedPosition,
+        out Vector3 supportNormal,
+        out RaycastHit selectedSupport)
+    {
         groundedPosition = candidate;
         supportNormal = Vector3.up;
+        selectedSupport = default(RaycastHit);
         if (_body == null || !_body.IsAlive)
             return false;
 
@@ -103,7 +125,14 @@ internal sealed class CompanionNavigationGeometry
 
                 if (support.normal.y >= WalkableNormalY)
                 {
-                    var supportedHeight = support.point.y + footOffset;
+                    var supportedHeight = support.point.y + footOffset -
+                        (support.normal.x * (candidate.x - support.point.x) +
+                         support.normal.z * (candidate.z - support.point.z)) / support.normal.y;
+                    if (supportedHeight > maximumSupportHeight + HeightComparisonEpsilon)
+                    {
+                        travelled += support.distance + CastSkin;
+                        continue;
+                    }
                     var heightDifference = Mathf.Abs(supportedHeight - candidate.y);
                     var difference = heightDifference + (sample == 0 ? 0f : 0.025f);
                     if (difference < bestDifference)
@@ -111,6 +140,7 @@ internal sealed class CompanionNavigationGeometry
                         bestDifference = difference;
                         groundedPosition.y = supportedHeight;
                         supportNormal = support.normal;
+                        selectedSupport = support;
                         found = true;
                     }
                     if (heightDifference <= 0.035f)
@@ -129,6 +159,65 @@ internal sealed class CompanionNavigationGeometry
             ReportUncertainty();
         }
         return found;
+    }
+
+    internal void RunWithQueryBudget(int maximumQueries, System.Action action)
+    {
+        var priorLimit = _queryLimit;
+        _queryLimit = System.Math.Min(priorLimit,
+            NativeQueryCount > int.MaxValue - maximumQueries
+                ? int.MaxValue : NativeQueryCount + maximumQueries);
+        try
+        {
+            action();
+        }
+        finally
+        {
+            _queryLimit = priorLimit;
+        }
+    }
+
+    internal string DescribeGroundSample(Vector3 candidate, bool ordinaryRoutePoint, out Vector3 grounded)
+    {
+        Vector3 normal;
+        RaycastHit support;
+        var found = TryGroundPoint(candidate,
+            ordinaryRoutePoint ? candidate.y + 0.1f : float.PositiveInfinity,
+            out grounded, out normal, out support);
+        var path = support.collider == null ? "none" : DescribeTransformPath(support.collider.transform);
+        return $"found={found}, candidate={candidate}, projected={grounded}, " +
+            $"heightDelta={grounded.y - candidate.y:F3}, normal={normal}, " +
+            $"hitPoint={support.point}, collider={path}, hit={DescribeHit(support)}, " +
+            $"queryBudgetExhausted={QueryBudgetExhausted}";
+    }
+
+    internal string DescribeBodyGeometry()
+    {
+        if (_body == null || !_body.IsAlive)
+            return "body_unavailable";
+        float footOffset;
+        float radius;
+        float height;
+        GetDimensions(out footOffset, out radius, out height);
+        var collider = _body.Character.collision?.bodyCollider;
+        var bounds = collider == null ? default(Bounds) : collider.bounds;
+        return $"body={_body.Position}, boundsMin={bounds.min}, boundsSize={bounds.size}, " +
+            $"footOffset={footOffset:F3}, radius={radius:F3}, height={height:F3}, " +
+            $"grounded={_body.Character.ground != null && _body.Character.ground.isGrounded}, " +
+            $"mask={CompanionLocomotion.GetObstacleMask(_body.Character)}";
+    }
+
+    private static string DescribeTransformPath(Transform transform)
+    {
+        if (transform == null)
+            return "none";
+        var path = transform.name;
+        for (var depth = 0; depth < 5 && transform.parent != null; depth++)
+        {
+            transform = transform.parent;
+            path = transform.name + "/" + path;
+        }
+        return path.Replace(',', '_').Replace(';', '_');
     }
 
     internal bool CanWalkSegment(Vector3 from, Vector3 to)

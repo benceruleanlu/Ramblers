@@ -6,25 +6,33 @@ namespace Ramblers;
 
 internal readonly struct CompanionNavigationStep
 {
-    internal CompanionNavigationStep(Vector3 direction, string mode, bool stalled, bool requestJump)
+    internal CompanionNavigationStep(Vector3 direction, string mode, bool stalled, bool requestJump,
+        bool goalStalled = false)
     {
         Direction = direction;
         Mode = mode;
         Stalled = stalled;
         RequestJump = requestJump;
+        GoalStalled = goalStalled;
     }
 
     internal Vector3 Direction { get; }
     internal string Mode { get; }
     internal bool Stalled { get; }
     internal bool RequestJump { get; }
+    internal bool GoalStalled { get; }
 }
 
 internal sealed class CompanionFollowNavigation
 {
+    private const float GoalProgressDistance = 0.25f;
+    private const float GoalStallInterval = 6f;
+    private const float FailedApproachRadius = 0.65f;
+    private const float FailureMemoryDuration = 12f;
     private readonly CompanionLocalRoutePlanner _planner = new CompanionLocalRoutePlanner();
     private readonly Func<Vector3, Vector3?> _sampleGround;
     private readonly Func<Vector3, Vector3, bool> _clearSegment;
+    private readonly Func<Vector3, Vector3, bool> _attemptSegment;
     private readonly List<FailedDirection> _failures = new List<FailedDirection>();
     private Vector3[] _route = Array.Empty<Vector3>();
     private int _cursor;
@@ -43,13 +51,25 @@ internal sealed class CompanionFollowNavigation
     private Vector3 _lastDirection;
     private int _recoveryAttempts;
     private bool _escapeRoute;
+    private bool _observingGoal;
+    private Vector3 _observedGoal;
+    private float _bestGoalDistance;
+    private float _goalProgressAt;
+    private bool _hasApproach;
+    private Vector3 _approachOrigin;
+    private Vector3 _approachDirection;
+    private float _approachGoalDistance;
+    private float _approachAt;
+    private bool _leftApproach;
 
     internal CompanionFollowNavigation(
         Func<Vector3, Vector3?> sampleGround,
-        Func<Vector3, Vector3, bool> clearSegment)
+        Func<Vector3, Vector3, bool> clearSegment,
+        Func<Vector3, Vector3, bool> attemptSegment = null)
     {
         _sampleGround = sampleGround;
         _clearSegment = clearSegment;
+        _attemptSegment = attemptSegment;
     }
 
     internal string PlanStatus => _planner.LastStatus;
@@ -58,6 +78,8 @@ internal sealed class CompanionFollowNavigation
     internal int WaypointsRemaining => _route.Length - _cursor;
     internal int RememberedFailures => _failures.Count;
     internal int PlanCount { get; private set; }
+    internal int GoalStallCount { get; private set; }
+    internal bool IsRouteSegmentAvailable(Vector3 from, Vector3 to) => SegmentClear(from, to);
 
     internal void Reset()
     {
@@ -71,7 +93,10 @@ internal sealed class CompanionFollowNavigation
         _nextJumpAt = 0f;
         _recoveryAttempts = 0;
         _escapeRoute = false;
+        _observingGoal = false;
+        _hasApproach = false;
         PlanCount = 0;
+        GoalStallCount = 0;
     }
 
     internal void Pause()
@@ -81,6 +106,8 @@ internal sealed class CompanionFollowNavigation
         _cursor = 0;
         _lastDirection = Vector3.zero;
         _nextPlanAt = 0f;
+        _observingGoal = false;
+        _hasApproach = false;
     }
 
     internal bool TryWalkingDetour(
@@ -103,6 +130,17 @@ internal sealed class CompanionFollowNavigation
         return true;
     }
 
+    internal void AcceptRoute(Vector3 goal, int targetSequence, Vector3[] route, float now)
+    {
+        _route = route;
+        _cursor = 0;
+        _targetSequence = targetSequence;
+        _goal = goal;
+        _hasGoal = true;
+        _escapeRoute = false;
+        _nextPlanAt = route.Length == 0 ? now : now + 0.8f;
+    }
+
     internal CompanionNavigationStep Tick(
         Vector3 position,
         Vector3 goal,
@@ -121,6 +159,7 @@ internal sealed class CompanionFollowNavigation
             _hasGoal = true;
         }
 
+        var goalStalled = ObserveGoalProgress(position, goal, grounded, now);
         if (!grounded)
         {
             _observingProgress = false;
@@ -130,9 +169,12 @@ internal sealed class CompanionFollowNavigation
         }
 
         var stalled = ObserveProgress(position, now);
-        if (stalled)
+        if (stalled || goalStalled)
         {
-            RememberFailure(position, _lastDirection, now);
+            if (goalStalled && _hasApproach)
+                RememberFailure(_approachOrigin, _approachDirection, now);
+            else
+                RememberFailure(position, _lastDirection, now);
             _route = Array.Empty<Vector3>();
             _cursor = 0;
             _nextPlanAt = 0f;
@@ -186,9 +228,62 @@ internal sealed class CompanionFollowNavigation
             _nextJumpAt = now + 3f;
         SetProgressTarget(position, target, now);
         _lastDirection = direction;
-        var mode = _cursor >= _route.Length ? "contact_recovery"
+        RememberApproach(position, goal, direction, now);
+        var mode = _cursor >= _route.Length ? "attempt"
             : _escapeRoute ? "escape" : _route.Length > 1 ? "detour" : "direct";
-        return new CompanionNavigationStep(direction, mode, stalled, requestJump);
+        return new CompanionNavigationStep(direction, mode, stalled, requestJump, goalStalled);
+    }
+
+    private bool ObserveGoalProgress(Vector3 position, Vector3 goal, bool grounded, float now)
+    {
+        var distance = Vector3.Distance(position, goal);
+        if (!_observingGoal || Vector3.Distance(goal, _observedGoal) > 0.75f || now < _goalProgressAt)
+        {
+            _observingGoal = true;
+            _observedGoal = goal;
+            _bestGoalDistance = distance;
+            _goalProgressAt = now;
+            _hasApproach = false;
+            return false;
+        }
+        if (distance < _bestGoalDistance - GoalProgressDistance)
+        {
+            _bestGoalDistance = distance;
+            _goalProgressAt = now;
+        }
+        if (_hasApproach && Vector3.Distance(position, _approachOrigin) > 1.5f)
+            _leftApproach = true;
+        if (!grounded)
+            return false;
+        var repeatingApproach = _hasApproach && _leftApproach && now - _approachAt >= 2f &&
+            Vector3.Distance(position, _approachOrigin) <= 1f &&
+            distance >= _approachGoalDistance - GoalProgressDistance &&
+            Vector3.Dot(_lastDirection, _approachDirection) > 0.75f;
+        if (!repeatingApproach && now - _goalProgressAt < GoalStallInterval)
+            return false;
+        _goalProgressAt = now;
+        _approachAt = now;
+        _leftApproach = false;
+        GoalStallCount++;
+        return true;
+    }
+
+    private void RememberApproach(Vector3 position, Vector3 goal, Vector3 direction, float now)
+    {
+        if (_escapeRoute || direction.sqrMagnitude < 0.001f ||
+            Vector3.Dot(direction, Flat(goal - position).normalized) < 0.25f)
+            return;
+        var distance = Vector3.Distance(position, goal);
+        if (distance > _bestGoalDistance + GoalProgressDistance)
+            return;
+        if (_hasApproach && distance >= _approachGoalDistance - GoalProgressDistance)
+            return;
+        _hasApproach = true;
+        _approachOrigin = position;
+        _approachDirection = direction;
+        _approachGoalDistance = distance;
+        _approachAt = now;
+        _leftApproach = false;
     }
 
     private bool ObserveProgress(Vector3 position, float now)
@@ -242,24 +337,41 @@ internal sealed class CompanionFollowNavigation
 
     private bool SegmentClear(Vector3 from, Vector3 to)
     {
+        return !CrossesFailedApproach(from, to) && _clearSegment(from, to);
+    }
+
+    private bool CrossesFailedApproach(Vector3 from, Vector3 to)
+    {
         var direction = Flat(to - from).normalized;
         for (var i = 0; i < _failures.Count; i++)
         {
             var failure = _failures[i];
-            if (Vector3.Distance(from, failure.Origin) <= 0.65f &&
+            var delta = to - from;
+            var fraction = delta.sqrMagnitude < 0.0001f ? 0f :
+                Mathf.Clamp(Vector3.Dot(failure.Origin - from, delta) / delta.sqrMagnitude, 0f, 1f);
+            if (Vector3.Distance(from + delta * fraction, failure.Origin) <= FailedApproachRadius &&
                 Vector3.Dot(direction, failure.Direction) > 0.75f)
-                return false;
+                return true;
         }
-        return _clearSegment(from, to);
+        return false;
     }
 
     private void RememberFailure(Vector3 position, Vector3 direction, float now)
     {
         if (direction.sqrMagnitude < 0.001f)
             return;
+        for (var i = 0; i < _failures.Count; i++)
+        {
+            if (Vector3.Distance(position, _failures[i].Origin) <= 0.4f &&
+                Vector3.Dot(direction.normalized, _failures[i].Direction) > 0.85f)
+            {
+                _failures[i] = new FailedDirection(position, direction.normalized, now + FailureMemoryDuration);
+                return;
+            }
+        }
         if (_failures.Count >= 16)
             _failures.RemoveAt(0);
-        _failures.Add(new FailedDirection(position, direction.normalized, now + 8f));
+        _failures.Add(new FailedDirection(position, direction.normalized, now + FailureMemoryDuration));
     }
 
     private void FindEscape(Vector3 position, Vector3 goal)
@@ -267,6 +379,14 @@ internal sealed class CompanionFollowNavigation
         var forward = Flat(goal - position).normalized;
         if (forward.sqrMagnitude < 0.001f)
             forward = Vector3.forward;
+        var attempt = position + forward * 1.2f;
+        if (_attemptSegment != null && !CrossesFailedApproach(position, attempt) &&
+            _attemptSegment(position, attempt))
+        {
+            _route = Array.Empty<Vector3>();
+            _lastDirection = forward;
+            return;
+        }
         var side = new Vector3(-forward.z, 0f, forward.x);
         if ((_recoveryAttempts & 1) != 0)
             side = -side;

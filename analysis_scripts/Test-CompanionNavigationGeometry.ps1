@@ -19,6 +19,8 @@ try {
     $probeOutput = Join-Path $probeRoot "CompanionNavigationGeometryProbe.exe"
     & $compiler /nologo /target:exe /langversion:latest /optimize+ "/out:$probeOutput" `
         (Join-Path $ramblersRoot "src\CompanionNavigationGeometry.cs") `
+        (Join-Path $ramblersRoot "src\CompanionNavigationReproProbe.cs") `
+        (Join-Path $ramblersRoot "src\CompanionLocalRoutePlanner.cs") `
         (Join-Path $ramblersRoot "src\CompanionLocomotion.cs") `
         (Join-Path $PSScriptRoot "CompanionNavigationGeometryProbe.cs")
     if ($LASTEXITCODE -ne 0) {

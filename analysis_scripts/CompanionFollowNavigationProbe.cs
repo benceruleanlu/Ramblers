@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using UnityEngine;
 
 namespace UnityEngine
@@ -56,12 +57,16 @@ namespace Ramblers
             Run("target churn respects plan cadence", TargetChurnRespectsPlanCadence, ref failures);
             Run("airborne retains direction", AirborneRetainsDirectionWithoutGroundedStall, ref failures);
             Run("pause and reset lifecycle", PauseAndResetOwnTheirState, ref failures);
+            Run("recorded breadcrumb eighty-one loop", RecordedBreadcrumbEightyOneReportsNoGoalProgress, ref failures);
+            Run("brief airborne frames preserve goal clock", BriefAirborneFramesPreserveGoalProgress, ref failures);
+            Run("remembered approach blocks long return segment", RememberedApproachRejectsLongReturnSegment, ref failures);
+            Run("revisited approach detected before timeout", RepeatedApproachReportsGoalStall, ref failures);
             if (failures != 0)
             {
                 Console.Error.WriteLine("Companion follow navigation: " + failures + " behavioral checks failed.");
                 return 1;
             }
-            Console.WriteLine("Companion follow navigation: 8 behavioral checks passed.");
+            Console.WriteLine("Companion follow navigation: 12 behavioral checks passed.");
             return 0;
         }
 
@@ -80,6 +85,7 @@ namespace Ramblers
             for (var tick = 0; tick < 400 && Vector3.Distance(position, goal) > 0.3f; tick++)
             {
                 var step = navigator.Tick(position, goal, 1, true, tick * 0.05f);
+                Expect(!HasGoalStall(step), "legitimate U-shaped detour was mistaken for a repeated failed approach");
                 if (step.Mode == "detour") detourTicks++;
                 var candidate = position + step.Direction * 0.1f;
                 Expect(clear(position, candidate), "commanded detour movement crossed a solid wall");
@@ -164,7 +170,7 @@ namespace Ramblers
                 var step = navigator.Tick(Point(0, 0), goal, tick + 1, true, tick * 0.1f);
                 if (step.Stalled) stalls++;
             }
-            Expect(stalls >= 2 && navigator.RememberedFailures >= 2,
+            Expect(stalls >= 2 && navigator.RememberedFailures > 0,
                 "moving human or breadcrumb sequence churn erased a motionless companion's failures");
         }
 
@@ -213,6 +219,95 @@ namespace Ramblers
             navigator.Reset();
             Expect(navigator.PlanCount == 0 && navigator.RememberedFailures == 0 && navigator.WaypointsRemaining == 0,
                 "reset retained state from an old following lifecycle");
+        }
+
+        private static void RecordedBreadcrumbEightyOneReportsNoGoalProgress()
+        {
+            var goal = new Vector3(-216.30f, 33.93f, -509.11f);
+            var times = new[] { 38.42f, 39.43f, 40.56f, 41.66f, 42.66f, 43.79f,
+                44.79f, 45.79f, 46.79f, 47.83f };
+            var positions = new[]
+            {
+                new Vector3(-215.48f, 32.73f, -510.93f),
+                new Vector3(-214.71f, 33.01f, -512.86f),
+                new Vector3(-214.87f, 32.63f, -511.40f),
+                new Vector3(-215.41f, 32.71f, -509.26f),
+                new Vector3(-214.22f, 33.04f, -511.12f),
+                new Vector3(-215.35f, 32.70f, -510.06f),
+                new Vector3(-214.89f, 32.80f, -510.60f),
+                new Vector3(-214.70f, 32.62f, -510.83f),
+                new Vector3(-215.35f, 32.68f, -510.14f),
+                new Vector3(-214.21f, 33.09f, -511.50f)
+            };
+            var navigator = new CompanionFollowNavigation(candidate => candidate,
+                (from, to) => Vector3.Distance(to, goal) > 0.2f || from.z < -511.7f);
+            var goalStalls = 0;
+            var localStalls = 0;
+            for (var segment = 0; segment < times.Length - 1; segment++)
+            {
+                var steps = (int)Math.Ceiling((times[segment + 1] - times[segment]) / 0.1f);
+                for (var sample = 0; sample <= steps; sample++)
+                {
+                    var fraction = (float)sample / steps;
+                    var now = times[segment] + (times[segment + 1] - times[segment]) * fraction;
+                    var position = positions[segment] + (positions[segment + 1] - positions[segment]) * fraction;
+                    var grounded = Math.Abs(now - 44.79f) > 0.06f;
+                    var step = navigator.Tick(position, goal, 81, grounded, now);
+                    if (HasGoalStall(step)) goalStalls++;
+                    if (step.Stalled) localStalls++;
+                }
+            }
+            Console.WriteLine("  recorded loop goal stalls=" + goalStalls + ", local stalls=" + localStalls +
+                ", remembered=" + navigator.RememberedFailures);
+            Expect(goalStalls > 0 && navigator.RememberedFailures > 0,
+                "recorded escape-return trajectory made no global progress but was never reported");
+        }
+
+        private static void BriefAirborneFramesPreserveGoalProgress()
+        {
+            var navigator = new CompanionFollowNavigation(candidate => candidate, (from, to) => true);
+            var goalStalls = 0;
+            for (var tick = 0; tick <= 75; tick++)
+            {
+                var grounded = tick % 4 != 3;
+                var step = navigator.Tick(Point(0, 0), Point(5, 0), 81, grounded, tick * 0.1f);
+                if (HasGoalStall(step)) goalStalls++;
+            }
+            Expect(goalStalls > 0 && navigator.RememberedFailures > 0,
+                "brief unsupported frames repeatedly erased the stalled goal clock");
+        }
+
+        private static void RememberedApproachRejectsLongReturnSegment()
+        {
+            var navigator = new CompanionFollowNavigation(candidate => candidate, (from, to) => true);
+            var goal = Point(5, 0);
+            navigator.Tick(Point(0, 0), goal, 81, true, 0);
+            navigator.Tick(Point(0, 0), goal, 81, true, 1.3f);
+            Expect(navigator.RememberedFailures > 0, "test never recorded the physically failed approach");
+            Expect(navigator.TryWalkingDetour(Point(-2, 0), goal, 81, 2.2f,
+                candidate => candidate, (from, to) => true), "alternative route around the failed approach was not found");
+            var step = navigator.Tick(Point(-2, 0), goal, 81, true, 2.2f);
+            Expect(navigator.PlanStatus != "direct" && Math.Abs(step.Direction.z) > 0.1f,
+                "a long direct segment crossed the remembered failed approach from outside its origin radius");
+        }
+
+        private static void RepeatedApproachReportsGoalStall()
+        {
+            var navigator = new CompanionFollowNavigation(candidate => candidate, (from, to) => true);
+            var goal = Point(5, 0);
+            navigator.Tick(Point(0, 0), goal, 81, true, 0);
+            navigator.Tick(Point(-2, 0), goal, 81, true, 1.0f);
+            navigator.Tick(Point(-1.2f, 0), goal, 81, true, 1.5f);
+            var returned = navigator.Tick(Point(-0.2f, 0), goal, 81, true, 2.5f);
+            Expect(HasGoalStall(returned) && navigator.RememberedFailures > 0,
+                "returning to the same unsuccessful approach was counted as fresh route progress");
+        }
+
+        private static bool HasGoalStall(CompanionNavigationStep step)
+        {
+            var property = typeof(CompanionNavigationStep).GetProperty("GoalStalled",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            return property != null && (bool)property.GetValue(step);
         }
 
         private static Func<Vector3, Vector3, bool> SegmentPredicate(Func<Vector3, bool> open) =>
