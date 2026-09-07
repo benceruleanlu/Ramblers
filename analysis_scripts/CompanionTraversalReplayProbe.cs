@@ -98,7 +98,17 @@ namespace Ramblers
             AirborneCorrectionTargetsOriginalLanding();
             LongDropStopsHorizontalIntentAboveLanding();
             AirborneOvershootCanCorrectBackToLanding();
-            Console.WriteLine("Traversal replay probe passed (22 scenarios).");
+            LoggedShortDropCompletesWithoutAirborne();
+            GroundedOvershootCompletesDrop();
+            GroundedArrivalBeforeLaunchSatisfiesHint();
+            WalkedJumpSpanDoesNotRequireJumpAnimation();
+            RaisedPlatformAtSameXZDoesNotCompleteAtLaunch();
+            InPlaceJumpDoesNotCompleteWhileGrounded();
+            VerticalDropRequiresRealProgress();
+            SidewaysOrDistantGroundDoesNotCountAsArrival();
+            PendingDropReaimsTowardLanding();
+            ArrivalAfterLaunchTimeoutDoesNotReturnToTakeoff();
+            Console.WriteLine("Traversal replay probe passed (32 scenarios).");
             return 0;
         }
 
@@ -384,7 +394,8 @@ namespace Ramblers
                 "canceled airborne direction kept movement ownership");
             Expect(!replay.Tick(point, Point(2f, 0f), true, 0.5f, Yes, out direction),
                 "landing automatically resumed canceled movement");
-            ExpectNear(replay.ApproachPosition.x, 0f, "canceled traversal lost its approach position");
+            ExpectNear(replay.ApproachPosition.x, 2f, "physical arrival after cancellation was ignored");
+            Expect(replay.JumpCommittedSequence == 1, "physical arrival after cancellation did not satisfy hint");
         }
 
         private static void CancelNextLaunchKeepsPreviousCompletion()
@@ -449,6 +460,170 @@ namespace Ramblers
             Expect(replay.Tick(point, Point(2.5f, 0.2f), false, 0.4f, Yes, out direction),
                 "overshoot ended airborne control");
             ExpectNear(direction.x, -1f, "air control continued increasing landing overshoot");
+        }
+
+        private static void LoggedShortDropCompletesWithoutAirborne()
+        {
+            var replay = new CompanionTraversalReplay();
+            var takeoff = new Vector3(-215.21f, 33.35f, -508.62f);
+            var landing = new Vector3(-214.83f, 32.68f, -508.93f);
+            var point = Drop(80, takeoff, landing);
+            Vector3 direction;
+            Expect(replay.Tick(point, takeoff, true, 33.7f, NeverJump, out direction),
+                "logged short drop did not start");
+            var actualArrival = new Vector3(-214.94f, 32.54f, -508.88f);
+            Expect(!replay.Tick(point, actualArrival, true, 33.85f, NeverJump, out direction),
+                "logged grounded arrival kept driving toward the old launch heading");
+            Expect(replay.DropCommittedSequence == 80 && !replay.Active,
+                "logged grounded arrival was not recognized as a completed hint");
+            ExpectNear(direction.sqrMagnitude, 0f, "logged arrival retained movement intent");
+            replay.Tick(point, actualArrival, true, 35f, NeverJump, out direction);
+            Expect(!replay.Active && replay.DropCommittedSequence == 80,
+                "logged arrival later retried the same short drop");
+        }
+
+        private static void GroundedOvershootCompletesDrop()
+        {
+            var replay = new CompanionTraversalReplay();
+            var takeoff = new Vector3(-215.21f, 33.35f, -508.62f);
+            var landing = new Vector3(-214.83f, 32.68f, -508.93f);
+            var point = Drop(80, takeoff, landing);
+            Vector3 direction;
+            replay.Tick(point, takeoff, true, 32.6f, NeverJump, out direction);
+            Expect(!replay.Tick(point, new Vector3(-214.44f, 32.84f, -509.25f), true,
+                32.78f, NeverJump, out direction), "grounded overstep was sent back to takeoff");
+            Expect(replay.DropCommittedSequence == 80, "grounded endpoint crossing did not satisfy hint");
+        }
+
+        private static void GroundedArrivalBeforeLaunchSatisfiesHint()
+        {
+            var replay = new CompanionTraversalReplay();
+            var point = Drop(1, Point(0f, 1f), Point(0.5f, 0f));
+            Vector3 direction;
+            Expect(!replay.Tick(point, Point(0.5f, -0.1f), true, 0f, NeverJump, out direction),
+                "already reached hint acquired movement ownership");
+            Expect(replay.DropCommittedSequence == 1 && !replay.Active,
+                "already reached hint required a trip back to takeoff");
+            ExpectNear(replay.ApproachPosition.x, 0.5f, "already reached hint retained takeoff target");
+        }
+
+        private static void WalkedJumpSpanDoesNotRequireJumpAnimation()
+        {
+            var replay = new CompanionTraversalReplay();
+            var point = Jump(1, Point(0f, 0f), Point(2f, 0f));
+            Vector3 direction;
+            replay.Tick(point, Point(0f, 0f), true, 0f, Yes, out direction);
+            Expect(!replay.Tick(point, Point(1.9f, 0f), true, 0.6f, NeverJump, out direction),
+                "walking across a jump hint still demanded airborne evidence");
+            Expect(replay.JumpCommittedSequence == 1 && !replay.Active,
+                "walkable jump span was not satisfied by physical progress");
+        }
+
+        private static void RaisedPlatformAtSameXZDoesNotCompleteAtLaunch()
+        {
+            var replay = new CompanionTraversalReplay();
+            var point = Jump(1, Point(0f, 0f), Point(0f, 0.9f));
+            Vector3 direction;
+            Expect(replay.Tick(point, Point(0f, 0f), true, 0f, Yes, out direction),
+                "standing beneath a raised platform satisfied the landing");
+            replay.Tick(point, Point(0f, 0f), true, 0.3f, Yes, out direction);
+            Expect(replay.JumpCommittedSequence == 0 && replay.Active,
+                "same XZ below platform was classified as arrival");
+
+            var smallRise = new CompanionTraversalReplay();
+            var shortPoint = Jump(2, Point(0f, 0f), Point(0f, 0.2f));
+            Expect(smallRise.Tick(shortPoint, Point(0f, 0f), true, 0f, Yes, out direction),
+                "landing tolerance completed a short vertical step before any progress");
+            Expect(smallRise.JumpCommittedSequence == 0,
+                "short vertical step was satisfied while still at takeoff");
+        }
+
+        private static void InPlaceJumpDoesNotCompleteWhileGrounded()
+        {
+            var replay = new CompanionTraversalReplay();
+            var point = Jump(1, Point(0f, 0f), Point(0f, 0f));
+            Vector3 direction;
+            Expect(replay.Tick(point, Point(0f, 0f), true, 0f, Yes, out direction),
+                "in-place jump self-completed on its launch tick");
+            replay.Tick(point, Point(0f, 0f), true, 0.4f, Yes, out direction);
+            Expect(replay.JumpCommittedSequence == 0,
+                "unchanged grounded position satisfied an in-place jump");
+        }
+
+        private static void VerticalDropRequiresRealProgress()
+        {
+            var replay = new CompanionTraversalReplay();
+            var point = Drop(1, Point(0f, 0.2f), Point(0f, 0f));
+            Vector3 direction;
+            Expect(replay.Tick(point, Point(0f, 0.2f), true, 0f, NeverJump, out direction),
+                "vertical drop self-completed within landing height tolerance");
+            Expect(!replay.Tick(point, Point(0f, 0f), true, 0.3f, NeverJump, out direction),
+                "grounded downward progress failed to satisfy vertical drop");
+            Expect(replay.DropCommittedSequence == 1, "completed vertical drop retained old hint");
+        }
+
+        private static void SidewaysOrDistantGroundDoesNotCountAsArrival()
+        {
+            var point = Drop(1, Point(0f, 1f), Point(1f, 0f));
+            Vector3 direction;
+            var sideways = new CompanionTraversalReplay();
+            sideways.Tick(point, Point(0f, 1f), true, 0f, NeverJump, out direction);
+            Expect(sideways.Tick(point, new Vector3(1.1f, 0f, 1f), true, 0.3f, NeverJump, out direction),
+                "unrelated side ground was credited as endpoint crossing");
+            Expect(sideways.DropCommittedSequence == 0, "sideways endpoint-plane crossing satisfied hint");
+            var distant = new CompanionTraversalReplay();
+            distant.Tick(point, Point(0f, 1f), true, 0f, NeverJump, out direction);
+            Expect(distant.Tick(point, Point(3f, 0f), true, 0.3f, NeverJump, out direction),
+                "unbounded ground beyond endpoint was treated as a local landing");
+            Expect(distant.DropCommittedSequence == 0, "distant ground satisfied endpoint arrival");
+            var lowerFloor = new CompanionTraversalReplay();
+            lowerFloor.Tick(point, Point(0f, 1f), true, 0f, NeverJump, out direction);
+            Expect(lowerFloor.Tick(point, Point(1f, -0.8f), true, 0.3f, NeverJump, out direction),
+                "another floor counted as the expected landing height");
+            Expect(lowerFloor.DropCommittedSequence == 0, "vertical tolerance matched another floor");
+        }
+
+        private static void PendingDropReaimsTowardLanding()
+        {
+            var replay = new CompanionTraversalReplay();
+            var point = Drop(1, Point(0f, 1f), Point(1f, 0f));
+            Vector3 direction;
+            replay.Tick(point, Point(0f, 1f), true, 0f, NeverJump, out direction);
+            Expect(replay.Tick(point, new Vector3(0.5f, 0.7f, 0.5f), true, 0.2f, NeverJump, out direction),
+                "pending drop lost ownership during sideways drift");
+            ExpectNear(direction.x, (float)Math.Sqrt(0.5), "pending drop retained stale launch x");
+            ExpectNear(direction.z, -(float)Math.Sqrt(0.5), "pending drop ignored lateral drift");
+            Expect(replay.Tick(point, Point(1.5f, 0.7f), true, 0.3f, NeverJump, out direction),
+                "pending drop completed despite wrong landing height");
+            ExpectNear(direction.x, -1f, "pending drop continued outward after passing landing XZ");
+        }
+
+        private static void ArrivalAfterLaunchTimeoutDoesNotReturnToTakeoff()
+        {
+            var replay = new CompanionTraversalReplay();
+            var point = Drop(1, Point(0f, 1f), Point(1f, 0f));
+            Vector3 direction;
+            replay.Tick(point, Point(0f, 1f), true, 0f, NeverJump, out direction);
+            Expect(!replay.Tick(point, Point(0f, 1f), true, 0.9f, NeverJump, out direction),
+                "unchanged failed launch did not release ownership");
+            Expect(!replay.Tick(point, Point(1f, 0f), true, 1f, NeverJump, out direction),
+                "arrival during cooldown requested another launch");
+            Expect(replay.DropCommittedSequence == 1,
+                "arrival during retry cooldown was ignored until a return to takeoff");
+            ExpectNear(replay.ApproachPosition.x, 1f, "cooldown arrival retained wrong approach target");
+        }
+
+        private static BreadcrumbPoint Drop(int sequence, Vector3 takeoff, Vector3 landing)
+        {
+            var direction = landing - takeoff;
+            direction.y = 0f;
+            return new BreadcrumbPoint(sequence, landing, false, true,
+                direction.normalized, true, takeoff, 0.14f);
+        }
+
+        private static bool NeverJump()
+        {
+            throw new InvalidOperationException("drop or completed hint requested a native jump");
         }
 
         private static BreadcrumbPoint Jump(int sequence, Vector3 takeoff, Vector3 landing)

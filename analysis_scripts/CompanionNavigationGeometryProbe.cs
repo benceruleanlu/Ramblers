@@ -190,8 +190,18 @@ namespace Ramblers
             VerticalTraversalClearsPreviousWalkingIntent();
             TraversalSpeedUsesRecordedPaceWithinNativeBounds();
             PhysicsQueryCountTracksActualCalls();
+            FlatWalkingDoesNotRequireReplayingAJump();
+            RealGapRemainsUncertainWithoutBlockingNativeMovement();
+            TinyFloorSeamKeepsWalkingConnection();
+            ContinuousRampKeepsWalkingConnection();
+            AbruptFloorLayerSwitchIsNotAConfirmedWalk();
+            WalkingConnectionReportsMeasuredWall();
+            WalkingProbeBudgetIsBoundedAndScoped();
+            WalkingConnectionPreservesBodyOriginHeight();
+            WalkingConnectionFollowsHillContour();
+            GroundContactHeightDifferencesStayWithinTolerance();
             ReleaseClearsNativeReferences();
-            Console.WriteLine("Companion navigation geometry probe passed (14 cases).");
+            Console.WriteLine("Companion navigation geometry probe passed (24 cases).");
             return 0;
         }
 
@@ -426,6 +436,158 @@ namespace Ramblers
             Vector3 grounded;
             Expect(geometry.TryGroundPoint(Vector3.zero, out grounded), "test flat support missing");
             Expect(geometry.NativeQueryCount == 4, "matching center support should require only one query");
+        }
+
+        private static void SampleFloor(Func<Vector3, float?> height, Vector3? normal = null)
+        {
+            Physics.Ray = (origin, direction, distance) =>
+            {
+                if (direction.y > -0.9f)
+                    return null;
+                var floor = height(origin);
+                if (!floor.HasValue || floor.Value > origin.y || origin.y - floor.Value > distance)
+                    return null;
+                return new RaycastHit
+                {
+                    collider = new Collider(),
+                    normal = normal ?? Vector3.up,
+                    point = new Vector3(origin.x, floor.Value, origin.z),
+                    distance = origin.y - floor.Value
+                };
+            };
+        }
+
+        private static void FlatWalkingDoesNotRequireReplayingAJump()
+        {
+            CompanionNavigationGeometry geometry;
+            Create(out geometry);
+            SampleFloor(origin => 0f);
+            Expect(geometry.CanWalkSegment(Vector3.zero, new Vector3(3f, 0f, 0f)),
+                "flat route between jump takeoff and landing was not walkable");
+            Expect(geometry.CanWalkSegment(Vector3.zero, Vector3.zero),
+                "in-place jump invented an obstacle");
+            Expect(geometry.LastWalkingConnectionReason == "connected", "successful walk reason missing");
+        }
+
+        private static void RealGapRemainsUncertainWithoutBlockingNativeMovement()
+        {
+            CompanionNavigationGeometry geometry;
+            Create(out geometry);
+            SampleFloor(origin => origin.x > 1f && origin.x < 2f ? (float?)null : 0f);
+            var destination = new Vector3(3f, 0f, 0f);
+            Expect(geometry.ProbeWalkingConnection(Vector3.zero, destination) == CompanionWalkingConnection.Uncertain,
+                "unsupported gap was certified as an ordinary walk");
+            Expect(geometry.LastWalkingConnectionReason.StartsWith("sample_support_missing:"),
+                "gap uncertainty did not identify the missing support sample");
+            Expect(geometry.IsSegmentClear(Vector3.zero, destination),
+                "uncertain walking support blocked an otherwise clear native motion segment");
+        }
+
+        private static void TinyFloorSeamKeepsWalkingConnection()
+        {
+            CompanionNavigationGeometry geometry;
+            Create(out geometry);
+            SampleFloor(origin => origin.x > 1.01f && origin.x < 1.09f ? (float?)null : 0f);
+            Expect(geometry.CanWalkSegment(Vector3.zero, new Vector3(2.1f, 0f, 0f)),
+                "tiny mesh seam erased support under the character footprint");
+        }
+
+        private static void ContinuousRampKeepsWalkingConnection()
+        {
+            CompanionNavigationGeometry geometry;
+            Create(out geometry);
+            SampleFloor(origin => origin.x * 0.4f, new Vector3(-0.3713907f, 0.9284767f, 0f));
+            Expect(geometry.CanWalkSegment(Vector3.zero, new Vector3(3f, 1.2f, 0f)),
+                "supported ordinary ramp was treated as a gap or floor switch");
+        }
+
+        private static void AbruptFloorLayerSwitchIsNotAConfirmedWalk()
+        {
+            CompanionNavigationGeometry geometry;
+            Create(out geometry);
+            SampleFloor(origin => origin.x < 1.5f ? 0f : 1f);
+            Expect(geometry.ProbeWalkingConnection(Vector3.zero, new Vector3(3f, 1f, 0f)) ==
+                CompanionWalkingConnection.Uncertain,
+                "diagonal air clearance was mistaken for a connection between flat floor layers");
+        }
+
+        private static void WalkingConnectionReportsMeasuredWall()
+        {
+            CompanionNavigationGeometry geometry;
+            Create(out geometry);
+            SampleFloor(origin => 0f);
+            PlayerGround.CastHits = new[] { Hit(0.1f, new Vector3(-1f, 0f, 0f)) };
+            Expect(geometry.ProbeWalkingConnection(Vector3.zero, new Vector3(2f, 0f, 0f)) ==
+                CompanionWalkingConnection.Obstructed, "measured wall contact was not reported");
+            Expect(geometry.LastWalkingConnectionReason.StartsWith("collision:"), "wall reason missing");
+        }
+
+        private static void WalkingProbeBudgetIsBoundedAndScoped()
+        {
+            CompanionNavigationGeometry geometry;
+            Create(out geometry);
+            Expect(geometry.ProbeWalkingConnection(Vector3.zero, new Vector3(20f, 0f, 0f)) ==
+                CompanionWalkingConnection.Uncertain, "long walk bypassed the sensing horizon");
+            Expect(geometry.NativeQueryCount == 0, "out-of-horizon probe spent physics work");
+            SampleFloor(origin => origin.y > 0.6f ? 0.6f : origin.y > 0.4f ? 0.4f :
+                origin.y > 0.2f ? 0.2f : 0f);
+            Expect(geometry.ProbeWalkingConnection(Vector3.zero, new Vector3(16f, 0f, 0f)) ==
+                CompanionWalkingConnection.Uncertain, "expensive layered walk ignored the query budget");
+            Expect(geometry.NativeQueryCount <= 256, "walking query budget exceeded 256 native calls");
+            Expect(geometry.LastWalkingConnectionReason.StartsWith("query_budget:"), "query budget reason missing");
+            var queries = geometry.NativeQueryCount;
+            geometry.IsSegmentClear(Vector3.zero, Forward);
+            Expect(geometry.NativeQueryCount == queries + 3, "walking budget leaked into ordinary motion sensing");
+        }
+
+        private static void WalkingConnectionPreservesBodyOriginHeight()
+        {
+            CompanionNavigationGeometry geometry;
+            var body = Create(out geometry);
+            body.Position = new Vector3(0f, 0.4f, 0f);
+            SampleFloor(origin => 0f);
+            Expect(geometry.CanWalkSegment(body.Position, new Vector3(3f, 0.4f, 0f)),
+                "body origin height was confused with the contact surface height");
+        }
+
+        private static void WalkingConnectionFollowsHillContour()
+        {
+            CompanionNavigationGeometry geometry;
+            Create(out geometry);
+            Physics.Ray = (origin, direction, distance) =>
+            {
+                if (direction.y > -0.9f)
+                    return null;
+                var height = (float)(1.2 * Math.Sin(origin.x * Math.PI / 4.0));
+                if (origin.y < height || origin.y - height > distance)
+                    return null;
+                var gradient = (float)(1.2 * Math.PI / 4.0 * Math.Cos(origin.x * Math.PI / 4.0));
+                var normal = new Vector3(-gradient, 1f, 0f);
+                normal.Normalize();
+                return new RaycastHit
+                {
+                    collider = new Collider(), normal = normal,
+                    point = new Vector3(origin.x, height, origin.z), distance = origin.y - height
+                };
+            };
+            Expect(geometry.CanWalkSegment(Vector3.zero, new Vector3(4f, 0f, 0f)),
+                "equal-height endpoints hid a continuously supported hill");
+        }
+
+        private static void GroundContactHeightDifferencesStayWithinTolerance()
+        {
+            CompanionNavigationGeometry geometry;
+            var body = Create(out geometry);
+            body.Position = new Vector3(0f, 32.54f, 0f);
+            body.Character.collision.bodyCollider.bounds = new Bounds
+            {
+                center = new Vector3(0f, 33.29f, 0f), size = new Vector3(0.5f, 1.5f, 0.5f)
+            };
+            SampleFloor(origin => 32.54f);
+            Expect(geometry.CanWalkSegment(body.Position, new Vector3(3f, 32.68f, 0f)),
+                "observed 0.14m human/bot contact difference rejected an ordinary walk");
+            Expect(geometry.CanWalkSegment(new Vector3(0f, 32.64f, 0f), new Vector3(3f, 32.74f, 0f)),
+                "0.1m start/0.2m end contact differences rejected by float rounding");
         }
 
         private static void Expect(bool condition, string message)

@@ -124,6 +124,18 @@ internal sealed class BreadcrumbTrail
         return true;
     }
 
+    internal void MakeFirstWalkable()
+    {
+        if (_count == 0)
+            return;
+        var point = Peek();
+        var walkable = new BreadcrumbPoint(point.Sequence, point.Position,
+            false, false, point.TravelDirection);
+        _points[_head] = walkable;
+        if (_lastAdded.Sequence == point.Sequence)
+            _lastAdded = walkable;
+    }
+
     internal bool TryRemoveFirst(out BreadcrumbPoint point)
     {
         point = default(BreadcrumbPoint);

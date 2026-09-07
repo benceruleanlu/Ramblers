@@ -83,6 +83,26 @@ internal sealed class CompanionFollowNavigation
         _nextPlanAt = 0f;
     }
 
+    internal bool TryWalkingDetour(
+        Vector3 position, Vector3 goal, int targetSequence, float now,
+        Func<Vector3, Vector3?> sampleGround,
+        Func<Vector3, Vector3, bool> canWalkSegment)
+    {
+        PlanCount++;
+        if (!_planner.TryPlan(position, goal, sampleGround,
+                (from, to) => canWalkSegment(from, to) && SegmentClear(from, to),
+                out var route))
+            return false;
+        _route = route;
+        _cursor = 0;
+        _targetSequence = targetSequence;
+        _goal = goal;
+        _hasGoal = true;
+        _escapeRoute = false;
+        _nextPlanAt = now + 0.8f;
+        return true;
+    }
+
     internal CompanionNavigationStep Tick(
         Vector3 position,
         Vector3 goal,

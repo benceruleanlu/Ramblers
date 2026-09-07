@@ -21,6 +21,11 @@ internal sealed class CompanionTraversalReplay
     private const float UnsupportedConfirmationTime = 0.08f;
     private const float VerticalDepartureConfirmation = 0.06f;
     private const float LandingHorizontalTolerance = 0.2f;
+    private const float GroundedLandingHorizontalTolerance = 0.25f;
+    private const float GroundedLandingVerticalTolerance = 0.25f;
+    private const float LandingPassTolerance = 0.75f;
+    private const float LandingPassLateralTolerance = 0.3f;
+    private const float MinimumArrivalProgress = 0.1f;
 
     private BreadcrumbPoint _point;
     private ReplayPhase _phase;
@@ -86,6 +91,12 @@ internal sealed class CompanionTraversalReplay
         _hasTick = true;
         _lastTickAt = now;
 
+        if (Active && grounded && HasReachedLanding(bodyPosition))
+        {
+            Complete();
+            return false;
+        }
+
         if (_phase == ReplayPhase.Airborne)
         {
             if (!grounded)
@@ -94,11 +105,7 @@ internal sealed class CompanionTraversalReplay
                 return true;
             }
 
-            _phase = ReplayPhase.Completed;
-            if (_point.RequiresJump)
-                JumpCommittedSequence = _point.Sequence;
-            if (_point.RequiresDrop)
-                DropCommittedSequence = _point.Sequence;
+            Complete();
             return false;
         }
 
@@ -118,7 +125,7 @@ internal sealed class CompanionTraversalReplay
                 }
                 direction = _phase == ReplayPhase.Airborne
                     ? ResolveAirborneDirection(bodyPosition)
-                    : _launchDirection;
+                    : ResolveLaunchDirection(bodyPosition);
                 return true;
             }
 
@@ -130,7 +137,7 @@ internal sealed class CompanionTraversalReplay
                 return false;
             }
 
-            direction = _launchDirection;
+            direction = ResolveLaunchDirection(bodyPosition);
             return true;
         }
 
@@ -147,6 +154,12 @@ internal sealed class CompanionTraversalReplay
                 _phase = ReplayPhase.Completed;
             }
             _nextLaunchAt = now;
+        }
+
+        if (_phase == ReplayPhase.Approach && grounded && HasReachedLanding(bodyPosition))
+        {
+            Complete();
+            return false;
         }
 
         if (_phase != ReplayPhase.Approach || !grounded || now < _nextLaunchAt)
@@ -167,17 +180,7 @@ internal sealed class CompanionTraversalReplay
             return false;
         }
 
-        _launchDirection = _point.Position - bodyPosition;
-        _launchDirection.y = 0f;
-        if (_launchDirection.sqrMagnitude < 0.0001f)
-        {
-            _launchDirection = _point.TravelDirection;
-            _launchDirection.y = 0f;
-        }
-        if (_launchDirection.sqrMagnitude >= 0.0001f)
-            _launchDirection.Normalize();
-        else
-            _launchDirection = Vector3.zero;
+        _launchDirection = ResolveLaunchDirection(bodyPosition);
 
         _launchY = bodyPosition.y;
         _launchedAt = now;
@@ -185,6 +188,64 @@ internal sealed class CompanionTraversalReplay
         _phase = ReplayPhase.AwaitAirborne;
         direction = _launchDirection;
         return true;
+    }
+
+    private void Complete()
+    {
+        _phase = ReplayPhase.Completed;
+        if (_point.RequiresJump)
+            JumpCommittedSequence = _point.Sequence;
+        if (_point.RequiresDrop)
+            DropCommittedSequence = _point.Sequence;
+    }
+
+    private bool HasReachedLanding(Vector3 bodyPosition)
+    {
+        var fromTakeoff = bodyPosition - _point.TakeoffPosition;
+        var recordedTravel = _point.Position - _point.TakeoffPosition;
+        var recordedDistance = recordedTravel.magnitude;
+        if (recordedDistance < MinimumArrivalProgress)
+            return false;
+
+        var progress = Vector3.Dot(fromTakeoff, recordedTravel) / recordedDistance;
+        if (progress < Math.Min(MinimumArrivalProgress, recordedDistance * 0.5f))
+            return false;
+
+        var fromLanding = bodyPosition - _point.Position;
+        if (Mathf.Abs(fromLanding.y) > GroundedLandingVerticalTolerance)
+            return false;
+
+        fromLanding.y = 0f;
+        if (fromLanding.sqrMagnitude <=
+            GroundedLandingHorizontalTolerance * GroundedLandingHorizontalTolerance)
+        {
+            return true;
+        }
+
+        recordedTravel.y = 0f;
+        if (recordedTravel.sqrMagnitude < MinimumArrivalProgress * MinimumArrivalProgress)
+            return false;
+
+        var travelDirection = recordedTravel.normalized;
+        var beyondLanding = Vector3.Dot(fromLanding, travelDirection);
+        if (beyondLanding < 0f || beyondLanding > LandingPassTolerance)
+            return false;
+
+        var lateralOffset = fromLanding - travelDirection * beyondLanding;
+        return lateralOffset.sqrMagnitude <=
+               LandingPassLateralTolerance * LandingPassLateralTolerance;
+    }
+
+    private Vector3 ResolveLaunchDirection(Vector3 bodyPosition)
+    {
+        var direction = _point.Position - bodyPosition;
+        direction.y = 0f;
+        if (direction.sqrMagnitude < 0.0001f)
+        {
+            direction = _point.TravelDirection;
+            direction.y = 0f;
+        }
+        return direction.sqrMagnitude >= 0.0001f ? direction.normalized : Vector3.zero;
     }
 
     private Vector3 ResolveAirborneDirection(Vector3 bodyPosition)

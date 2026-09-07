@@ -3,6 +3,13 @@ using UnityEngine;
 
 namespace Ramblers;
 
+internal enum CompanionWalkingConnection
+{
+    Walkable,
+    Uncertain,
+    Obstructed
+}
+
 internal sealed class CompanionNavigationGeometry
 {
     private const int HitCapacity = 32;
@@ -11,14 +18,21 @@ internal sealed class CompanionNavigationGeometry
     private const float SupportRise = 0.9f;
     private const float SupportDrop = 1.6f;
     private const int RayContinuationLimit = 4;
+    private const float WalkingSampleSpacing = 0.35f;
+    private const float WalkingHorizon = 16f;
+    private const int WalkingQueryBudget = 256;
+    private const float WalkingHeightTolerance = 0.2f;
+    private const float HeightComparisonEpsilon = 0.001f;
 
     private CompanionBody _body;
     private Il2CppStructArray<RaycastHit> _hits;
     private float _nextUncertaintyLogAt;
     private int _uncertainSupportCount;
     private int _saturatedCastCount;
+    private int _queryLimit = int.MaxValue;
 
     internal int NativeQueryCount { get; private set; }
+    internal string LastWalkingConnectionReason { get; private set; } = "not_sampled";
 
     internal void Bind(CompanionBody body)
     {
@@ -28,6 +42,8 @@ internal sealed class CompanionNavigationGeometry
         _uncertainSupportCount = 0;
         _saturatedCastCount = 0;
         NativeQueryCount = 0;
+        _queryLimit = int.MaxValue;
+        LastWalkingConnectionReason = "not_sampled";
     }
 
     internal void Release()
@@ -37,11 +53,23 @@ internal sealed class CompanionNavigationGeometry
         _uncertainSupportCount = 0;
         _saturatedCastCount = 0;
         NativeQueryCount = 0;
+        _queryLimit = int.MaxValue;
+        LastWalkingConnectionReason = "released";
     }
 
     internal bool TryGroundPoint(Vector3 candidate, out Vector3 groundedPosition)
     {
+        Vector3 supportNormal;
+        return TryGroundPoint(candidate, out groundedPosition, out supportNormal);
+    }
+
+    private bool TryGroundPoint(
+        Vector3 candidate,
+        out Vector3 groundedPosition,
+        out Vector3 supportNormal)
+    {
         groundedPosition = candidate;
+        supportNormal = Vector3.up;
         if (_body == null || !_body.IsAlive)
             return false;
 
@@ -82,6 +110,7 @@ internal sealed class CompanionNavigationGeometry
                     {
                         bestDifference = difference;
                         groundedPosition.y = supportedHeight;
+                        supportNormal = support.normal;
                         found = true;
                     }
                     if (heightDifference <= 0.035f)
@@ -100,6 +129,92 @@ internal sealed class CompanionNavigationGeometry
             ReportUncertainty();
         }
         return found;
+    }
+
+    internal bool CanWalkSegment(Vector3 from, Vector3 to)
+    {
+        return ProbeWalkingConnection(from, to) == CompanionWalkingConnection.Walkable;
+    }
+
+    internal CompanionWalkingConnection ProbeWalkingConnection(Vector3 from, Vector3 to)
+    {
+        if (_body == null || !_body.IsAlive)
+            return WalkingResult(CompanionWalkingConnection.Uncertain, "body_unavailable");
+
+        var delta = to - from;
+        var distance = delta.magnitude;
+        if (distance > WalkingHorizon)
+            return WalkingResult(CompanionWalkingConnection.Uncertain, $"beyond_horizon:{distance:F2}");
+
+        var priorLimit = _queryLimit;
+        _queryLimit = System.Math.Min(priorLimit,
+            NativeQueryCount > int.MaxValue - WalkingQueryBudget
+                ? int.MaxValue : NativeQueryCount + WalkingQueryBudget);
+        try
+        {
+            Vector3 previous;
+            Vector3 previousNormal;
+            var startSupported = TryGroundPoint(from, out previous, out previousNormal);
+            if (NativeQueryCount >= _queryLimit)
+                return WalkingResult(CompanionWalkingConnection.Uncertain, "query_budget:start");
+            if (!startSupported)
+                return WalkingResult(CompanionWalkingConnection.Uncertain, "starting_support_missing");
+            var startHeightDifference = Mathf.Abs(previous.y - from.y);
+            if (startHeightDifference > WalkingHeightTolerance + HeightComparisonEpsilon)
+                return WalkingResult(CompanionWalkingConnection.Uncertain, $"start_height:{startHeightDifference:F3}");
+
+            var samples = System.Math.Max(1, (int)System.Math.Ceiling(distance / WalkingSampleSpacing));
+            for (var sample = 1; sample <= samples; sample++)
+            {
+                Vector3 supported;
+                Vector3 normal;
+                var candidate = from + delta * ((float)sample / samples);
+                candidate.y = previous.y -
+                    (previousNormal.x * (candidate.x - previous.x) +
+                     previousNormal.z * (candidate.z - previous.z)) /
+                    Mathf.Max(0.1f, previousNormal.y);
+                var sampledSupport = TryGroundPoint(candidate, out supported, out normal);
+                if (NativeQueryCount >= _queryLimit)
+                    return WalkingResult(CompanionWalkingConnection.Uncertain, $"query_budget:sample={sample}");
+                if (!sampledSupport)
+                    return WalkingResult(CompanionWalkingConnection.Uncertain, $"sample_support_missing:sample={sample}");
+
+                var walkingDelta = supported - previous;
+                var vertical = walkingDelta.y;
+                walkingDelta.y = 0f;
+                var predictedClimb = (
+                    -(previousNormal.x * walkingDelta.x + previousNormal.z * walkingDelta.z) /
+                    Mathf.Max(0.1f, previousNormal.y) +
+                    -(normal.x * walkingDelta.x + normal.z * walkingDelta.z) /
+                    Mathf.Max(0.1f, normal.y)) * 0.5f;
+                var discontinuity = Mathf.Abs(vertical - predictedClimb);
+                if (discontinuity > WalkingHeightTolerance + HeightComparisonEpsilon)
+                    return WalkingResult(CompanionWalkingConnection.Uncertain,
+                        $"abrupt_step:sample={sample}:height={vertical:F3}:error={discontinuity:F3}");
+                if (!IsSegmentClear(previous, supported))
+                    return WalkingResult(CompanionWalkingConnection.Obstructed, $"collision:sample={sample}");
+                if (NativeQueryCount >= _queryLimit)
+                    return WalkingResult(CompanionWalkingConnection.Uncertain, $"query_budget:sample={sample}");
+
+                previous = supported;
+                previousNormal = normal;
+            }
+
+            var endHeightDifference = Mathf.Abs(previous.y - to.y);
+            return endHeightDifference <= WalkingHeightTolerance + HeightComparisonEpsilon
+                ? WalkingResult(CompanionWalkingConnection.Walkable, "connected")
+                : WalkingResult(CompanionWalkingConnection.Uncertain, $"end_height:{endHeightDifference:F3}");
+        }
+        finally
+        {
+            _queryLimit = priorLimit;
+        }
+    }
+
+    private CompanionWalkingConnection WalkingResult(CompanionWalkingConnection result, string reason)
+    {
+        LastWalkingConnectionReason = reason;
+        return result;
     }
 
     internal bool IsSegmentClear(Vector3 from, Vector3 to)
@@ -144,7 +259,7 @@ internal sealed class CompanionNavigationGeometry
         var closest = distance;
         var ignoredSupport = 0;
         var count = 0;
-        if (bodyCollider != null && _hits != null)
+        if (bodyCollider != null && _hits != null && NativeQueryCount < _queryLimit)
         {
             NativeQueryCount++;
             count = PlayerGround.ColliderCastNonAlloc(
@@ -232,6 +347,8 @@ internal sealed class CompanionNavigationGeometry
         for (var attempt = 0; attempt < RayContinuationLimit && travelled < distance; attempt++)
         {
             RaycastHit hit;
+            if (NativeQueryCount >= _queryLimit)
+                return false;
             NativeQueryCount++;
             if (!Physics.Raycast(
                     origin + direction * travelled,

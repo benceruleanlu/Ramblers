@@ -117,14 +117,28 @@ namespace Ramblers
         internal PlayerNetworking Networking => Character.playerNetworking;
         internal static Vector3 HeadPositionOf(PlayerCharacter player) => player.transform.position + Vector3.up;
     }
+    internal enum CompanionWalkingConnection { Walkable, Uncertain, Obstructed }
     internal sealed class CompanionNavigationGeometry
     {
+        internal string LastWalkingConnectionReason => "probe";
         internal Func<Vector3, Vector3, bool> Clear = (from, to) => true;
+        internal Func<Vector3, Vector3, CompanionWalkingConnection> Walking =
+            (from, to) => CompanionWalkingConnection.Walkable;
+        internal Func<Vector3, Vector3?> Support = candidate => new Vector3(candidate.x, 0, candidate.z);
         internal int NativeQueryCount;
         internal bool TryGroundPoint(Vector3 candidate, out Vector3 grounded)
-        { NativeQueryCount++; grounded = candidate; return false; }
+        {
+            NativeQueryCount++;
+            var supported = Support(candidate);
+            grounded = supported ?? candidate;
+            return supported.HasValue;
+        }
         internal bool IsSegmentClear(Vector3 from, Vector3 to)
         { NativeQueryCount++; return Clear(from, to); }
+        internal CompanionWalkingConnection ProbeWalkingConnection(Vector3 from, Vector3 to)
+        { NativeQueryCount++; return Walking(from, to); }
+        internal bool CanWalkSegment(Vector3 from, Vector3 to) =>
+            ProbeWalkingConnection(from, to) == CompanionWalkingConnection.Walkable;
     }
     internal sealed class CompanionLocomotion
     {
@@ -188,7 +202,12 @@ namespace Ramblers
         {
             var failures = 0;
             Run("default following and explicit stay", DefaultFollowAndStay, ref failures);
-            Run("level jump recorder to replay", LevelJumpPipeline, ref failures);
+            Run("walkable level jump is not mirrored", LevelJumpPipeline, ref failures);
+            Run("real gap retains useful jump hint", RealGapJumpPipeline, ref failures);
+            Run("short wall uses walking detour", ShortWallUsesWalkingDetour, ref failures);
+            Run("fun jumps and zigzag do not drag follower backward", FunJumpsAndZigzagFollowCurrentHuman, ref failures);
+            Run("airborne human projects to walking ground", AirborneHumanKeepsHorizontalChase, ref failures);
+            Run("grounded drop eighty does not replay", GroundedDropEightyContinuesForward, ref failures);
             Run("vertical jump does not vanish at landing", VerticalJumpPipeline, ref failures);
             Run("grounded launch retries remain paced", FailedLaunchPacing, ref failures);
             Run("carry and action ownership", CarryAndSuspensionStopMovement, ref failures);
@@ -200,7 +219,7 @@ namespace Ramblers
                 Console.Error.WriteLine("Companion follow integration: " + failures + " checks failed.");
                 return 1;
             }
-            Console.WriteLine("Companion follow integration: 8 behavioral checks passed.");
+            Console.WriteLine("Companion follow integration: 13 behavioral checks passed.");
             return 0;
         }
 
@@ -224,13 +243,24 @@ namespace Ramblers
 
         private static void LevelJumpPipeline()
         {
+            var world = RecordedJump(Point(3), walkingPossible: true);
+            world.Body.Character.transform.position = Point(0);
+            world.Tick(0.7f);
+            Expect(world.Jump.RequestTimes.Count == 0 && world.Motion.TraversalCalls == 0,
+                "follower copied a human jump despite confirmed walking ground");
+            Expect(world.Motion.LastMovementIntent.x > 0.9f,
+                "follower did not walk toward the human's current position");
+        }
+
+        private static void RealGapJumpPipeline()
+        {
             var world = RecordedJump(new Vector3(3, 0, 0));
             var landing = FindTraversal(world);
             Expect(landing.RequiresJump && landing.HasTakeoff && landing.TakeoffPosition.x == 0,
                 "recorded level jump lost its native takeoff");
             world.Body.Character.transform.position = Point(0);
             world.Tick(0.7f);
-            Expect(world.Jump.RequestTimes.Count == 1 && world.Jump.Reasons[0] == "recorded_human_jump",
+            Expect(world.Jump.RequestTimes.Count == 1,
                 "follower did not request the recorded jump at takeoff");
             Expect(world.Motion.TraversalCalls > 0 && world.Motion.LastMovementIntent.x > 0.9f,
                 "follower did not commit motion toward the recorded landing");
@@ -256,6 +286,125 @@ namespace Ramblers
                 "confirmed grounded landing never released the traversal breadcrumb");
             Expect(world.Jump.RequestTimes.Count == 1 && world.Motion.LastMovementIntent.x > 0.9f,
                 "landing replayed a completed jump or stopped following the next route");
+        }
+
+        private static void FunJumpsAndZigzagFollowCurrentHuman()
+        {
+            var world = RecordedJump(new Vector3(3, 0, 3), walkingPossible: true);
+            world.Human.transform.position = new Vector3(5, 0, -3);
+            world.Follow.TickFrame(0.8f);
+            world.Human.jumper.justJumped = true;
+            world.Human.ground.isGrounded = false;
+            world.Human.rb.linearVelocity = new Vector3(0, 4, 0);
+            world.Human.transform.position = new Vector3(5.5f, 0.7f, -2);
+            world.Follow.TickFrame(0.9f);
+            world.Human.jumper.justJumped = false;
+            world.Human.transform.position = new Vector3(6.5f, 1, -1);
+            world.Follow.TickFrame(1.1f);
+            world.Human.transform.position = Point(8);
+            world.Human.ground.isGrounded = true;
+            world.Follow.TickFrame(1.4f);
+            world.Body.Character.transform.position = Point(0);
+            for (var tick = 0; tick < 15; tick++)
+            {
+                world.Tick(1.5f + tick * 0.1f);
+                var direction = world.Motion.LastMovementIntent;
+                Expect(direction.x > 0.9f && Math.Abs(direction.z) < 0.01f,
+                    "walkable follower chased a past zigzag or jump takeoff instead of the current human");
+                world.Body.Character.transform.position += direction * 0.2f;
+            }
+            Expect(world.Jump.RequestTimes.Count == 0 && world.Motion.TraversalCalls == 0,
+                "repeated playful human jumps became compulsory follower actions");
+        }
+
+        private static void ShortWallUsesWalkingDetour()
+        {
+            var world = RecordedJump(Point(3));
+            world.Motion.Geometry.Clear = (from, to) =>
+            {
+                var steps = Math.Max(1, (int)Math.Ceiling(Vector3.Distance(from, to) / 0.025f));
+                for (var sample = 0; sample <= steps; sample++)
+                {
+                    var point = from + (to - from) * ((float)sample / steps);
+                    if (point.x >= 1 && point.x <= 2 && point.z >= -0.5f && point.z <= 0.5f)
+                        return false;
+                }
+                return true;
+            };
+            world.Motion.Geometry.Walking = (from, to) => world.Motion.Geometry.Clear(from, to)
+                ? CompanionWalkingConnection.Walkable : CompanionWalkingConnection.Obstructed;
+            world.Body.Character.transform.position = Point(0);
+            world.Tick(0.7f);
+            Expect(world.Jump.RequestTimes.Count == 0 && Math.Abs(world.Motion.LastMovementIntent.z) > 0.1f,
+                "follower copied a short-wall jump before considering the available walking detour");
+            for (var tick = 1; tick < 70; tick++)
+            {
+                if (tick == 4) world.Human.transform.position = Point(6);
+                world.Tick(0.7f + tick * 0.1f);
+                var next = world.Body.Position + world.Motion.LastMovementIntent * 0.2f;
+                Expect(world.Motion.Geometry.Clear(world.Body.Position, next),
+                    "walking detour commanded movement through the short wall");
+                world.Body.Character.transform.position = next;
+            }
+            Expect(world.Body.Position.x > 2f && world.Follow.StateLabel == "holding",
+                "walking detour failed to pass the wall and settle near the human");
+            Expect(world.Jump.RequestTimes.Count == 0 && world.Motion.TraversalCalls == 0,
+                "following the detour later reinstated the discarded jump");
+        }
+
+        private static void AirborneHumanKeepsHorizontalChase()
+        {
+            var world = new World(Point(0), Point(-1));
+            world.Follow.TickFrame(0);
+            world.Human.jumper.justJumped = true;
+            world.Human.ground.isGrounded = false;
+            world.Human.rb.linearVelocity = new Vector3(0, 4, 0);
+            world.Human.transform.position = new Vector3(1.4f, 0.7f, 0);
+            world.Follow.TickFrame(0.1f);
+            world.Human.jumper.justJumped = false;
+            world.Human.transform.position = new Vector3(2.4f, 1, 0);
+            world.Tick(0.4f);
+            Expect(world.Motion.LastMovementIntent.x > 0.9f && world.Follow.StateLabel == "following",
+                "human airborne motion froze following at the historical takeoff");
+            Expect(world.Jump.RequestTimes.Count == 0, "projected ground chase copied the airborne human");
+        }
+
+        private static void GroundedDropEightyContinuesForward()
+        {
+            var takeoff = new Vector3(-215.21f, 33.35f, -508.62f);
+            var landing = new Vector3(-214.83f, 32.68f, -508.93f);
+            var world = new World(takeoff, takeoff);
+            world.Motion.Geometry.Walking = (from, to) => CompanionWalkingConnection.Uncertain;
+            world.Motion.Geometry.Support = candidate => candidate;
+            world.Follow.TickFrame(0);
+            world.Human.ground.isGrounded = false;
+            world.Human.rb.linearVelocity = new Vector3(0, -4, 0);
+            world.Human.transform.position = new Vector3(-215.02f, 33.02f, -508.78f);
+            world.Follow.TickFrame(0.05f);
+            world.Human.transform.position = landing;
+            world.Human.ground.isGrounded = true;
+            world.Follow.TickFrame(0.14f);
+            world.Human.transform.position = new Vector3(-211.5f, 33.01f, -510.5f);
+            world.Follow.TickFrame(0.3f);
+            world.Tick(0.4f);
+            world.Body.Character.transform.position = new Vector3(-214.94f, 32.54f, -508.88f);
+            world.Tick(0.6f);
+            world.Body.Character.transform.position = new Vector3(-214.44f, 32.84f, -509.25f);
+            for (var tick = 0; tick < 30; tick++)
+            {
+                world.Tick(0.8f + tick * 0.1f);
+                var direction = world.Motion.LastMovementIntent;
+                if (direction.sqrMagnitude > 0.001f)
+                {
+                    var toHuman = (world.Human.transform.position - world.Body.Position).normalized;
+                    Expect(Vector3.Dot(direction, toHuman) > 0,
+                        "grounded descent reversed toward obsolete drop takeoff");
+                    world.Body.Character.transform.position += direction * 0.2f;
+                }
+            }
+            Expect(world.Jump.RequestTimes.Count == 0 && world.Motion.TraversalCalls == 0,
+                "ordinary grounded descent entered compulsory airborne replay");
+            Expect(world.Follow.StateLabel == "holding", "grounded drop failed to settle beside the human");
         }
 
         private static void VerticalJumpPipeline()
@@ -357,6 +506,8 @@ namespace Ramblers
             var world = new World(Point(0), Point(0));
             world.Motion.Geometry.Clear = (from, to) =>
                 (from.x < 0.25f && to.x < 0.25f) || (from.x > 0.25f && to.x > 0.25f);
+            world.Motion.Geometry.Walking = (from, to) => world.Motion.Geometry.Clear(from, to)
+                ? CompanionWalkingConnection.Walkable : CompanionWalkingConnection.Obstructed;
             world.Follow.TickFrame(0);
             world.Human.transform.position = new Vector3(0, 0, 1);
             world.Follow.TickFrame(0.1f);
@@ -372,9 +523,14 @@ namespace Ramblers
                 "crossing a breadcrumb's arrival plane through a wall erased the required route");
         }
 
-        private static World RecordedJump(Vector3 landing)
+        private static World RecordedJump(Vector3 landing, bool walkingPossible = false)
         {
             var world = new World(Point(0), Point(-3));
+            if (!walkingPossible)
+            {
+                world.Motion.Geometry.Walking = (from, to) => CompanionWalkingConnection.Uncertain;
+                world.Motion.Geometry.Support = candidate => candidate;
+            }
             world.Follow.TickFrame(0);
             world.Human.jumper.justJumped = true;
             world.Human.ground.isGrounded = false;

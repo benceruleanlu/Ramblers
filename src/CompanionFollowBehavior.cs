@@ -66,6 +66,14 @@ internal sealed class CompanionFollowBehavior
     private Vector3 _lastRouteDirection;
     private string _lastRouteMode = "waypoint";
     private float _lastTargetHorizontalDistance;
+    private bool _hasWalkingConnection;
+    private CompanionWalkingConnection _walkingConnection;
+    private Vector3 _walkingConnectionFrom;
+    private Vector3 _walkingConnectionTo;
+    private float _nextWalkingConnectionCheck;
+    private bool _chasingHuman;
+    private float _nextWalkingDetourAttempt;
+    private string _walkingConnectionReason;
 
     internal CompanionFollowBehavior(
         CompanionLocomotion locomotion,
@@ -361,7 +369,7 @@ internal sealed class CompanionFollowBehavior
             $"posture={CompanionPostureActuator.Describe(_locomotion.Posture)}, " +
             $"runStartDistance={CompanionLocomotion.RunStartDistance:F2}, recordedTraversalPace=true, " +
             $"bodyTurnSpeed={CompanionFacing.BodyTurnSpeed:F0}, lookLimitsFromTunings=true, " +
-            "verticalAwareTrail=true, jumpReplay=takeoff_and_landing, dropReplay=true, " +
+            "followTarget=current_human, trailRole=route_memory, jumpPolicy=terrain_needed, " +
             "localRouteSearch=true, failedDirectionMemory=true, carryRebase=true, " +
             "allHitCollisionQueries=true, footprintSupport=true, " +
             $"navigationHz={1f / NavigationInterval:F0}, obstacleMask={obstacleMask}, " +
@@ -380,8 +388,7 @@ internal sealed class CompanionFollowBehavior
 
         var position = _body.Position;
         var humanPosition = human.transform.position;
-        var routeEndpoint = _humanJumpInProgress
-            ? _humanJumpTakeoffPosition : humanPosition;
+        var routeEndpoint = ResolveHumanFollowPosition(human);
         var humanDistance = Vector3.Distance(position, humanPosition);
         _attention.SetTarget(GazeChannel.Follow, CompanionBody.HeadPositionOf(human));
         _lastTrailDistance = _trail.MeasureDistance(position, routeEndpoint);
@@ -391,6 +398,38 @@ internal sealed class CompanionFollowBehavior
             LogFollowStatusIfDue(now, humanDistance, Vector3.Distance(position, _currentTarget));
             return;
         }
+
+        var walkingConnection = ProbeHumanConnection(position, routeEndpoint, now);
+        if (walkingConnection == CompanionWalkingConnection.Walkable)
+        {
+            var discarded = _trail.Count;
+            _trail.Clear();
+            _trail.Add(routeEndpoint, false, false);
+            _replay.Reset();
+            _jumpCommittedSequence = 0;
+            _dropCommittedSequence = 0;
+            _lastTrailDistance = BreadcrumbTrail.HorizontalDistance(position, routeEndpoint);
+            _currentBreadcrumbSequence = 0;
+            _currentTarget = routeEndpoint;
+            if (!_chasingHuman && Plugin.FollowDiagnosticsEnabled)
+            {
+                Plugin.Logger.LogInfo("[FOLLOW] DIRECT_HUMAN " +
+                    $"discardedRoutePoints={discarded}, target={routeEndpoint}.");
+            }
+            _chasingHuman = true;
+            var directHoldDistance = _state == FollowState.Holding ? ResumeDistance : FollowDistance;
+            if (_lastTrailDistance <= directHoldDistance)
+            {
+                _lastRouteMode = "human:holding";
+                _lastTargetHorizontalDistance = _lastTrailDistance;
+                StopForState(FollowState.Holding, now);
+                LogFollowStatusIfDue(now, humanDistance, _lastTrailDistance);
+                return;
+            }
+            MoveToward(routeEndpoint, 0, humanDistance, now, "human");
+            return;
+        }
+        _chasingHuman = false;
 
         var holdDistance = _state == FollowState.Holding ? ResumeDistance : FollowDistance;
         if (_lastTrailDistance <= holdDistance &&
@@ -433,6 +472,16 @@ internal sealed class CompanionFollowBehavior
         }
         _currentBreadcrumbSequence = breadcrumb.Sequence;
         _currentTarget = breadcrumb.Position;
+        if (breadcrumb.RequiresJump && breadcrumb.HasTakeoff &&
+            (_locomotion.Geometry.CanWalkSegment(breadcrumb.TakeoffPosition, breadcrumb.Position) ||
+             TryWalkingDetour(breadcrumb, now)))
+        {
+            _trail.MakeFirstWalkable();
+            _replay.Reset();
+            breadcrumb = _trail.Peek();
+            Plugin.Logger.LogInfo("[FOLLOW] TRAVERSAL_HINT_SKIPPED " +
+                $"reason=walkable_connection, breadcrumb={breadcrumb.Sequence}.");
+        }
         if ((breadcrumb.RequiresJump || breadcrumb.RequiresDrop) &&
             TryReplayTraversal(breadcrumb, now))
         {
@@ -442,16 +491,83 @@ internal sealed class CompanionFollowBehavior
 
         var destination = breadcrumb.RequiresJump || breadcrumb.RequiresDrop
             ? _replay.ApproachPosition : breadcrumb.Position;
+        MoveToward(destination, breadcrumb.Sequence, humanDistance, now, "route_memory");
+    }
+
+    private Vector3 ResolveHumanFollowPosition(PlayerCharacter human)
+    {
+        var position = human.transform.position;
+        if (human.ground != null && human.ground.isGrounded)
+            return position;
+        if (_locomotion.Geometry.TryGroundPoint(position, out var supported))
+            return supported;
+        if (_humanJumpInProgress)
+            position.y = _humanJumpTakeoffPosition.y;
+        return position;
+    }
+
+    private CompanionWalkingConnection ProbeHumanConnection(Vector3 from, Vector3 to, float now)
+    {
+        if (!_hasWalkingConnection || now >= _nextWalkingConnectionCheck ||
+            Vector3.Distance(from, _walkingConnectionFrom) > 0.75f ||
+            Vector3.Distance(to, _walkingConnectionTo) > 0.75f)
+        {
+            var previous = _walkingConnection;
+            var previousReason = _walkingConnectionReason;
+            var queriesBefore = _locomotion.Geometry.NativeQueryCount;
+            _walkingConnection = _locomotion.Geometry.ProbeWalkingConnection(from, to);
+            _walkingConnectionReason = _locomotion.Geometry.LastWalkingConnectionReason;
+            if (Plugin.FollowDiagnosticsEnabled &&
+                (!_hasWalkingConnection || previous != _walkingConnection ||
+                 previousReason != _walkingConnectionReason))
+            {
+                Plugin.Logger.LogInfo("[FOLLOW] WALKING_CONNECTION " +
+                    $"result={_walkingConnection}, reason={_walkingConnectionReason}, " +
+                    $"from={from}, to={to}, " +
+                    $"nativeQueries={_locomotion.Geometry.NativeQueryCount - queriesBefore}.");
+            }
+            _walkingConnectionFrom = from;
+            _walkingConnectionTo = to;
+            _nextWalkingConnectionCheck = now + 0.25f;
+            _hasWalkingConnection = true;
+        }
+        return _walkingConnection;
+    }
+
+    private bool TryWalkingDetour(BreadcrumbPoint point, float now)
+    {
+        if (now < _nextWalkingDetourAttempt)
+            return false;
+        _nextWalkingDetourAttempt = now + 1f;
+        var queriesBefore = _locomotion.Geometry.NativeQueryCount;
+        var found = _navigation.TryWalkingDetour(_body.Position, point.Position, point.Sequence, now,
+            candidate => _locomotion.Geometry.NativeQueryCount - queriesBefore < 768 &&
+                         _locomotion.Geometry.TryGroundPoint(candidate, out var grounded)
+                ? (Vector3?)grounded : null,
+            (from, to) => _locomotion.Geometry.NativeQueryCount - queriesBefore < 768 &&
+                          _locomotion.Geometry.CanWalkSegment(from, to));
+        if (Plugin.FollowDiagnosticsEnabled)
+        {
+            Plugin.Logger.LogInfo("[FOLLOW] WALKING_DETOUR " +
+                $"found={found}, breadcrumb={point.Sequence}, plan={_navigation.PlanStatus}, " +
+                $"nativeQueries={_locomotion.Geometry.NativeQueryCount - queriesBefore}.");
+        }
+        return found;
+    }
+
+    private void MoveToward(Vector3 destination, int sequence, float humanDistance, float now, string source)
+    {
+        var position = _body.Position;
         _lastTargetHorizontalDistance = BreadcrumbTrail.HorizontalDistance(position, destination);
         var previousPlan = _navigation.PlanCount;
         var queriesBefore = _locomotion.Geometry.NativeQueryCount;
         var navigationStarted = System.Diagnostics.Stopwatch.GetTimestamp();
-        var step = _navigation.Tick(position, destination, breadcrumb.Sequence, IsBodyGrounded, now);
+        var step = _navigation.Tick(position, destination, sequence, IsBodyGrounded, now);
         var navigationMilliseconds = (System.Diagnostics.Stopwatch.GetTimestamp() - navigationStarted) *
                                      1000.0 / System.Diagnostics.Stopwatch.Frequency;
         var nativeQueries = _locomotion.Geometry.NativeQueryCount - queriesBefore;
         _lastRouteDirection = step.Direction;
-        _lastRouteMode = step.Mode;
+        _lastRouteMode = source + ":" + step.Mode;
         _locomotion.MoveAlongRoute(step.Direction, _lastTrailDistance, now);
         _state = FollowState.Following;
         if (step.RequestJump)
@@ -459,7 +575,7 @@ internal sealed class CompanionFollowBehavior
         if ((Plugin.FollowDiagnosticsEnabled && previousPlan != _navigation.PlanCount) || step.Stalled)
         {
             Plugin.Logger.LogInfo("[FOLLOW] NAVIGATION " +
-                $"mode={step.Mode}, stalled={step.Stalled}, target={destination}, " +
+                $"source={source}, mode={step.Mode}, stalled={step.Stalled}, target={destination}, " +
                 $"plan={_navigation.PlanStatus}, nodes={_navigation.ExpandedNodes}, " +
                 $"queries={_navigation.QueryCount}, remaining={_navigation.WaypointsRemaining}, " +
                 $"nativeQueries={nativeQueries}, navigationMs={navigationMilliseconds:F2}, " +
@@ -472,7 +588,7 @@ internal sealed class CompanionFollowBehavior
     {
         var wasActive = _replay.Active;
         var committed = _replay.Tick(point, _body.Position, IsBodyGrounded, now,
-            () => RequestTraversalJump(now, "recorded_human_jump"), out var direction);
+            () => RequestTraversalJump(now, "terrain_traversal"), out var direction);
         _jumpCommittedSequence = _replay.JumpCommittedSequence;
         _dropCommittedSequence = _replay.DropCommittedSequence;
         if (!committed)
@@ -533,6 +649,19 @@ internal sealed class CompanionFollowBehavior
         _humanJumpTakeoffPosition = _traversalRecorder.TakeoffPosition;
         if (!completed)
             return;
+        var walkable = !traversal.RequiresJump ||
+                       _locomotion.Geometry.CanWalkSegment(traversal.Takeoff, traversal.Landing);
+        if (walkable)
+        {
+            _trail.Add(traversal.Landing, false, false);
+            if (Plugin.FollowDiagnosticsEnabled)
+            {
+                Plugin.Logger.LogInfo("[FOLLOW] TRAVERSAL_HINT_SKIPPED " +
+                    $"reason={(traversal.RequiresJump ? "walkable_connection" : "ordinary_descent")}, " +
+                    $"takeoff={traversal.Takeoff}, landing={traversal.Landing}.");
+            }
+            return;
+        }
         var landing = _trail.AddTraversal(traversal.Takeoff, traversal.Landing,
             traversal.RequiresJump, traversal.RequiresDrop, traversal.Duration);
         Plugin.Logger.LogInfo("[FOLLOW] TRAIL_TRAVERSAL " +
@@ -555,6 +684,10 @@ internal sealed class CompanionFollowBehavior
         _lastRouteDirection = Vector3.zero;
         _lastRouteMode = "waypoint";
         _lastTargetHorizontalDistance = 0f;
+        _hasWalkingConnection = false;
+        _chasingHuman = false;
+        _nextWalkingDetourAttempt = 0f;
+        _walkingConnectionReason = null;
     }
 
     private void RecordHumanTrail()
@@ -763,6 +896,7 @@ internal sealed class CompanionFollowBehavior
             $"headState={_attention.HeadState}, breadcrumbs={_trail.Count}, " +
             $"breadcrumb={_currentBreadcrumbSequence}, " +
             $"routeMode={_lastRouteMode}, " +
+            $"walkingConnection={_walkingConnection}, " +
             $"jumpTarget={_jumpCommittedSequence}, " +
             $"dropTarget={_dropCommittedSequence}, carried={_bodyIsCarried}, " +
             $"humanJumpInProgress={_humanJumpInProgress}, " +
